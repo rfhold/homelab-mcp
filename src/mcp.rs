@@ -144,7 +144,7 @@ fn tool_error(error: GrafanaError) -> McpToolResult {
 
 #[cfg(test)]
 mod tests {
-    use axum::{Json, Router, routing::post};
+    use axum::{Json, Router, routing::get};
     use mcp::{
         protocol::MCP_PROTOCOL_VERSION,
         server::{
@@ -170,7 +170,7 @@ mod tests {
     async fn test_handler() -> (Arc<HomelabMcp>, JoinHandle<()>) {
         let grafana = Router::new().route(
             "/api/datasources/proxy/uid/loki/loki/api/v1/query",
-            post(|| async {
+            get(|| async {
                 Json(json!({
                     "status":"success",
                     "data":{"resultType":"vector","result":[{"metric":{"job":"test"},"value":[1786276800,"2"]}]}

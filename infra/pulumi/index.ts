@@ -480,6 +480,23 @@ new k8s.networking.v1.NetworkPolicy("homelab-mcp-egress", {
       {
         to: [
           {
+            namespaceSelector: {
+              matchLabels: { "kubernetes.io/metadata.name": "ingress" },
+            },
+            podSelector: {
+              matchLabels: {
+                "app.kubernetes.io/name": "traefik",
+                "app.kubernetes.io/instance":
+                  "cluster-ingress-ingress-chart-ingress",
+              },
+            },
+          },
+        ],
+        ports: [{ port: 8443, protocol: "TCP" }],
+      },
+      {
+        to: [
+          {
             podSelector: {
               matchLabels: { "cnpg.io/cluster": "homelab-mcp-postgres" },
             },

@@ -361,7 +361,7 @@ describe("standalone resource topology", () => {
     });
   });
 
-  test("allows patterned DNS, HTTPS, telemetry, and PostgreSQL egress", () => {
+  test("allows patterned DNS, HTTPS, telemetry, Traefik, and PostgreSQL egress", () => {
     const policy = resource(
       "kubernetes:networking.k8s.io/v1:NetworkPolicy",
       "homelab-mcp-egress",
@@ -379,6 +379,28 @@ describe("standalone resource topology", () => {
         { port: 4040, protocol: "TCP" },
         { port: 4318, protocol: "TCP" },
       ],
+    );
+    assert.deepEqual(
+      spec.egress.find((rule: any) =>
+        rule.ports?.some((port: any) => port.port === 8443),
+      ),
+      {
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: { "kubernetes.io/metadata.name": "ingress" },
+            },
+            podSelector: {
+              matchLabels: {
+                "app.kubernetes.io/name": "traefik",
+                "app.kubernetes.io/instance":
+                  "cluster-ingress-ingress-chart-ingress",
+              },
+            },
+          },
+        ],
+        ports: [{ port: 8443, protocol: "TCP" }],
+      },
     );
     assert.ok(
       spec.egress.some((rule: any) =>

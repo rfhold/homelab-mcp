@@ -67,31 +67,32 @@ impl GrafanaClient {
                 Mode::Instant => "/api/datasources/proxy/uid/loki/loki/api/v1/query",
                 Mode::Range => "/api/datasources/proxy/uid/loki/loki/api/v1/query_range",
             };
-            let url = self
+            let mut url = self
                 .origin
                 .join(path)
                 .map_err(|_| Error::UpstreamUnavailable)?;
-            let mut form = vec![
+            let mut parameters = vec![
                 ("query", query.query.clone()),
                 ("limit", query.limit.to_string()),
             ];
             if let Some(time) = query.time {
-                form.push(("time", timestamp_parameter(time)));
+                parameters.push(("time", timestamp_parameter(time)));
             }
             if let (Some(start), Some(end), Some(direction)) =
                 (query.start, query.end, query.direction)
             {
-                form.extend([
+                parameters.extend([
                     ("start", timestamp_parameter(start)),
                     ("end", timestamp_parameter(end)),
                     ("direction", direction.as_str().to_owned()),
                 ]);
             }
+            url.query_pairs_mut()
+                .extend_pairs(parameters.iter().map(|(key, value)| (*key, value)));
             let response = self
                 .client
-                .post(url)
+                .get(url)
                 .bearer_auth(self.token.expose())
-                .form(&form)
                 .send()
                 .await
                 .map_err(|_| Error::UpstreamUnavailable)?;
@@ -333,11 +334,11 @@ mod tests {
     };
 
     use axum::{
-        Form, Json, Router,
-        extract::{OriginalUri, State},
+        Json, Router,
+        extract::{OriginalUri, Query as QueryParameters, State},
         http::{HeaderMap, StatusCode},
         response::Redirect,
-        routing::post,
+        routing::get,
     };
     use tokio::{net::TcpListener, task::JoinHandle};
 
@@ -349,14 +350,14 @@ mod tests {
     struct RequestRecord {
         path: String,
         authorization: String,
-        form: HashMap<String, String>,
+        parameters: HashMap<String, String>,
     }
 
     async fn record_request(
         State(record): State<Arc<Mutex<RequestRecord>>>,
         OriginalUri(uri): OriginalUri,
         headers: HeaderMap,
-        Form(form): Form<HashMap<String, String>>,
+        QueryParameters(parameters): QueryParameters<HashMap<String, String>>,
     ) -> Json<Value> {
         *record.lock().unwrap() = RequestRecord {
             path: uri.path().to_owned(),
@@ -365,7 +366,7 @@ mod tests {
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default()
                 .to_owned(),
-            form,
+            parameters,
         };
         Json(json!({"status":"success","data":{"resultType":"scalar","result":[1786276800,"1"]}}))
     }
@@ -472,12 +473,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sends_only_bearer_auth_and_expected_instant_form() {
+    async fn sends_only_bearer_auth_and_expected_instant_query_parameters() {
         let record = Arc::new(Mutex::new(RequestRecord::default()));
         let router = Router::new()
             .route(
                 "/api/datasources/proxy/uid/loki/loki/api/v1/query",
-                post(record_request),
+                get(record_request),
             )
             .with_state(Arc::clone(&record));
         let (origin, task) = serve(router).await;
@@ -490,10 +491,15 @@ mod tests {
             "/api/datasources/proxy/uid/loki/loki/api/v1/query"
         );
         assert_eq!(record.authorization, "Bearer grafana-secret");
-        assert_eq!(record.form["query"], "{job=\"test\"}");
-        assert_eq!(record.form["limit"], "12");
-        assert_eq!(record.form["time"], "2026-08-09T12:00:00.000000000Z");
-        assert!(!record.form.values().any(|value| value == "grafana-secret"));
+        assert_eq!(record.parameters["query"], "{job=\"test\"}");
+        assert_eq!(record.parameters["limit"], "12");
+        assert_eq!(record.parameters["time"], "2026-08-09T12:00:00.000000000Z");
+        assert!(
+            !record
+                .parameters
+                .values()
+                .any(|value| value == "grafana-secret")
+        );
         task.abort();
     }
 
@@ -503,7 +509,7 @@ mod tests {
         let router = Router::new()
             .route(
                 "/api/datasources/proxy/uid/loki/loki/api/v1/query_range",
-                post(record_request),
+                get(record_request),
             )
             .with_state(Arc::clone(&record));
         let (origin, task) = serve(router).await;
@@ -525,10 +531,10 @@ mod tests {
             record.path,
             "/api/datasources/proxy/uid/loki/loki/api/v1/query_range"
         );
-        assert_eq!(record.form["start"], "2026-08-09T10:00:00.000000000Z");
-        assert_eq!(record.form["end"], "2026-08-09T11:00:00.000000000Z");
-        assert_eq!(record.form["direction"], "forward");
-        assert!(!record.form.contains_key("time"));
+        assert_eq!(record.parameters["start"], "2026-08-09T10:00:00.000000000Z");
+        assert_eq!(record.parameters["end"], "2026-08-09T11:00:00.000000000Z");
+        assert_eq!(record.parameters["direction"], "forward");
+        assert!(!record.parameters.contains_key("time"));
         task.abort();
     }
 
@@ -539,11 +545,11 @@ mod tests {
         let router = Router::new()
             .route(
                 "/api/datasources/proxy/uid/loki/loki/api/v1/query",
-                post(|| async { Redirect::temporary("/target") }),
+                get(|| async { Redirect::temporary("/target") }),
             )
             .route(
                 "/target",
-                post(move || {
+                get(move || {
                     let target_probe = Arc::clone(&target_probe);
                     async move {
                         target_probe.store(true, Ordering::SeqCst);
@@ -573,7 +579,7 @@ mod tests {
         ] {
             let router = Router::new().route(
                 "/api/datasources/proxy/uid/loki/loki/api/v1/query",
-                post(move || async move { (status, "unsafe upstream detail") }),
+                get(move || async move { (status, "unsafe upstream detail") }),
             );
             let (origin, task) = serve(router).await;
             let client = GrafanaClient::for_test(origin, TIMEOUT);
@@ -586,7 +592,7 @@ mod tests {
     async fn bounds_timeout_and_capacity() {
         let slow = Router::new().route(
             "/api/datasources/proxy/uid/loki/loki/api/v1/query",
-            post(|| async {
+            get(|| async {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 Json(json!({}))
             }),
@@ -612,7 +618,7 @@ mod tests {
         let started_probe = Arc::clone(&started);
         let slow = Router::new().route(
             "/api/datasources/proxy/uid/loki/loki/api/v1/query",
-            post(move || {
+            get(move || {
                 let started_probe = Arc::clone(&started_probe);
                 async move {
                     started_probe.notify_one();
