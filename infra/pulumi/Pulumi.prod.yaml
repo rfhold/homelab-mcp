@@ -1,0 +1,21 @@
+config:
+  kubernetes:context: pantheon
+  homelab-mcp:namespace: homelab-mcp
+  homelab-mcp:hostname: homelab-mcp.holdenitdown.net
+  homelab-mcp:displayName: Homelab MCP
+  homelab-mcp:slug: homelab-mcp
+  homelab-mcp:authentikBaseUrl: https://auth.holdenitdown.net
+  homelab-mcp:protectData: "true"
+  homelab-mcp:storageClass: shared-fs
+  homelab-mcp:databaseStorageSize: 20Gi
+  homelab-mcp:backupStorageClass: default-bucket
+  homelab-mcp:backupEndpoint: https://s3.pantheon.holdenitdown.net
+  homelab-mcp:backupRetention: 30d
+  homelab-mcp:backupSchedule: 0 0 2 * * *
+  homelab-mcp:mcpOAuthAccessTokenTtl: "300"
+  homelab-mcp:mcpOAuthRefreshTokenTtl: "86400"
+  homelab-mcp:mcpOAuthRefreshFamilyTtl: "2592000"
+  homelab-mcp:mcpOAuthCodeTtl: "300"
+  homelab-mcp:mcpOAuthWrappingKeyVersions: [v1]
+  homelab-mcp:mcpOAuthActiveWrappingKeyVersion: v1
+encryptionsalt: v1:fIjtsgeazsQ=:v1:LHkgKsoC2To5QJ9j:lb3s2CCIYFbNFol+BYaLzfwSHZ2s3g==

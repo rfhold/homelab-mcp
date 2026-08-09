@@ -1,0 +1,12 @@
+[package]
+name = "homelab-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+
+[dependencies]
+axum = "0.8.4"
+tokio = { version = "1.45.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+
+[dev-dependencies]
+tower = { version = "0.5.2", features = ["util"] }

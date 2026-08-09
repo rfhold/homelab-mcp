@@ -1,0 +1,6 @@
+name: homelab-mcp
+runtime:
+  name: nodejs
+  options:
+    packagemanager: bun
+description: Standalone homelab-mcp deployment on Pantheon
