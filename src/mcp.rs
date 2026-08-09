@@ -231,7 +231,7 @@ mod tests {
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
     use tokio::{net::TcpListener, task::JoinHandle};
-    use tracing_subscriber::{Layer as _, filter::filter_fn, layer::SubscriberExt as _};
+    use tracing_subscriber::{Layer as _, layer::SubscriberExt as _};
 
     use super::*;
 
@@ -334,14 +334,15 @@ mod tests {
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
-        let filter = filter_fn(crate::observability::test_trace_metadata_allowed);
+        let ignored_json_targets = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry()
             .with(SpanTargetCapture(targets.clone()))
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("homelab-mcp-test")))
             .with(
-                tracing_opentelemetry::layer()
-                    .with_tracer(provider.tracer("homelab-mcp-test"))
-                    .with_filter(filter),
-            );
+                SpanTargetCapture(ignored_json_targets)
+                    .with_filter(crate::observability::test_json_filter()),
+            )
+            .with(crate::observability::test_trace_filter());
 
         tracing::subscriber::with_default(subscriber, || {
             runtime.block_on(async {

@@ -72,13 +72,11 @@ pub fn init(
     global::set_text_map_propagator(TraceContextPropagator::new());
 
     if export_mode == OtlpExportMode::Local {
-        let filter =
-            filter_fn(|metadata| allowed_target(metadata.target())).and(configured_env_filter());
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(JsonEventFormatter)
-                    .with_filter(filter),
+                    .with_filter(json_filter()),
             )
             .try_init()?;
         tracing::info!(
@@ -116,20 +114,14 @@ pub fn init(
     global::set_tracer_provider(tracer_provider.clone());
     global::set_meter_provider(meter_provider.clone());
     let tracer = tracer_provider.tracer(SERVICE_NAME);
-    let telemetry_filter = filter_fn(trace_metadata_allowed);
-    let json_filter =
-        filter_fn(|metadata| allowed_target(metadata.target())).and(configured_env_filter());
     tracing_subscriber::registry()
-        .with(
-            tracing_opentelemetry::layer()
-                .with_tracer(tracer)
-                .with_filter(telemetry_filter),
-        )
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
         .with(
             tracing_subscriber::fmt::layer()
                 .event_format(JsonEventFormatter)
-                .with_filter(json_filter),
+                .with_filter(json_filter()),
         )
+        .with(trace_filter())
         .try_init()?;
 
     tracing::info!(
@@ -185,9 +177,34 @@ fn trace_metadata_allowed(metadata: &Metadata<'_>) -> bool {
         && matches!(*metadata.level(), Level::ERROR | Level::WARN | Level::INFO)
 }
 
+fn json_filter<S>() -> impl tracing_subscriber::layer::Filter<S>
+where
+    S: Subscriber,
+{
+    filter_fn(|metadata| allowed_target(metadata.target())).and(configured_env_filter())
+}
+
+fn trace_filter<S>() -> impl tracing_subscriber::Layer<S>
+where
+    S: Subscriber,
+{
+    filter_fn(trace_metadata_allowed)
+}
+
 #[cfg(test)]
-pub(crate) fn test_trace_metadata_allowed(metadata: &Metadata<'_>) -> bool {
-    trace_metadata_allowed(metadata)
+pub(crate) fn test_json_filter<S>() -> impl tracing_subscriber::layer::Filter<S>
+where
+    S: Subscriber,
+{
+    json_filter()
+}
+
+#[cfg(test)]
+pub(crate) fn test_trace_filter<S>() -> impl tracing_subscriber::Layer<S>
+where
+    S: Subscriber,
+{
+    trace_filter()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -386,7 +403,8 @@ mod tests {
     fn trace_filter_allows_only_approved_targets_through_info() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry()
-            .with(TargetCapture(captured.clone()).with_filter(filter_fn(trace_metadata_allowed)));
+            .with(TargetCapture(captured.clone()))
+            .with(trace_filter());
         tracing::subscriber::with_default(subscriber, || {
             tracing::error!(target: "homelab_mcp", "owned error");
             tracing::warn!(target: "homelab_mcp::app", "owned warning");
