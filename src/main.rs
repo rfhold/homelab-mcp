@@ -4,6 +4,8 @@ mod grafana;
 mod logql;
 mod mcp;
 mod oauth;
+mod observability;
+mod profiling;
 
 use std::{error::Error, sync::Arc, time::Duration};
 
@@ -19,7 +21,11 @@ const CLEANUP_BATCH_SIZE: usize = 1000;
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let telemetry_config = config::TelemetryConfig::from_env().map_err(std::io::Error::other)?;
+    let observability = observability::init(&telemetry_config)?;
+    let profiling = profiling::init(&telemetry_config)?;
+    tracing::info!(listen.address = LISTEN_ADDR, "service startup started");
     let config = config::Config::from_env().map_err(std::io::Error::other)?;
     let runtime = Arc::new(
         oauth::initialize(&config)
@@ -34,6 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mcp,
     );
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
+    tracing::info!(listen.address = LISTEN_ADDR, "service listening");
     let (shutdown, cleanup_shutdown) = watch::channel(false);
     let cleanup_runtime = runtime.clone();
     let cleanup_task = tokio::spawn(cleanup_loop(
@@ -49,11 +56,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let server_result = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
+            tracing::info!("shutdown signal received");
             signal_shutdown.send_replace(true);
         })
         .await;
     shutdown.send_replace(true);
     let _ = cleanup_task.await;
+    tracing::info!("service shutdown started");
+    profiling.shutdown();
+    tracing::info!("service shutdown complete");
+    observability.shutdown();
     server_result?;
     Ok(())
 }

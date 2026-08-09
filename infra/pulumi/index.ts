@@ -63,6 +63,7 @@ const labels = {
   "app.kubernetes.io/managed-by": "pulumi",
 };
 const workloadLabels = { ...labels, "app.kubernetes.io/component": "server" };
+const deploymentEnvironment = pulumi.getStack();
 const publicUrl = `https://${hostname}`;
 const browserCallback = `${publicUrl}/oidc/callback`;
 const mcpIssuer = `${publicUrl}/oauth`;
@@ -327,9 +328,13 @@ const appSecret = new k8s.core.v1.Secret(
       HOMELAB_MCP_OAUTH_WRAPPING_KEYS_FILE: wrappingKeyFile,
       HOMELAB_MCP_GRAFANA_URL: grafanaUrl,
       HOMELAB_MCP_GRAFANA_TOKEN: pulumi.secret(grafanaToken.key),
+      HOMELAB_MCP_DEPLOYMENT_ENVIRONMENT: deploymentEnvironment,
+      HOMELAB_MCP_SERVICE_NAMESPACE: "homelab",
+      HOMELAB_MCP_PYROSCOPE_URL: "https://telemetry.holdenitdown.net:4040",
       OTEL_EXPORTER_OTLP_ENDPOINT: "https://telemetry.holdenitdown.net:4318",
       OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
-      OTEL_RESOURCE_ATTRIBUTES: `deployment.environment.name=${pulumi.getStack()}`,
+      OTEL_SERVICE_NAME: "homelab-mcp",
+      OTEL_RESOURCE_ATTRIBUTES: `service.namespace=homelab,deployment.environment.name=${deploymentEnvironment}`,
     },
   },
   { dependsOn: [database, browserApp, grafanaToken] },
@@ -357,6 +362,10 @@ new k8s.apps.v1.Deployment(
           annotations: {
             "homelab-mcp.holdenitdown.net/wrapping-key-checksum":
               wrappingKeyChecksum,
+            "resource.opentelemetry.io/service.name": "homelab-mcp",
+            "resource.opentelemetry.io/service.namespace": "homelab",
+            "resource.opentelemetry.io/deployment.environment.name":
+              deploymentEnvironment,
           },
         },
         spec: {
@@ -379,6 +388,20 @@ new k8s.apps.v1.Deployment(
                 { name: "http", containerPort: 14333, protocol: "TCP" },
               ],
               envFrom: [{ secretRef: { name: appSecret.metadata.name } }],
+              env: [
+                {
+                  name: "HOMELAB_MCP_K8S_NAMESPACE",
+                  valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } },
+                },
+                {
+                  name: "HOMELAB_MCP_K8S_POD_NAME",
+                  valueFrom: { fieldRef: { fieldPath: "metadata.name" } },
+                },
+                {
+                  name: "HOMELAB_MCP_K8S_POD_UID",
+                  valueFrom: { fieldRef: { fieldPath: "metadata.uid" } },
+                },
+              ],
               securityContext: {
                 runAsNonRoot: true,
                 allowPrivilegeEscalation: false,

@@ -7,6 +7,29 @@ use url::Url;
 
 const PREFIX: &str = "HOMELAB_MCP_";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TelemetryConfig {
+    pub deployment_environment: String,
+    pub k8s_namespace: Option<String>,
+    pub k8s_pod_name: Option<String>,
+    pub k8s_pod_uid: Option<String>,
+    pub pyroscope_url: Option<Url>,
+}
+
+impl TelemetryConfig {
+    pub fn from_env() -> Result<Self, String> {
+        Ok(Self {
+            deployment_environment: required("DEPLOYMENT_ENVIRONMENT")?,
+            k8s_namespace: optional("K8S_NAMESPACE"),
+            k8s_pod_name: optional("K8S_POD_NAME"),
+            k8s_pod_uid: optional("K8S_POD_UID"),
+            pyroscope_url: optional("PYROSCOPE_URL")
+                .map(|value| secure_origin("PYROSCOPE_URL", &value))
+                .transpose()?,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub database_url: String,
@@ -148,6 +171,12 @@ fn required(name: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing {PREFIX}{name}"))
 }
 
+fn optional(name: &str) -> Option<String> {
+    env::var(format!("{PREFIX}{name}"))
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
 fn secret(name: &str) -> Result<Secret, String> {
     let value = required(name)?;
     if value.trim().is_empty() {
@@ -196,6 +225,46 @@ fn secure_origin(name: &str, value: &str) -> Result<Url, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_config_preserves_approved_metadata() {
+        let config = TelemetryConfig {
+            deployment_environment: "preview".to_owned(),
+            k8s_namespace: Some("observability".to_owned()),
+            k8s_pod_name: Some("homelab-mcp-abc".to_owned()),
+            k8s_pod_uid: Some("pod-uid".to_owned()),
+            pyroscope_url: None,
+        };
+
+        assert_eq!(config.deployment_environment, "preview");
+        assert_eq!(config.k8s_namespace.as_deref(), Some("observability"));
+        assert_eq!(config.k8s_pod_name.as_deref(), Some("homelab-mcp-abc"));
+        assert_eq!(config.k8s_pod_uid.as_deref(), Some("pod-uid"));
+        assert!(config.pyroscope_url.is_none());
+    }
+
+    #[test]
+    fn pyroscope_url_requires_a_credential_free_https_origin() {
+        for value in [
+            "https://pyroscope.example/",
+            "https://pyroscope.example:4040/",
+        ] {
+            assert!(secure_origin("PYROSCOPE_URL", value).is_ok());
+        }
+        for value in [
+            "http://pyroscope.example/",
+            "https://user@pyroscope.example/",
+            "https://user:password@pyroscope.example/",
+            "https://pyroscope.example/path",
+            "https://pyroscope.example/?tenant=secret",
+            "https://pyroscope.example/#fragment",
+        ] {
+            assert_eq!(
+                secure_origin("PYROSCOPE_URL", value).unwrap_err(),
+                "invalid HOMELAB_MCP_PYROSCOPE_URL"
+            );
+        }
+    }
 
     #[test]
     fn keyring_parser_accepts_exact_format() {

@@ -274,11 +274,30 @@ describe("standalone resource topology", () => {
     );
     assert.equal(app.HOMELAB_MCP_GRAFANA_URL, "https://grafana.example.test");
     assert.equal(app.HOMELAB_MCP_GRAFANA_TOKEN, "test-grafana-token");
+    assert.equal(app.HOMELAB_MCP_DEPLOYMENT_ENVIRONMENT, "test");
+    assert.equal(app.HOMELAB_MCP_SERVICE_NAMESPACE, "homelab");
+    assert.equal(
+      app.HOMELAB_MCP_PYROSCOPE_URL,
+      "https://telemetry.holdenitdown.net:4040",
+    );
+    assert.equal(
+      app.OTEL_EXPORTER_OTLP_ENDPOINT,
+      "https://telemetry.holdenitdown.net:4318",
+    );
+    assert.equal(app.OTEL_EXPORTER_OTLP_PROTOCOL, "http/protobuf");
+    assert.equal(app.OTEL_SERVICE_NAME, "homelab-mcp");
+    assert.equal(
+      app.OTEL_RESOURCE_ATTRIBUTES,
+      "service.namespace=homelab,deployment.environment.name=test",
+    );
 
     for (const candidate of resources.filter(
       (entry) => entry.type !== "kubernetes:core/v1:Secret",
     )) {
-      assert.doesNotMatch(JSON.stringify(candidate.inputs), /HOMELAB_MCP_[A-Z0-9_]+/);
+      assert.doesNotMatch(
+        JSON.stringify(candidate.inputs),
+        /HOMELAB_MCP_(?:DATABASE_URL|OIDC_CLIENT_SECRET|GRAFANA_TOKEN)/,
+      );
       assert.doesNotMatch(JSON.stringify(candidate.inputs), /test-grafana-token/);
     }
   });
@@ -342,6 +361,15 @@ describe("standalone resource topology", () => {
       "homelab-mcp-app,homelab-mcp-oauth-wrapping-keys",
     );
     const pod = spec.template.spec;
+    assert.deepEqual(spec.template.metadata.annotations, {
+      "homelab-mcp.holdenitdown.net/wrapping-key-checksum":
+        spec.template.metadata.annotations[
+          "homelab-mcp.holdenitdown.net/wrapping-key-checksum"
+        ],
+      "resource.opentelemetry.io/service.name": "homelab-mcp",
+      "resource.opentelemetry.io/service.namespace": "homelab",
+      "resource.opentelemetry.io/deployment.environment.name": "test",
+    });
     assert.equal(pod.automountServiceAccountToken, false);
     assert.equal(pod.securityContext.runAsUser, 65532);
     assert.equal(pod.securityContext.runAsGroup, 65532);
@@ -349,6 +377,23 @@ describe("standalone resource topology", () => {
     const container = pod.containers[0];
     assert.match(container.image, /@sha256:[a-f0-9]{64}$/);
     assert.equal(container.ports[0].containerPort, 14333);
+    assert.deepEqual(container.envFrom, [
+      { secretRef: { name: "homelab-mcp-app" } },
+    ]);
+    assert.deepEqual(container.env, [
+      {
+        name: "HOMELAB_MCP_K8S_NAMESPACE",
+        valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } },
+      },
+      {
+        name: "HOMELAB_MCP_K8S_POD_NAME",
+        valueFrom: { fieldRef: { fieldPath: "metadata.name" } },
+      },
+      {
+        name: "HOMELAB_MCP_K8S_POD_UID",
+        valueFrom: { fieldRef: { fieldPath: "metadata.uid" } },
+      },
+    ]);
     assert.equal(container.securityContext.allowPrivilegeEscalation, false);
     assert.equal(container.securityContext.readOnlyRootFilesystem, true);
     assert.deepEqual(container.securityContext.capabilities.drop, ["ALL"]);
@@ -368,22 +413,27 @@ describe("standalone resource topology", () => {
     );
     const spec = policy.inputs.spec as any;
     assert.deepEqual(spec.policyTypes, ["Egress"]);
-    assert.deepEqual(spec.egress[0].ports, [
-      { port: 53, protocol: "UDP" },
-      { port: 53, protocol: "TCP" },
-    ]);
-    assert.deepEqual(
-      spec.egress.find((rule: any) => rule.to === undefined).ports,
-      [
-        { port: 443, protocol: "TCP" },
-        { port: 4040, protocol: "TCP" },
-        { port: 4318, protocol: "TCP" },
-      ],
-    );
-    assert.deepEqual(
-      spec.egress.find((rule: any) =>
-        rule.ports?.some((port: any) => port.port === 8443),
-      ),
+    assert.deepEqual(spec.egress, [
+      {
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: { "kubernetes.io/metadata.name": "kube-system" },
+            },
+          },
+        ],
+        ports: [
+          { port: 53, protocol: "UDP" },
+          { port: 53, protocol: "TCP" },
+        ],
+      },
+      {
+        ports: [
+          { port: 443, protocol: "TCP" },
+          { port: 4040, protocol: "TCP" },
+          { port: 4318, protocol: "TCP" },
+        ],
+      },
       {
         to: [
           {
@@ -401,12 +451,17 @@ describe("standalone resource topology", () => {
         ],
         ports: [{ port: 8443, protocol: "TCP" }],
       },
-    );
-    assert.ok(
-      spec.egress.some((rule: any) =>
-        rule.ports?.some((port: any) => port.port === 5432),
-      ),
-    );
+      {
+        to: [
+          {
+            podSelector: {
+              matchLabels: { "cnpg.io/cluster": "homelab-mcp-postgres" },
+            },
+          },
+        ],
+        ports: [{ port: 5432, protocol: "TCP" }],
+      },
+    ]);
   });
 
   test("creates the ClusterIP service and streaming Gateway API route", () => {

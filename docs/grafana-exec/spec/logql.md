@@ -2,11 +2,11 @@
 
 ## Status
 
-This specification defines the implemented working-tree behavior for `grafana_exec`. Local tests cover its validation, normalized responses, limits, error mapping, and mock HTTP integration. The code is uncommitted and undeployed; preview remains on the prior health-only image, and no live Grafana evidence exists.
+This specification defines the implemented worktree behavior for the `logql` action. Local tests cover its validation, normalized responses, limits, error mapping, and mock HTTP integration. This observability revision has no coordinator-confirmed preview deployment or authenticated live Grafana query.
 
 ## Tool Surface
 
-`#[mcp::progressive_server]` generates one read-only MCP tool named `grafana_exec`. Its only domain action is `logql`.
+`#[mcp::progressive_server]` generates one read-only MCP tool named `grafana_exec`. Its domain actions are `logql`, `promql`, `traceql`, and `profiles`.
 
 The macro also generates action `help`, the filter behavior, and the tool schema. A help call takes this shape:
 
@@ -17,7 +17,9 @@ The macro also generates action `help`, the filter behavior, and the tool schema
 }
 ```
 
-Help takes no `input`. Its structured output lists `logql` with its description, guidance, and generated input schema.
+Help takes no `input`. Its structured output lists all four actions with their descriptions, guidance, and generated input schemas.
+
+The [shared contract](common.md) defines generated tool behavior, shared transport limits, and common error mapping.
 
 The optional top-level `filter` is a jq-compatible string. For semantic action output, it applies only to `structuredContent` after action execution.
 
@@ -76,13 +78,15 @@ Equal range endpoints are valid. Validation must finish before concurrency acqui
 | Maximum query limit | 5000 |
 | Maximum range | 24 hours |
 | Grafana request timeout | 30 seconds |
-| Service-wide Grafana query concurrency | 4 |
+| Service-wide concurrency across all four actions | 4 |
+| Maximum encoded request URL | 8192 bytes |
+| Maximum decoded response body | 4 MiB |
 
 The service must attempt concurrency acquisition without waiting. If all four permits are in use, it must fail with retryable `capacity_exhausted`.
 
 The 30-second deadline covers the complete Grafana request and response read. Every completion path must release its concurrency permit.
 
-No response-body, MCP-message, or serialized byte-size limit exists.
+The client rejects an encoded request URL above 8192 bytes before dispatch. It rejects a decoded response body above 4 MiB as `invalid_response`. No separate MCP-message or serialized output cap exists.
 
 ## Grafana Routing
 
@@ -153,7 +157,7 @@ Well-formed `logql` calls with semantic validation or execution failures return 
 }
 ```
 
-The seven stable semantic errors are:
+The seven stable semantic errors follow the [shared error contract](common.md#semantic-errors). LogQL uses these action-specific messages:
 
 | Code | Safe message | Condition | Retryable |
 | --- | --- | --- | --- |

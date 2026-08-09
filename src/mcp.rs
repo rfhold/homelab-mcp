@@ -1,6 +1,10 @@
 #![allow(clippy::useless_vec)]
 
-use std::sync::Arc;
+use std::{
+    future::Future,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 
 use axum::Router;
 use mcp::{
@@ -10,11 +14,13 @@ use mcp::{
         StreamableHttpOptions, streamable_http_router_with_options,
     },
 };
+use opentelemetry::{KeyValue, global};
 use serde_json::json;
+use tracing::Instrument as _;
 
 use crate::{
     config::Config,
-    grafana::{Error as GrafanaError, GrafanaClient},
+    grafana::{Error as GrafanaError, GrafanaClient, ProfilesInput, PromqlInput, TraceqlInput},
     logql::LogqlInput,
 };
 
@@ -78,18 +84,231 @@ impl HomelabMcp {
         input: LogqlInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
-        let query = match input.validate() {
-            Ok(query) => query,
-            Err(()) => return Ok(tool_error(GrafanaError::InvalidArguments)),
+        let mode = if input.start.is_some() || input.end.is_some() {
+            "range"
+        } else {
+            "instant"
         };
-        let result = tokio::select! {
-            result = self.grafana.execute(&query) => result,
-            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        let span = action_span("logql", mode, "loki");
+        instrument_action("logql", span, async {
+            let query = match input.validate() {
+                Ok(query) => query,
+                Err(()) => return Ok(tool_error("LogQL", GrafanaError::InvalidArguments)),
+            };
+            let result = tokio::select! {
+                result = self.grafana.execute(&query) => result,
+                () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+            };
+            match result {
+                Ok(output) => Ok(query_result(output)),
+                Err(error) => Ok(tool_error("LogQL", error)),
+            }
+        })
+        .await
+    }
+
+    /// Execute a PromQL instant or range query through Grafana.
+    ///
+    /// Range mode requires start, end, and a positive Prometheus duration step.
+    /// Ranges are limited to 24 hours and 11,000 points.
+    #[action(tool = "grafana_exec", name = "promql")]
+    async fn promql(
+        &self,
+        input: PromqlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let mode = if input.start.is_some() || input.end.is_some() {
+            "range"
+        } else {
+            "instant"
         };
-        match result {
-            Ok(output) => Ok(query_result(output)),
-            Err(error) => Ok(tool_error(error)),
+        let span = action_span("promql", mode, "mimir");
+        instrument_action("promql", span, async {
+            let query = match input.validate() {
+                Ok(query) => query,
+                Err(()) => return Ok(tool_error("PromQL", GrafanaError::InvalidArguments)),
+            };
+            let result = tokio::select! {
+                result = self.grafana.execute_promql(&query) => result,
+                () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+            };
+            match result {
+                Ok(output) => Ok(query_result(output)),
+                Err(error) => Ok(tool_error("PromQL", error)),
+            }
+        })
+        .await
+    }
+
+    /// Search traces with TraceQL through Grafana.
+    ///
+    /// Optional start and end timestamps must appear together. Searches are
+    /// limited to 24 hours and at most 100 returned traces.
+    #[action(tool = "grafana_exec", name = "traceql")]
+    async fn traceql(
+        &self,
+        input: TraceqlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let span = action_span("traceql", "search", "tempo");
+        instrument_action("traceql", span, async {
+            let query = match input.validate() {
+                Ok(query) => query,
+                Err(()) => return Ok(tool_error("TraceQL", GrafanaError::InvalidArguments)),
+            };
+            let result = tokio::select! {
+                result = self.grafana.execute_traceql(&query) => result,
+                () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+            };
+            match result {
+                Ok(output) => Ok(query_result(output)),
+                Err(error) => Ok(tool_error("TraceQL", error)),
+            }
+        })
+        .await
+    }
+
+    /// Merge Pyroscope stacktraces through Grafana.
+    ///
+    /// Start and end are required RFC3339 timestamps. Profile ranges are
+    /// limited to one hour and at most 1,000 flame graph nodes.
+    #[action(tool = "grafana_exec", name = "profiles")]
+    async fn profiles(
+        &self,
+        input: ProfilesInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let span = action_span("profiles", "range", "pyroscope");
+        instrument_action("profiles", span, async {
+            let query = match input.validate() {
+                Ok(query) => query,
+                Err(()) => return Ok(tool_error("profile", GrafanaError::InvalidArguments)),
+            };
+            let result = tokio::select! {
+                result = self.grafana.execute_profiles(&query) => result,
+                () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+            };
+            match result {
+                Ok(output) => Ok(query_result(output)),
+                Err(error) => Ok(tool_error("profile", error)),
+            }
+        })
+        .await
+    }
+}
+
+fn action_span(
+    action: &'static str,
+    mode: &'static str,
+    datasource_uid: &'static str,
+) -> tracing::Span {
+    tracing::info_span!(
+        "grafana.action",
+        grafana.action = action,
+        grafana.mode = mode,
+        grafana.datasource_uid = datasource_uid,
+        grafana.outcome = tracing::field::Empty,
+    )
+}
+
+async fn instrument_action(
+    action: &'static str,
+    span: tracing::Span,
+    future: impl Future<Output = ServerResult<McpToolResult>>,
+) -> ServerResult<McpToolResult> {
+    let mut metrics = ActionMetricsGuard::new(action);
+    let result = future.instrument(span.clone()).await;
+    let outcome = action_outcome(&result);
+    span.record("grafana.outcome", outcome);
+    metrics.finish(outcome);
+    result
+}
+
+fn action_outcome(result: &ServerResult<McpToolResult>) -> &'static str {
+    match result {
+        Ok(result) if result.raw["isError"] == true => "error",
+        Ok(_) => "success",
+        Err(_) => "cancelled",
+    }
+}
+
+struct ActionMetrics {
+    calls: opentelemetry::metrics::Counter<u64>,
+    duration: opentelemetry::metrics::Histogram<f64>,
+}
+
+fn action_metrics() -> &'static ActionMetrics {
+    static METRICS: OnceLock<ActionMetrics> = OnceLock::new();
+    METRICS.get_or_init(|| {
+        let meter = global::meter("homelab_mcp.grafana_exec");
+        ActionMetrics {
+            calls: meter
+                .u64_counter("homelab_mcp.grafana_exec.action.calls")
+                .with_description("Completed grafana_exec domain action calls")
+                .build(),
+            duration: meter
+                .f64_histogram("homelab_mcp.grafana_exec.action.duration")
+                .with_unit("s")
+                .with_description("grafana_exec domain action duration")
+                .build(),
         }
+    })
+}
+
+struct ActionMetricsGuard {
+    action: &'static str,
+    started: Instant,
+    finished: bool,
+}
+
+impl ActionMetricsGuard {
+    fn new(action: &'static str) -> Self {
+        Self {
+            action: metric_action(action),
+            started: Instant::now(),
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, outcome: &'static str) {
+        if self.finished {
+            return;
+        }
+        let attributes = [
+            KeyValue::new("action", self.action),
+            KeyValue::new("outcome", metric_outcome(outcome)),
+        ];
+        let metrics = action_metrics();
+        metrics.calls.add(1, &attributes);
+        metrics
+            .duration
+            .record(self.started.elapsed().as_secs_f64(), &attributes);
+        self.finished = true;
+    }
+}
+
+fn metric_action(action: &'static str) -> &'static str {
+    match action {
+        "logql" => "logql",
+        "promql" => "promql",
+        "traceql" => "traceql",
+        "profiles" => "profiles",
+        _ => "unknown",
+    }
+}
+
+fn metric_outcome(outcome: &'static str) -> &'static str {
+    match outcome {
+        "success" => "success",
+        "error" => "error",
+        "cancelled" => "cancelled",
+        _ => "error",
+    }
+}
+
+impl Drop for ActionMetricsGuard {
+    fn drop(&mut self) {
+        self.finish("cancelled");
     }
 }
 
@@ -103,13 +322,11 @@ fn query_result(output: serde_json::Value) -> McpToolResult {
     }))
 }
 
-fn tool_error(error: GrafanaError) -> McpToolResult {
+fn tool_error(query_name: &str, error: GrafanaError) -> McpToolResult {
+    let invalid_arguments = format!("The {query_name} arguments are invalid.");
+    let query_rejected = format!("Grafana rejected the {query_name} query.");
     let (code, message, retryable) = match error {
-        GrafanaError::InvalidArguments => (
-            "invalid_arguments",
-            "The LogQL arguments are invalid.",
-            false,
-        ),
+        GrafanaError::InvalidArguments => ("invalid_arguments", invalid_arguments.as_str(), false),
         GrafanaError::CapacityExhausted => (
             "capacity_exhausted",
             "Grafana query capacity is currently exhausted.",
@@ -121,9 +338,7 @@ fn tool_error(error: GrafanaError) -> McpToolResult {
             "Grafana rejected the service credentials.",
             false,
         ),
-        GrafanaError::QueryRejected => {
-            ("query_rejected", "Grafana rejected the LogQL query.", false)
-        }
+        GrafanaError::QueryRejected => ("query_rejected", query_rejected.as_str(), false),
         GrafanaError::UpstreamUnavailable => (
             "upstream_unavailable",
             "Grafana is currently unavailable.",
@@ -265,10 +480,40 @@ mod tests {
             ),
         )
         .await;
+        let actions = help["result"]["structuredContent"]["result"]
+            .as_array()
+            .unwrap();
         assert_eq!(
-            help["result"]["structuredContent"]["result"][0]["action"],
-            "logql"
+            actions
+                .iter()
+                .map(|action| action["action"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["logql", "promql", "traceql", "profiles"]
         );
+        for (action, required, optional) in [
+            (
+                "promql",
+                vec!["query"],
+                vec!["start", "end", "step", "time"],
+            ),
+            ("traceql", vec!["query"], vec!["start", "end", "limit"]),
+            (
+                "profiles",
+                vec!["selector", "start", "end"],
+                vec!["profile_type", "max_nodes"],
+            ),
+        ] {
+            let schema = &actions
+                .iter()
+                .find(|candidate| candidate["action"] == action)
+                .unwrap()["input_schema"];
+            assert_eq!(schema["additionalProperties"], false);
+            let properties = schema["properties"].as_object().unwrap();
+            for field in required.iter().chain(optional.iter()) {
+                assert!(properties.contains_key(*field), "{action} missing {field}");
+            }
+            assert_eq!(schema["required"], json!(required));
+        }
 
         let (_, call) = post_mcp(
             &endpoint,
@@ -417,7 +662,7 @@ mod tests {
             ),
         ];
         for (error, code, message, retryable) in cases {
-            let result = tool_error(error).raw;
+            let result = tool_error("LogQL", error).raw;
             assert_eq!(result["isError"], true);
             assert_eq!(
                 result["structuredContent"]["error"],
@@ -426,6 +671,31 @@ mod tests {
             assert_eq!(result["content"][0]["text"], message);
             assert!(!result.to_string().contains("secret"));
         }
+    }
+
+    #[test]
+    fn action_metric_labels_and_outcomes_are_bounded() {
+        assert_eq!(metric_action("logql"), "logql");
+        assert_eq!(metric_action("raw-query-or-user-value"), "unknown");
+        assert_eq!(metric_outcome("success"), "success");
+        assert_eq!(metric_outcome("arbitrary-error"), "error");
+
+        let success = Ok(query_result(json!({
+            "mode":"instant", "result_type":"vector", "result":[]
+        })));
+        let semantic_error = Ok(tool_error("PromQL", GrafanaError::InvalidArguments));
+        let cancelled = Err(ServerError::internal("request cancelled"));
+        assert_eq!(action_outcome(&success), "success");
+        assert_eq!(action_outcome(&semantic_error), "error");
+        assert_eq!(action_outcome(&cancelled), "cancelled");
+
+        let mut guard = ActionMetricsGuard::new("not-an-action");
+        assert_eq!(guard.action, "unknown");
+        assert!(!guard.finished);
+        guard.finish("success");
+        assert!(guard.finished);
+        guard.finish("error");
+        assert!(guard.finished);
     }
 
     #[tokio::test]
