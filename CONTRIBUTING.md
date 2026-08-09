@@ -1,26 +1,40 @@
 # Contributing
 
-The repository implements a Rust health host, container build, Pulumi declarations, and a preview pipeline. MCP and OAuth runtime behavior remain planned.
+The repository implements hosted OAuth, authenticated MCP, and the progressive Grafana runtime. The generic Kuri `mcp` dependency uses a reviewed immutable Git revision.
 
-Use [docs/README.md](docs/README.md) to locate canonical contracts and planned behavior.
+This runtime is not yet deployed, and preview still runs the prior health-only image. Production remains excluded.
 
-## Verified Local Commands
+Use [docs/README.md](docs/README.md) to locate canonical contracts and current validation boundaries.
+
+## Local Commands
 
 Rust commands require Rust 1.96 because `Cargo.toml` sets `rust-version = "1.96"`. Rust 1.95 rejects the project before tests run.
 
-Run Rust tests with Rust 1.96:
+Run formatting, check, Clippy, and tests with Rust 1.96:
 
 ```bash
-cargo test --locked
+cargo +1.96.0 fmt --all -- --check
+cargo +1.96.0 check --locked --all-targets --all-features
+cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
+cargo +1.96.0 test --locked --all-features
 ```
 
-Use the verified container fallback when the local toolchain is older:
+These commands pass against the exact Kuri Git pin. The local Rust suite contains 25 tests.
+
+Build the private-dependency runtime image with BuildKit secret handling:
 
 ```bash
-docker run --rm --volume "$PWD:/workspace" --workdir /workspace rust:1.96.0-bookworm cargo test --locked
+DOCKER_BUILDKIT=1 docker build \
+  --build-arg REVISION=local \
+  --secret id=gitconfig,src="$HOME/.gitconfig" \
+  --secret id=git-credentials,src="$HOME/.git-credentials" \
+  --tag homelab-mcp:local \
+  .
 ```
 
-Run Pulumi type checks and the 12 mock tests:
+The secret source files must exist. BuildKit mounts them only for Cargo's fetch/build step.
+
+Run Pulumi type checks and mock tests:
 
 ```bash
 cd infra/pulumi
@@ -29,17 +43,7 @@ bun run build
 bun test index.test.ts
 ```
 
-Build and check the local container:
-
-```bash
-docker build --build-arg REVISION=local --tag homelab-mcp:local .
-docker run --rm --detach --name homelab-mcp-local --publish 14333:14333 homelab-mcp:local
-curl --fail http://127.0.0.1:14333/health
-curl --fail http://127.0.0.1:14333/ready
-docker stop homelab-mcp-local
-```
-
-See [the testing guide](docs/quality/testing.md) for current coverage and planned validation.
+Do not treat a standalone `docker run` as a runtime smoke test. Startup requires PostgreSQL, an OAuth wrapping keyring, OIDC configuration, local OAuth settings, and Grafana credentials. See [the testing guide](docs/quality/testing.md) for current coverage.
 
 For documentation-only changes:
 

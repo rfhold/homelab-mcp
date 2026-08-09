@@ -83,7 +83,7 @@ spec:
               script: |
                 #!/bin/sh
                 set -eu
-                if git grep -n -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}' -- infra/pulumi Dockerfile .tekton Cargo.toml Cargo.lock; then
+                if git grep -q -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}' -- infra/pulumi Dockerfile .tekton Cargo.toml Cargo.lock; then
                   echo "private credential material is tracked in deployment inputs" >&2
                   exit 1
                 fi

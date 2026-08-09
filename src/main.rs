@@ -1,25 +1,96 @@
-use axum::{Router, http::StatusCode, routing::get};
-use tokio::net::TcpListener;
+mod app;
+mod config;
+mod grafana;
+mod logql;
+mod mcp;
+mod oauth;
+
+use std::{error::Error, sync::Arc, time::Duration};
+
+use ::mcp::server::BoxFuture;
+use tokio::{
+    net::TcpListener,
+    sync::watch,
+    time::{MissedTickBehavior, interval},
+};
 
 const LISTEN_ADDR: &str = "0.0.0.0:14333";
+const CLEANUP_BATCH_SIZE: usize = 1000;
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn Error>> {
+    let config = config::Config::from_env().map_err(std::io::Error::other)?;
+    let runtime = Arc::new(
+        oauth::initialize(&config)
+            .await
+            .map_err(std::io::Error::other)?,
+    );
+    let mcp = mcp::router(&config, &runtime.server).map_err(std::io::Error::other)?;
+    let router = app::router(
+        runtime.clone(),
+        runtime.server.router(),
+        runtime.oidc.router(),
+        mcp,
+    );
     let listener = TcpListener::bind(LISTEN_ADDR).await?;
+    let (shutdown, cleanup_shutdown) = watch::channel(false);
+    let cleanup_runtime = runtime.clone();
+    let cleanup_task = tokio::spawn(cleanup_loop(
+        cleanup_shutdown,
+        CLEANUP_INTERVAL,
+        move || {
+            let runtime = cleanup_runtime.clone();
+            Box::pin(async move { runtime.cleanup(CLEANUP_BATCH_SIZE).await })
+        },
+    ));
+    let signal_shutdown = shutdown.clone();
 
-    axum::serve(listener, router())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
+    let server_result = axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            signal_shutdown.send_replace(true);
+        })
+        .await;
+    shutdown.send_replace(true);
+    let _ = cleanup_task.await;
+    server_result?;
+    Ok(())
 }
 
-fn router() -> Router {
-    Router::new()
-        .route("/health", get(healthy))
-        .route("/ready", get(healthy))
-}
-
-async fn healthy() -> StatusCode {
-    StatusCode::OK
+async fn cleanup_loop<F>(
+    mut shutdown: watch::Receiver<bool>,
+    cleanup_interval: Duration,
+    mut cleanup: F,
+) where
+    F: FnMut() -> BoxFuture<()> + Send + 'static,
+{
+    let mut ticker = interval(cleanup_interval);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+            }
+            _ = ticker.tick() => {
+                tokio::select! {
+                    biased;
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() {
+                            return;
+                        }
+                    }
+                    () = cleanup() => {}
+                }
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() {
@@ -49,18 +120,42 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{body::Body, http::Request};
-    use tower::ServiceExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::oneshot;
 
     #[tokio::test]
-    async fn health_routes_are_available() {
-        for path in ["/health", "/ready"] {
-            let response = router()
-                .oneshot(Request::get(path).body(Body::empty()).unwrap())
-                .await
-                .unwrap();
+    async fn cleanup_loop_stops_before_work_when_already_cancelled() {
+        let (shutdown, receiver) = watch::channel(true);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_cleanup = calls.clone();
 
-            assert_eq!(response.status(), StatusCode::OK, "path: {path}");
-        }
+        cleanup_loop(receiver, CLEANUP_INTERVAL, move || {
+            calls_for_cleanup.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async {})
+        })
+        .await;
+
+        assert!(shutdown.is_closed());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_loop_cancels_an_inflight_cleanup() {
+        let (shutdown, receiver) = watch::channel(false);
+        let (started, started_receiver) = oneshot::channel();
+        let mut started = Some(started);
+        let task = tokio::spawn(cleanup_loop(receiver, CLEANUP_INTERVAL, move || {
+            let started = started
+                .take()
+                .expect("cleanup runs once before cancellation");
+            Box::pin(async move {
+                let _ = started.send(());
+                std::future::pending::<()>().await;
+            })
+        }));
+
+        started_receiver.await.unwrap();
+        shutdown.send_replace(true);
+        task.await.unwrap();
     }
 }

@@ -1,6 +1,8 @@
 # Operations
 
-These documents describe implemented deployment declarations and pipeline behavior. The `preview` stack is deployed by the main pipeline. The `prod` stack is initialized with zero resources and has not been previewed or applied.
+These documents describe deployment declarations and pipeline behavior. Preview still runs the prior health-only image.
+
+The runtime uses the reviewed immutable Kuri Git revision, and the container and pipeline declarations can resolve it. Production remains excluded with zero resources.
 
 | Document | Covers |
 | --- | --- |

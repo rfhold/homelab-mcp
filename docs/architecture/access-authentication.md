@@ -2,30 +2,73 @@
 
 ## Status
 
-This document defines the intended authentication and authorization contract. No OAuth endpoint, browser handler, token issuer, or database use exists yet.
+This document defines the implemented hosted OAuth contract. Local tests cover selected validation, challenge, consent, and mocked OIDC behavior.
 
-Pulumi declares an Authentik browser application, signing certificate, application credentials, PostgreSQL, and a versioned wrapping-key secret. These declarations prepare runtime inputs but do not implement the access flow.
+The service uses generic MCP-owned OIDC resource-owner support and PostgreSQL state. Generic migration V4 adds one-shot OIDC attempts and replaces the removed browser-state migration.
 
-## Boundary
+The service uses the reviewed immutable Kuri Git revision. No live PostgreSQL or Authentik validation exists. Preview still runs the prior health-only image, and production remains excluded.
 
-`homelab-mcp` will host its own OAuth issuer. Authentik will authenticate the browser user through a confidential browser application.
+## Protocol Boundary
 
-Only locally issued ES256 JWT access tokens with the `at+jwt` type will reach `/mcp`. The service will reject direct Authentik tokens.
+`homelab-mcp` hosts a local OAuth issuer for stateless MCP Streamable HTTP revision `2026-07-28`. The protected resource is the configured public URL whose path is exactly `/mcp`.
 
-Every accepted access token must include the `mcp:use` scope.
+The resource value has exact-string semantics. Alternate origins, paths, query strings, fragments, and trailing-slash variants do not match.
 
-## Planned Roles
+Each `/mcp` request stands alone after token validation. The service requires no MCP session identifier and stores no MCP protocol session state.
+
+Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:use`.
+
+Authentik provides browser identity only. Authentik access tokens, ID tokens, and other Authentik credentials never authorize `/mcp`.
+
+## Roles
 
 | Actor | Role |
 | --- | --- |
-| MCP client | Discover metadata, register or identify itself, complete authorization, and call `/mcp`. |
-| homelab-mcp | Host OAuth metadata, authorization flows, token issuance, token validation, and MCP authorization. |
-| Authentik | Authenticate the browser user for the hosted authorization flow. |
-| PostgreSQL | Persist generic OAuth state and browser-auth state. |
+| MCP client | Discover metadata, identify or register itself, complete authorization, and call `/mcp`. |
+| Generic Kuri `mcp` | Host OAuth metadata, OIDC resource-owner flow, token issuance, token validation, continuation, and durable OAuth state. |
+| `homelab-mcp` | Configure Authentik and map stable issuer-plus-subject identities to local principals. |
+| Authentik | Authenticate the browser user during the hosted authorization flow. |
+| PostgreSQL | Persist generic OAuth and OIDC state plus protected signing material in the `mcp` schema. |
+
+## Discovery and Bearer Challenges
+
+The service must publish protected-resource and authorization-server metadata for the configured public resource and local issuer.
+
+An unauthenticated `/mcp` request must return HTTP 401. Its `WWW-Authenticate` header must use the `Bearer` scheme and a `resource_metadata` parameter with the absolute protected-resource metadata URL.
+
+An invalid, expired, or incorrectly bound token must return HTTP 401 with Bearer error `invalid_token`. A valid token without `mcp:use` must return HTTP 403 with Bearer error `insufficient_scope` and scope `mcp:use`.
+
+Challenges and OAuth errors must not include tokens, authorization codes, client secrets, signing material, or OIDC transaction values.
 
 ## Client Flows
 
-The hosted issuer will enable Dynamic Client Registration (DCR), Client ID Metadata Documents (CIMD), and loopback redirects. Implementations must preserve redirect validation and OAuth binding checks from the pinned generic `mcp` crate.
+The hosted issuer supports public MCP clients through these identification paths:
+
+- Dynamic Client Registration (DCR);
+- Client ID Metadata Documents (CIMD); and
+- explicit preregistration.
+
+CIMD retrieval and DCR must preserve the hardened validation rules from the generic `mcp` crate. Redirect matching must reject open redirects and unregistered destinations.
+
+Native clients from each supported identification path can use loopback HTTP redirects. The redirect host and path must match the registered value, and the runtime port can vary.
+
+Authorization Code flows must require PKCE S256. The authorization request and issued code must remain bound to the client, redirect URI, exact resource, scope, and PKCE challenge.
+
+## OIDC Resource Owner
+
+Generic Kuri `mcp` owns the strict login and callback flow. It creates an expiring, one-shot OIDC transaction before redirecting to Authentik.
+
+The generic flow owns state, nonce, upstream PKCE, ID-token verification, the identity-mapper seam, and hosted authorization continuation.
+
+PostgreSQL persists only digests for state and correlation values. A secure transaction-specific cookie binds the browser to the callback.
+
+The callback verifies state, nonce, PKCE, signature, issuer, audience, expiration, and authorization response integrity. Transaction completion is atomic and single-use.
+
+`homelab-mcp` supplies Authentik configuration and stable issuer-plus-subject principal mapping. It does not own OIDC transaction persistence or callback protocol logic.
+
+After successful authentication, hosted continuation approves only the configured `/mcp` resource and `mcp:use` scope. It rejects any different resource or scope.
+
+Authentik session lifetime does not extend local authorization codes, access tokens, refresh generations, or OIDC transactions.
 
 ## OAuth Lifetimes
 
@@ -37,34 +80,39 @@ The hosted issuer will enable Dynamic Client Registration (DCR), Client ID Metad
 | Refresh family | 2592000 seconds |
 | Authorization transaction | 10 minutes |
 
-Browser-session lifetime and cleanup cadence remain implementation decisions.
+The implementation must expire durable records and reject replay even before cleanup removes old rows.
 
 ## Token Contract
 
-The local issuer will sign access tokens with ES256. Each access token must:
+The local issuer signs access tokens with ES256. Each access token must:
 
 - use the JWT `typ` value `at+jwt`;
-- identify the local issuer;
-- target the configured MCP resource;
+- identify the configured local issuer exactly;
+- bind its audience to the exact configured `/mcp` resource;
 - remain within its validity interval; and
-- contain `mcp:use`.
+- contain `mcp:use` as an independently matched scope value.
 
-The `/mcp` boundary must validate the signature, token type, issuer, audience or resource binding, time claims, and scope.
+The `/mcp` boundary must validate the signature, algorithm, token type, issuer, exact audience, time claims, and scope before MCP request handling.
 
-## Durable Key Protection
+OAuth authorization requests must use the exact resource. Token exchange and refresh must preserve that resource binding.
 
-PostgreSQL will store generic OAuth state, including protected signing-key material. A versioned wrapping-key file will protect persisted signing keys.
+## Durable State and Key Protection
 
-The deployment must mount the wrapping key separately from database credentials. Key rotation and recovery procedures require implementation and operational validation before production readiness.
+Generic Kuri migrations V1 through V3 own the hosted OAuth schema, signing keys, and client registration state. Migration V4 adds one-shot OIDC attempts with parent transaction cascades.
 
-## Browser Session State
+The generic dependency embeds and applies all four migrations in the `mcp` schema. No separate browser-state migration exists.
 
-PostgreSQL will store browser-auth state that binds the hosted OAuth transaction to the Authentik callback. The implementation must apply expiration, single-use completion, and anti-forgery checks.
+The issuer must persist ES256 signing material in encrypted form. A versioned wrapping-key file must encrypt and decrypt that material outside PostgreSQL.
 
-## Security Invariants
+The deployment must mount the wrapping key separately from database credentials. Loss of either boundary alone must not expose a usable signing key.
 
-- Authentik credentials and tokens must not authorize `/mcp` directly.
-- Grafana credentials must not appear in browser redirects, MCP results, or logs.
-- OAuth signing keys must not persist as unprotected database values.
-- Redirect handling must allow configured DCR, CIMD, and loopback use without open redirects.
-- Authentication failures must not disclose token, key, or browser-session secrets.
+Database transactions must enforce expiry and atomic single-use behavior for authorization codes, refresh rotation, and OIDC transaction completion.
+
+## Secret Boundaries
+
+- The service must read Authentik, PostgreSQL, Grafana, and OAuth key material only from runtime secret sources.
+- The service must send the Grafana token only in an upstream `Authorization` header.
+- Browser URLs, redirects, logs, traces, MCP content, health responses, and OAuth errors must not contain secret values.
+- The service must not persist plaintext OAuth signing keys.
+- Build output and container layers must not contain private Git or provider credentials.
+- Production requires separate target-specific approval and validated rotation and recovery procedures.

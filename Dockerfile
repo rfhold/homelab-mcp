@@ -3,7 +3,7 @@
 ARG RUST_VERSION=1.96.0
 ARG REVISION=unknown
 
-FROM rust:${RUST_VERSION}-slim-bookworm AS build
+FROM rust:${RUST_VERSION}-slim-bookworm AS build-base
 
 ARG TARGETARCH
 
@@ -16,6 +16,8 @@ RUN apt-get update && \
 
 COPY Cargo.toml Cargo.lock ./
 COPY src src
+
+FROM build-base AS build
 
 RUN --mount=type=cache,id=homelab-mcp-${TARGETARCH}-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=homelab-mcp-${TARGETARCH}-cargo-git,target=/usr/local/cargo/git \

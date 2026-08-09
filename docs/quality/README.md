@@ -1,7 +1,7 @@
 # Quality
 
-This domain records verified foundation checks and planned MCP validation.
+This domain records verified local runtime and foundation checks. It separates local dependency evidence from container, preview, and production evidence.
 
 | Document | Covers |
 | --- | --- |
-| [Testing](testing.md) | Verified commands, current coverage, planned contract tests, and release evidence. |
+| [Testing](testing.md) | Verified commands, current coverage, remaining contract tests, and release evidence. |

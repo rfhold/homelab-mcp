@@ -1,6 +1,8 @@
 # Architecture
 
-These documents define the planned system boundary and access model.
+These documents define the system boundary and access model. The implementation passes local tests against a reviewed immutable Kuri Git revision.
+
+The implementation is not committed or deployed. Preview still runs the prior health-only image, and production remains excluded.
 
 | Document | Covers |
 | --- | --- |

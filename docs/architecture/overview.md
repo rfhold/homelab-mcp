@@ -2,51 +2,53 @@
 
 ## Status
 
-The repository implements a health-only host and deployment foundation. MCP, OAuth runtime, database use, and Grafana queries remain planned.
+The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, and Grafana LogQL. Its 25 Rust tests pass against the exact reviewed Kuri Git pin.
+
+The container and pipeline declarations can build the runtime, but it has not been deployed. Preview still runs the prior health-only image, and production remains excluded.
 
 ## Purpose
 
-`homelab-mcp` will expose bounded Grafana LogQL access through MCP. It will not expose Grafana credentials or direct Loki access to clients.
+`homelab-mcp` exposes bounded Grafana LogQL access through MCP. It does not expose Grafana credentials or direct Loki access to clients.
 
 ## Service Boundary
 
-### Implemented Host
+### Working-Tree Runtime
 
-`src/main.rs` implements a Rust 1.96, edition 2024 Axum process. It binds `0.0.0.0:14333` and shuts down on SIGTERM or Ctrl-C.
+`src/main.rs` starts a Rust 1.96, edition 2024 Axum process. It loads configuration, connects to PostgreSQL, initializes hosted OAuth, creates the MCP/Grafana handler, and binds `0.0.0.0:14333`.
 
-`GET /health` and `GET /ready` return unconditional HTTP 200 responses. They do not check dependencies because the process uses no external dependency yet.
+`GET /health` returns unconditional process health. `GET /ready` performs bounded live PostgreSQL and signing-key-readiness checks. It does not probe Authentik or Grafana.
 
-The process has no `/mcp` route, OAuth route, browser callback, database connection, or Grafana client.
+The router merges generic OAuth and OIDC endpoints with authenticated stateless `/mcp`. Startup applies the generic Kuri migration history in schema `mcp`, including the V4 OIDC attempt table, and initializes the protected signing key.
 
-### Planned MCP Service
+### MCP Service
 
-The planned service will:
+The working-tree service:
 
-- use Rust and Kuri's generic private `mcp` crate at commit `302fd702ffdcf89ab4829f3a299486fc297406f9`;
-- serve MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
-- expose one progressive tool, `grafana_exec`;
-- expose one initial action, `logql`;
-- query Grafana's HTTP API through the fixed datasource UID `loki`;
-- enforce local OAuth access tokens before MCP request handling; and
-- persist OAuth and browser-auth state in PostgreSQL.
+- uses Kuri's generic private `mcp` crate at a reviewed immutable Git revision;
+- serves MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
+- uses `#[mcp::progressive_server]` to generate one read-only progressive tool, `grafana_exec`;
+- exposes one domain action, `logql`;
+- queries Grafana's HTTP API through the fixed datasource UID `loki`;
+- enforces local OAuth access tokens before MCP request handling; and
+- persists generic OAuth and OIDC state in PostgreSQL schema `mcp`.
 
-The [LogQL specification](../grafana-exec/spec/logql.md) owns request and response limits. The [access document](access-authentication.md) owns authentication and authorization details.
+The [LogQL specification](../grafana-exec/spec/logql.md) owns query bounds and results. The [access document](access-authentication.md) owns authentication and authorization details.
 
 ## Component Status
 
 | Component | Status | Responsibility |
 | --- | --- | --- |
-| Axum host | Implemented | Serve unconditional health endpoints and handle graceful shutdown. |
-| Container image | Implemented | Package the host as a non-root Debian bookworm runtime. |
-| Deployment declarations | Implemented, not applied | Define future cluster, identity, Grafana, secret, workload, and route resources. |
-| MCP endpoint | Planned | Negotiate Streamable HTTP and dispatch authenticated tool calls. |
-| Hosted OAuth issuer | Planned | Issue local access tokens and manage OAuth client state. |
-| Browser-auth integration | Planned at runtime | Use declared Authentik credentials to authenticate the browser user. |
-| Grafana adapter | Planned | Send bounded instant or range queries through Grafana. |
-| PostgreSQL use | Planned | Store generic OAuth state and browser-auth state. |
-| Wrapping-key use | Planned | Protect persisted OAuth signing keys with the declared key file. |
+| Axum host | Implemented locally | Initialize dependencies, serve health/runtime routes, and handle graceful shutdown. |
+| Container declaration | Implemented locally | Build release and runtime images; Rust tests run through Cargo outside the image build. |
+| Deployment declarations | Implemented and applied to preview | Supply the runtime variables, Secrets, mounts, identity, database, Grafana, workload, and route. Preview still references the prior image. |
+| MCP endpoint | Implemented locally | Negotiate stateless Streamable HTTP and dispatch authenticated tool calls. |
+| Hosted OAuth issuer | Implemented locally | Issue local access tokens and manage durable OAuth client and token state. |
+| Generic OIDC integration | Implemented locally | Use MCP-owned one-shot OIDC transactions and hosted continuation with Authentik. |
+| Grafana adapter | Implemented locally | Send bounded instant or range queries through Grafana's Loki datasource proxy. |
+| PostgreSQL use | Implemented locally | Store generic OAuth state and encrypted signing material through migrations V1-V3, with one-shot OIDC attempts added by V4. |
+| Wrapping-key use | Implemented locally | Load the mounted keyring and protect persisted OAuth signing keys. |
 
-## Planned MCP Request Flow
+## MCP Request Flow
 
 1. An MCP client discovers the service's hosted OAuth metadata.
 2. The service redirects browser authentication to Authentik.
@@ -55,7 +57,7 @@ The [LogQL specification](../grafana-exec/spec/logql.md) owns request and respon
 5. The service validates the token and required `mcp:use` scope.
 6. The service validates the `grafana_exec` and `logql` arguments.
 7. The service queries Grafana with its Viewer service-account token.
-8. The service returns a capped MCP tool result.
+8. The action returns a semantic `McpToolResult`.
 
 ## Trust Boundaries
 

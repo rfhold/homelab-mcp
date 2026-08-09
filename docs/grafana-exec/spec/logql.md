@@ -2,74 +2,171 @@
 
 ## Status
 
-This specification defines intended behavior for `grafana_exec` action `logql`. The repository has no implementation.
+This specification defines the implemented working-tree behavior for `grafana_exec`. Local tests cover its validation, normalized responses, limits, error mapping, and mock HTTP integration. The code is uncommitted and undeployed; preview remains on the prior health-only image, and no live Grafana evidence exists.
 
-## Purpose
+## Tool Surface
 
-The action will execute bounded LogQL through Grafana's datasource proxy. It will always use the fixed datasource UID `loki`.
+`#[mcp::progressive_server]` generates one read-only MCP tool named `grafana_exec`. Its only domain action is `logql`.
 
-Direct Loki requests and caller-selected datasource UIDs are out of scope.
+The macro also generates action `help`, the filter behavior, and the tool schema. A help call takes this shape:
 
-## Input Contract
+```json
+{
+  "action": "help",
+  "filter": ".actions"
+}
+```
+
+Help takes no `input`. Its structured output lists `logql` with its description, guidance, and generated input schema.
+
+The optional top-level `filter` is a jq-compatible string. For semantic action output, it applies only to `structuredContent` after action execution.
+
+A LogQL call takes this nested shape:
+
+```json
+{
+  "action": "logql",
+  "input": {
+    "query": "{job=\"example\"} |= \"error\"",
+    "start": "2026-08-09T10:00:00Z",
+    "end": "2026-08-09T11:00:00Z",
+    "direction": "backward",
+    "limit": 1000
+  },
+  "filter": ".result"
+}
+```
+
+The tool schema must reject unknown top-level and `input` fields. `input` is required for `logql` and forbidden for `help`.
+
+Without `filter`, successful `logql` output uses the stable envelope below. With `filter`, the generated progressive framework applies the expression only to `structuredContent`.
+
+If a filter returns an object, that object becomes `structuredContent`. Otherwise, `structuredContent` becomes `{ "result": <filtered-value> }`. The framework preserves `content`, text, `isError`, `_meta`, and extensions.
+
+## LogQL Input
 
 | Field | Type | Required | Contract |
 | --- | --- | --- | --- |
-| `action` | string | Yes | Must equal `logql`. |
-| `query` | string | Yes | LogQL expression sent to Grafana after validation. |
-| `start` | timestamp | No | Must appear with `end`; selects range mode. |
-| `end` | timestamp | No | Must appear with `start`; selects range mode. |
-| `time` | timestamp | No | Applies only to instant mode. |
-| `direction` | enum | No | Applies only to range mode. |
-| `limit` | integer | No | Defaults to 1000 and must not exceed 5000. |
+| `query` | string | Yes | Must contain at least one non-whitespace character. |
+| `start` | RFC3339 timestamp | Range only | Must appear with `end`. |
+| `end` | RFC3339 timestamp | Range only | Must appear with `start`. |
+| `time` | RFC3339 timestamp | No | Applies only to instant mode. Omission asks Grafana for the current instant. |
+| `direction` | `forward` or `backward` | No | Applies only to range mode. Defaults to `backward`. |
+| `limit` | integer | No | Defaults to 1000. Valid values are 1 through 5000. |
 
-The implementation must define accepted timestamp syntax and `direction` enum values before this specification becomes executable.
+The service must parse every timestamp as RFC3339 before it contacts Grafana. It must preserve the represented instant and send Grafana the corresponding time value.
 
 ## Mode Selection
 
 - Both `start` and `end` select range mode.
 - Neither `start` nor `end` selects instant mode.
-- One range endpoint without the other produces an invalid-arguments error.
-- `time` with range mode produces an invalid-arguments error.
-- `direction` with instant mode produces an invalid-arguments error.
-- A range must not exceed 24 hours.
-- A range must order `start` before or equal to `end`.
+- One range endpoint without the other produces `invalid_arguments`.
+- `time` with range mode produces `invalid_arguments`.
+- `direction` with instant mode produces `invalid_arguments`.
+- A range longer than 24 hours produces `invalid_arguments`.
+- A `start` value after `end` produces `invalid_arguments`.
+
+Equal range endpoints are valid. Validation must finish before concurrency acquisition or any Grafana request.
 
 ## Resource Limits
 
-| Limit | Planned value |
+| Limit | Value |
 | --- | --- |
-| Default query limit | 1000 |
+| Default requested line limit | 1000 |
 | Maximum query limit | 5000 |
 | Maximum range | 24 hours |
 | Grafana request timeout | 30 seconds |
-| Maximum response body | 8 MiB |
 | Service-wide Grafana query concurrency | 4 |
 
-The service must reject invalid limits before a Grafana request. It must stop oversized responses and report a bounded tool error.
+The service must attempt concurrency acquisition without waiting. If all four permits are in use, it must fail with retryable `capacity_exhausted`.
+
+The 30-second deadline covers the complete Grafana request and response read. Every completion path must release its concurrency permit.
+
+No response-body, MCP-message, or serialized byte-size limit exists.
 
 ## Grafana Routing
 
-Instant mode will use Grafana's instant-query API for datasource UID `loki`. Range mode will use Grafana's range-query API for the same datasource.
+Instant mode uses `/api/datasources/proxy/uid/loki/loki/api/v1/query`. Range mode uses `/api/datasources/proxy/uid/loki/loki/api/v1/query_range`.
 
-The server will authenticate with its Grafana Viewer service-account token. The action will not accept caller credentials or datasource selection.
+Both modes must use fixed datasource UID `loki`. The service must call Grafana's proxy only and must not call Loki directly.
 
-## Output Contract
+Both modes send the validated `limit` as Grafana's fixed query `limit` parameter.
 
-The action will return Grafana query data in an MCP tool result. The exact normalized result schema remains an implementation decision.
+The caller cannot select a Grafana URL, Loki URL, datasource UID, credential, or authorization header. The service sends its Viewer service-account token only in the upstream `Authorization` header.
 
-The result must distinguish successful query data from tool errors. It must not include the Grafana service-account token or internal authorization headers.
+The Grafana HTTP client must disable redirects. It must not forward credentials to a redirect target.
 
-## Error Classes
+## Success Result
 
-The implementation will map these conditions to stable, safe tool errors:
+A successful unfiltered call returns one short text content item and object-shaped `structuredContent`. The text states the mode, result type, and item count.
 
-- invalid arguments;
-- concurrency capacity exhaustion;
-- Grafana timeout;
-- Grafana authentication or authorization failure;
-- Grafana query rejection;
-- Grafana transport failure;
-- malformed Grafana response; and
-- response cap exhaustion.
+For a filtered call, the macro changes only `structuredContent`. It preserves the original content, text, `isError`, `_meta`, and extensions. Filtering never changes the Grafana request or line limit.
 
-Exact error codes and retry guidance remain unresolved implementation details.
+`structuredContent` has this stable envelope:
+
+```json
+{
+  "mode": "range",
+  "result_type": "streams",
+  "result": [],
+  "stats": {
+    "bytes_processed": 0,
+    "lines_processed": 0,
+    "entries_returned": 0,
+    "execution_time_ms": 0
+  }
+}
+```
+
+`mode` is `instant` or `range`. `result_type` is `streams`, `matrix`, `vector`, or `scalar`.
+
+The optional `stats` object can contain only the four fields shown above. The service omits unavailable fields and discards unknown upstream statistics.
+
+The normalized `result` shape depends on `result_type`:
+
+| Result type | Stable `result` shape |
+| --- | --- |
+| `streams` | Array of `{ "stream": {<label>: <value>}, "values": [{"timestamp": <RFC3339>, "line": <string>}] }`. |
+| `matrix` | Array of `{ "metric": {<label>: <value>}, "values": [{"timestamp": <RFC3339>, "value": <string>}] }`. |
+| `vector` | Array of `{ "metric": {<label>: <value>}, "value": {"timestamp": <RFC3339>, "value": <string>} }`. |
+| `scalar` | `{ "timestamp": <RFC3339>, "value": <string> }`. |
+
+Label maps use strings. Samples preserve upstream values as strings and normalize sample timestamps to RFC3339.
+
+For stream results, the service deterministically truncates aggregate returned entries to the validated limit when Grafana overreturns. The bound applies only to returned log lines.
+
+Matrix, vector, and scalar results remain supported. The service does not describe their metric samples as log lines.
+
+The service must not expose Grafana's response wrapper, headers, datasource details, or credentials.
+
+## Tool Errors
+
+Well-formed `logql` calls with semantic validation or execution failures return a semantic `McpToolResult` with `isError: true`. The domain action returns that result directly with a short safe message and this stable envelope:
+
+```json
+{
+  "error": {
+    "code": "capacity_exhausted",
+    "message": "Grafana query capacity is currently exhausted.",
+    "retryable": true
+  }
+}
+```
+
+The seven stable semantic errors are:
+
+| Code | Safe message | Condition | Retryable |
+| --- | --- | --- | --- |
+| `invalid_arguments` | `The LogQL arguments are invalid.` | Invalid field value or invalid instant/range combination. | `false` |
+| `capacity_exhausted` | `Grafana query capacity is currently exhausted.` | All four query permits are in use. The service fails immediately. | `true` |
+| `timeout` | `The Grafana query timed out.` | The Grafana operation exceeds 30 seconds. | `true` |
+| `grafana_unauthorized` | `Grafana rejected the service credentials.` | Grafana returns an authentication or authorization failure. | `false` |
+| `query_rejected` | `Grafana rejected the LogQL query.` | Grafana rejects the LogQL query or request parameters. | `false` |
+| `upstream_unavailable` | `Grafana is currently unavailable.` | Grafana transport fails or Grafana returns a retryable server failure. | `true` |
+| `invalid_response` | `Grafana returned an invalid response.` | Grafana returns malformed or unsupported data. | `false` |
+
+Messages must not include credentials, internal URLs, response bodies, query data, or low-level transport details.
+
+Malformed JSON-RPC requests, unknown tools, unknown actions, schema-invalid tool shapes, and invalid filters use JSON-RPC errors. They do not use the semantic tool-error envelope.
+
+Schema-valid values that violate LogQL combinations or bounds use `invalid_arguments`. Examples include an empty query, limit zero, and a lone range endpoint.
