@@ -15,7 +15,7 @@
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Optional trace endpoint. Without the shared endpoint, the metric endpoint must also exist. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Optional metric endpoint. Without the shared endpoint, the trace endpoint must also exist. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | Set to `http/protobuf` for the declared deployment. |
-| `RUST_LOG` | Optional level filter for `homelab_mcp` and `mcp` target trees only. Defaults both trees to `info`. |
+| `RUST_LOG` | Optional JSON log level filter for the approved `homelab_mcp` and `mcp` target trees. Invalid or absent configuration defaults both trees to `info`. It does not control OpenTelemetry trace admission. |
 
 The declared deployment sends OTLP/HTTP to Alloy TCP port 4318. It sends profiles to TCP port 4040. Network policy permits both ports.
 
@@ -82,7 +82,7 @@ Metric backend translation can replace dots with underscores and append `_total`
 | Symptom | Checks |
 | --- | --- |
 | Process exits before listen | Check safe error text for missing deployment environment, incomplete signal-specific OTLP endpoints, an invalid Pyroscope origin, or profiler initialization failure. |
-| JSON logs exist but traces do not | Confirm the shared endpoint or both signal-specific endpoints exist, protocol uses HTTP protobuf, and egress reaches Alloy port 4318. Inspect Alloy and Tempo observability. |
+| JSON logs exist but traces do not | Do not adjust `RUST_LOG`; it controls JSON logs only. Confirm the missing span uses an approved target at `ERROR`, `WARN`, or `INFO`. Then confirm the shared endpoint or both signal-specific endpoints exist, protocol uses HTTP protobuf, and egress reaches Alloy port 4318. Inspect Alloy and Tempo observability. |
 | Metrics do not appear | Confirm the same OTLP settings, wait for the periodic export interval, then inspect Alloy and Mimir observability. |
 | Probe request telemetry does not appear | This is intentional for `/health` and `/ready`; use Kubernetes probe status and direct endpoint behavior. |
 | Trace IDs do not appear in logs | Confirm the event occurs inside an instrumented HTTP or Grafana span. Startup events legitimately omit IDs. |
@@ -93,6 +93,6 @@ Metric backend translation can replace dots with underscores and append `_total`
 
 Never place tokens, authorization headers, full environment dumps, query text, or profile selectors in tickets or shared logs.
 
-`RUST_LOG` cannot enable dependency target trees. It also cannot bypass application redaction for URLs, bodies, upstream errors, or credentials.
+`RUST_LOG` affects JSON logs only. It cannot enable dependency target trees or bypass application redaction for URLs, bodies, upstream errors, or credentials.
 
 Do not expect local application logs for runtime OTLP export or Pyroscope upload failures. Use backend freshness and telemetry-system health instead.

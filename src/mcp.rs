@@ -231,11 +231,7 @@ mod tests {
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
     use tokio::{net::TcpListener, task::JoinHandle};
-    use tracing_subscriber::{
-        Layer as _,
-        filter::{FilterExt as _, filter_fn},
-        layer::SubscriberExt as _,
-    };
+    use tracing_subscriber::{Layer as _, filter::filter_fn, layer::SubscriberExt as _};
 
     use super::*;
 
@@ -332,16 +328,13 @@ mod tests {
 
     fn capture_authorized_call(
         runtime: &tokio::runtime::Runtime,
-        env_filter: tracing_subscriber::EnvFilter,
     ) -> (Vec<SpanData>, Vec<(&'static str, &'static str)>) {
         let exporter = TestSpanExporter::default();
         let targets = Arc::new(Mutex::new(Vec::new()));
         let provider = SdkTracerProvider::builder()
             .with_simple_exporter(exporter.clone())
             .build();
-        let filter =
-            filter_fn(|metadata| crate::observability::test_allowed_target(metadata.target()))
-                .and(env_filter);
+        let filter = filter_fn(crate::observability::test_trace_metadata_allowed);
         let subscriber = tracing_subscriber::registry()
             .with(SpanTargetCapture(targets.clone()))
             .with(
@@ -426,7 +419,7 @@ mod tests {
                     "--nocapture",
                 ])
                 .env(CHILD_MARKER, "1")
-                .env_remove("RUST_LOG")
+                .env("RUST_LOG", "homelab_mcp=info")
                 .status()
                 .unwrap();
             assert!(status.success());
@@ -437,48 +430,28 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        for (case, filter) in [
-            (
-                "no-rust-log",
-                crate::observability::test_configured_env_filter(),
-            ),
-            (
-                "explicit-default",
-                tracing_subscriber::EnvFilter::new("homelab_mcp=info,mcp=info"),
-            ),
-        ] {
-            let (spans, targets) = capture_authorized_call(&runtime, filter);
-            let exported = spans
-                .iter()
-                .map(|span| (span.name.as_ref(), span.instrumentation_scope.name()))
-                .collect::<Vec<_>>();
-            let server = spans
-                .iter()
-                .find(|span| span.name == "mcp.server.request")
-                .unwrap_or_else(|| panic!("missing Kuri server span; exported {exported:?}"));
-            let grafana = spans
-                .iter()
-                .find(|span| span.name == "grafana.query")
-                .unwrap();
+        let (spans, targets) = capture_authorized_call(&runtime);
+        let exported = spans
+            .iter()
+            .map(|span| (span.name.as_ref(), span.instrumentation_scope.name()))
+            .collect::<Vec<_>>();
+        let server = spans
+            .iter()
+            .find(|span| span.name == "mcp.server.request")
+            .unwrap_or_else(|| panic!("missing Kuri server span; exported {exported:?}"));
+        let grafana = spans
+            .iter()
+            .find(|span| span.name == "grafana.query")
+            .unwrap();
 
-            assert!(targets.contains(&("mcp.server.request", "mcp::server")));
-            assert!(targets.contains(&("grafana.query", "homelab_mcp::grafana")));
-            assert_eq!(server.parent_span_id, SpanId::INVALID);
-            assert_eq!(grafana.parent_span_id, server.span_context.span_id());
-            assert_eq!(
-                grafana.span_context.trace_id(),
-                server.span_context.trace_id()
-            );
-            println!(
-                "{case}: mcp.server.request target=mcp::server trace_id={} span_id={} parent_id={}; grafana.query target=homelab_mcp::grafana trace_id={} span_id={} parent_id={}",
-                server.span_context.trace_id(),
-                server.span_context.span_id(),
-                server.parent_span_id,
-                grafana.span_context.trace_id(),
-                grafana.span_context.span_id(),
-                grafana.parent_span_id,
-            );
-        }
+        assert!(targets.contains(&("mcp.server.request", "mcp::server")));
+        assert!(targets.contains(&("grafana.query", "homelab_mcp::grafana")));
+        assert_eq!(server.parent_span_id, SpanId::INVALID);
+        assert_eq!(grafana.parent_span_id, server.span_context.span_id());
+        assert_eq!(
+            grafana.span_context.trace_id(),
+            server.span_context.trace_id()
+        );
     }
 
     #[tokio::test]

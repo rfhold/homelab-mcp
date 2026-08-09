@@ -41,7 +41,7 @@ The JSON formatter adds lowercase hexadecimal `trace_id` and `span_id` fields wh
 
 HTTP spans record method, stable route, and outcome. Completed requests also record response status and error status for 5xx responses. Cancelled requests record error status without a response status. `/health` and `/ready` intentionally bypass this layer and emit no request spans, request metrics, or completion logs. Grafana-upstream `grafana.query` spans record bounded action, mode, datasource UID, and outcome values.
 
-Telemetry accepts only `homelab_mcp`, `homelab_mcp::*`, `mcp`, and `mcp::*` event and span targets. This hard allowlist applies before JSON and OpenTelemetry layers. `RUST_LOG` can adjust levels within the allowlist, but it cannot enable dependency targets.
+OpenTelemetry trace admission is fixed. It accepts `ERROR`, `WARN`, and `INFO` spans and events only for `homelab_mcp`, `homelab_mcp::*`, `mcp`, and `mcp::*` targets. It rejects `DEBUG`, `TRACE`, dependency, and lookalike targets and does not consult `RUST_LOG`. The JSON layer applies the same target allowlist with `RUST_LOG`; invalid or absent configuration defaults both target trees to `INFO`.
 
 ## Metric Inventory
 
@@ -83,7 +83,7 @@ The agent does not add pod names, pod UIDs, user values, query text, or a second
 
 Instrumentation excludes authorization headers, tokens, request bodies, query strings, LogQL, PromQL, TraceQL, profile selectors, internal URLs, upstream errors, and upstream response bodies.
 
-HTTP fallback routes collapse unknown identifiers. Semantic tool errors expose fixed safe text. Grafana-upstream metrics and spans use fixed datasource UIDs and bounded outcomes. The target allowlist prevents permissive `RUST_LOG` directives from exposing dependency URL, body, or error events.
+HTTP fallback routes collapse unknown identifiers. Semantic tool errors expose fixed safe text. Grafana-upstream metrics and spans use fixed datasource UIDs and bounded outcomes. The JSON target allowlist prevents permissive `RUST_LOG` directives from exposing dependency URL, body, or error events.
 
 The allowlist intentionally suppresses exporter and profiler dependency diagnostics. Runtime export and upload failures do not create local application logs. Missing or stale backend data and Alloy or backend observability provide failure evidence. Application-owned startup and shutdown events remain sanitized and available locally.
 

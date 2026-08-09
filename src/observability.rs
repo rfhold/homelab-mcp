@@ -12,7 +12,7 @@ use opentelemetry_sdk::{
     trace::{Sampler, SdkTracerProvider},
 };
 use serde_json::Value;
-use tracing::{Event, Subscriber, field::Visit};
+use tracing::{Event, Level, Metadata, Subscriber, field::Visit};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::{
     EnvFilter, Layer as _,
@@ -116,8 +116,7 @@ pub fn init(
     global::set_tracer_provider(tracer_provider.clone());
     global::set_meter_provider(meter_provider.clone());
     let tracer = tracer_provider.tracer(SERVICE_NAME);
-    let telemetry_filter =
-        filter_fn(|metadata| allowed_target(metadata.target())).and(configured_env_filter());
+    let telemetry_filter = filter_fn(trace_metadata_allowed);
     let json_filter =
         filter_fn(|metadata| allowed_target(metadata.target())).and(configured_env_filter());
     tracing_subscriber::registry()
@@ -174,11 +173,6 @@ fn configured_env_filter() -> EnvFilter {
         .unwrap_or_else(|_| EnvFilter::new("homelab_mcp=info,mcp=info"))
 }
 
-#[cfg(test)]
-pub(crate) fn test_configured_env_filter() -> EnvFilter {
-    configured_env_filter()
-}
-
 fn allowed_target(target: &str) -> bool {
     target == "homelab_mcp"
         || target.starts_with("homelab_mcp::")
@@ -186,9 +180,14 @@ fn allowed_target(target: &str) -> bool {
         || target.starts_with("mcp::")
 }
 
+fn trace_metadata_allowed(metadata: &Metadata<'_>) -> bool {
+    allowed_target(metadata.target())
+        && matches!(*metadata.level(), Level::ERROR | Level::WARN | Level::INFO)
+}
+
 #[cfg(test)]
-pub(crate) fn test_allowed_target(target: &str) -> bool {
-    allowed_target(target)
+pub(crate) fn test_trace_metadata_allowed(metadata: &Metadata<'_>) -> bool {
+    trace_metadata_allowed(metadata)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -380,6 +379,27 @@ mod tests {
         assert_eq!(
             *captured.lock().unwrap(),
             ["homelab_mcp::app", "mcp::server"]
+        );
+    }
+
+    #[test]
+    fn trace_filter_allows_only_approved_targets_through_info() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(TargetCapture(captured.clone()).with_filter(filter_fn(trace_metadata_allowed)));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "homelab_mcp", "owned error");
+            tracing::warn!(target: "homelab_mcp::app", "owned warning");
+            tracing::info!(target: "mcp", "owned MCP info");
+            tracing::info!(target: "mcp::server", "owned MCP server info");
+            tracing::debug!(target: "mcp::server", "excluded MCP debug");
+            tracing::trace!(target: "homelab_mcp::app", "excluded application trace");
+            tracing::error!(target: "reqwest", "excluded dependency error");
+            tracing::info!(target: "mcp_evil", "excluded lookalike target");
+        });
+        assert_eq!(
+            *captured.lock().unwrap(),
+            ["homelab_mcp", "homelab_mcp::app", "mcp", "mcp::server"]
         );
     }
 

@@ -39,7 +39,8 @@ Tests cover these observability contracts:
 - complete telemetry bypass for `/health` and `/ready`, while endpoint responses and normal-route instrumentation remain intact;
 - cancellation-safe HTTP metrics, balanced active requests, bounded cancelled outcomes, and absent response status for cancellation;
 - canonical standard HTTP methods and `OTHER` for extension methods;
-- hard `homelab_mcp` and `mcp` telemetry target allowlists under permissive `RUST_LOG` levels;
+- fixed OpenTelemetry admission for exact and prefixed `homelab_mcp` and `mcp` targets at `ERROR`, `WARN`, and `INFO`, independent of `RUST_LOG`;
+- export of `mcp.server.request` as the parent of `grafana.query` when `RUST_LOG` omits the `mcp` tree, plus JSON target isolation under permissive levels;
 - bounded and sanitized Pyroscope cleanup outcomes, including the ten-second timeout path;
 - exact host HTTP and Grafana-upstream metric names plus bounded action, mode, datasource, and outcome labels;
 - credential-free HTTPS root Pyroscope origins, safe tags, and the absence of conflicting or per-pod profile tags;
@@ -58,7 +59,7 @@ After an authorized deployment, record evidence for each row. Use timestamps, no
 | Area | Required evidence |
 | --- | --- |
 | JSON logs | A startup event and one request completion parse as single JSON objects with approved fields only. |
-| Target filtering | Permissive `RUST_LOG` levels expose only `homelab_mcp` and `mcp` target trees. Exporter and profiler dependency diagnostics remain absent. |
+| Signal filtering | Under `RUST_LOG=homelab_mcp=info`, Tempo contains `mcp.server.request` with `grafana.query` as its child for one authorized request. Under a permissive value, JSON logs still expose only the two approved target trees. Exporter and profiler dependency diagnostics remain absent. |
 | Trace correlation | One request log has `trace_id` and `span_id`; Tempo contains that trace and matching span. |
 | W3C propagation | A request with a known `traceparent` joins the caller trace. |
 | Trace resources | Tempo shows service, namespace, environment, Kubernetes namespace, pod name, `k8s.pod.uid`, and matching `service.instance.id`. |
