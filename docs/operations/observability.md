@@ -35,6 +35,8 @@ The `Drop` fallback starts detached best-effort Pyroscope cleanup without a wait
 
 If a request loses its task before a response, the metrics guard finalizes it as cancelled. Active request count returns to balance, and completion telemetry omits response status.
 
+`/health` and `/ready` intentionally emit no HTTP request spans, metrics, or completion logs. Diagnose probe failures from Kubernetes probe status and endpoint behavior rather than expecting application request telemetry.
+
 At 100 Hz, the profiler samples each process one hundred times per second. Watch CPU usage and request latency after rollout. Disable profiling by removing `HOMELAB_MCP_PYROSCOPE_URL` if overhead breaches the service budget.
 
 ## Validation
@@ -59,10 +61,10 @@ HTTP request rate in Mimir:
 sum by (http_route, http_outcome) (rate(http_server_request_count{service_name="homelab-mcp"}[5m]))
 ```
 
-Grafana action failures in Mimir:
+Grafana-upstream failures in Mimir:
 
 ```promql
-sum by (action, outcome) (rate(homelab_mcp_grafana_exec_action_calls_total{service_name="homelab-mcp",outcome!="success"}[5m]))
+sum by (action, outcome) (rate(homelab_mcp_grafana_upstream_requests_total{service_name="homelab-mcp",outcome!="success"}[5m]))
 ```
 
 Service traces in Tempo:
@@ -82,11 +84,12 @@ Metric backend translation can replace dots with underscores and append `_total`
 | Process exits before listen | Check safe error text for missing deployment environment, incomplete signal-specific OTLP endpoints, an invalid Pyroscope origin, or profiler initialization failure. |
 | JSON logs exist but traces do not | Confirm the shared endpoint or both signal-specific endpoints exist, protocol uses HTTP protobuf, and egress reaches Alloy port 4318. Inspect Alloy and Tempo observability. |
 | Metrics do not appear | Confirm the same OTLP settings, wait for the periodic export interval, then inspect Alloy and Mimir observability. |
+| Probe request telemetry does not appear | This is intentional for `/health` and `/ready`; use Kubernetes probe status and direct endpoint behavior. |
 | Trace IDs do not appear in logs | Confirm the event occurs inside an instrumented HTTP or Grafana span. Startup events legitimately omit IDs. |
 | Parent traces do not connect | Confirm the caller sends valid W3C `traceparent` headers. Proxies must preserve those headers. |
 | Profiles do not appear | Confirm `HOMELAB_MCP_PYROSCOPE_URL` exists and egress reaches port 4040. Match the exact profile tags, then inspect Alloy and Pyroscope observability. |
 | CPU or latency rises | Compare against a window without profiling. Remove the Pyroscope URL if 100 Hz sampling causes unacceptable overhead. |
-| Grafana action metrics spike | Group upstream outcomes by action, mode, and datasource UID. Use traces and correlated logs for the same interval. |
+| Grafana-upstream failures spike | Group upstream outcomes by action, mode, and datasource UID. Use `grafana.query` traces and correlated logs for the same interval. |
 
 Never place tokens, authorization headers, full environment dumps, query text, or profile selectors in tickets or shared logs.
 

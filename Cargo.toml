@@ -9,7 +9,7 @@ axum = "0.8.9"
 base64 = "0.22.1"
 chrono = "0.4.45"
 getrandom = "0.4.3"
-mcp = { git = "https://git.holdenitdown.net/rfhold/kuri.git", rev = "003a11f1405818f39eba01612b0d00ee552e3be0", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }
+mcp = { git = "https://git.holdenitdown.net/rfhold/kuri.git", rev = "bac72ef0fba40fee18a497f8aa8aebcbdca7b1f3", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }

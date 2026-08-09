@@ -35,12 +35,13 @@ Tests cover these observability contracts:
 
 - local OTLP mode, shared endpoint mode, paired signal-specific endpoints, and rejection of either signal-specific endpoint alone;
 - required resource identity, pod UID mapping to `k8s.pod.uid` and `service.instance.id`, and `AlwaysOn` trace correlation;
-- JSON trace and span IDs, bounded HTTP routes, and one safe completion event;
+- JSON trace and span IDs, bounded HTTP routes, and one safe completion event for instrumented routes;
+- complete telemetry bypass for `/health` and `/ready`, while endpoint responses and normal-route instrumentation remain intact;
 - cancellation-safe HTTP metrics, balanced active requests, bounded cancelled outcomes, and absent response status for cancellation;
 - canonical standard HTTP methods and `OTHER` for extension methods;
 - hard `homelab_mcp` and `mcp` telemetry target allowlists under permissive `RUST_LOG` levels;
 - bounded and sanitized Pyroscope cleanup outcomes, including the ten-second timeout path;
-- exact metric names plus bounded action, mode, datasource, and outcome labels;
+- exact host HTTP and Grafana-upstream metric names plus bounded action, mode, datasource, and outcome labels;
 - credential-free HTTPS root Pyroscope origins, safe tags, and the absence of conflicting or per-pod profile tags;
 - telemetry environment and Pulumi downward API wiring;
 - Alloy egress ports 4318 and 4040;
@@ -61,8 +62,8 @@ After an authorized deployment, record evidence for each row. Use timestamps, no
 | Trace correlation | One request log has `trace_id` and `span_id`; Tempo contains that trace and matching span. |
 | W3C propagation | A request with a known `traceparent` joins the caller trace. |
 | Trace resources | Tempo shows service, namespace, environment, Kubernetes namespace, pod name, `k8s.pod.uid`, and matching `service.instance.id`. |
-| HTTP metrics | Request count, active requests, and duration appear with bounded routes and outcomes. A cancelled request restores the active count and has no response status. |
-| MCP metrics | Action calls and duration appear for each exercised action with bounded outcomes. |
+| HTTP metrics | Request count, active requests, and duration appear with bounded routes and outcomes. A cancelled request restores the active count and has no response status. `/health` and `/ready` produce no request telemetry. |
+| MCP metrics | Generic `mcp.server.request.count`, `.duration`, and `.in_flight` appear with protocol request attributes and bounded outcomes. |
 | Grafana metrics | Upstream requests, duration, and in-flight values appear with fixed datasource UIDs. |
 | Profiles | A 100 Hz CPU profile appears for `homelab-mcp` with only approved stable tags. |
 | LogQL | Authenticated instant and range calls return normalized data through UID `loki`. |

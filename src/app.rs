@@ -21,6 +21,10 @@ struct HttpMetrics {
     duration: opentelemetry::metrics::Histogram<f64>,
     #[cfg(test)]
     active_balance: Arc<std::sync::atomic::AtomicI64>,
+    #[cfg(test)]
+    active_updates: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    completed_requests: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HttpMetrics {
@@ -42,6 +46,10 @@ impl HttpMetrics {
                 .build(),
             #[cfg(test)]
             active_balance: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+            #[cfg(test)]
+            active_updates: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            completed_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -50,11 +58,26 @@ impl HttpMetrics {
         #[cfg(test)]
         self.active_balance
             .fetch_add(value, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        self.active_updates
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(test)]
     fn active_balance(&self) -> i64 {
         self.active_balance
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn completed_requests(&self) -> u64 {
+        self.completed_requests
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn active_updates(&self) -> u64 {
+        self.active_updates
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
@@ -130,6 +153,10 @@ impl RequestMetricsGuard {
         }
         self.metrics.add_active(-1, &active_attributes);
         self.metrics.requests.add(1, &completed_attributes);
+        #[cfg(test)]
+        self.metrics
+            .completed_requests
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.metrics.duration.record(elapsed, &completed_attributes);
         emit_request_completion(
             &self.span,
@@ -158,7 +185,16 @@ pub fn router(
     oidc: Router,
     mcp: Router,
 ) -> Router {
-    let metrics = HttpMetrics::new();
+    router_with_metrics(readiness, oauth, oidc, mcp, HttpMetrics::new())
+}
+
+fn router_with_metrics(
+    readiness: Arc<dyn ReadinessCheck>,
+    oauth: Router,
+    oidc: Router,
+    mcp: Router,
+    metrics: HttpMetrics,
+) -> Router {
     Router::new()
         .route("/health", get(healthy))
         .route("/ready", get(ready))
@@ -172,6 +208,10 @@ pub fn router(
 }
 
 async fn instrument_request(request: Request<Body>, next: Next, metrics: HttpMetrics) -> Response {
+    if matches!(request.uri().path(), "/health" | "/ready") {
+        return next.run(request).await;
+    }
+
     let method = bounded_http_method(request.method()).to_owned();
     let route = request
         .extensions()
@@ -286,7 +326,7 @@ mod tests {
         fmt,
         sync::{
             Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
     };
     use tower::ServiceExt as _;
@@ -332,6 +372,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ready.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn probes_bypass_telemetry_while_normal_routes_are_instrumented() {
+        let current = Arc::new(AtomicBool::new(false));
+        let readiness: Arc<dyn ReadinessCheck> = Arc::new(TestReadiness(current));
+        let metrics = HttpMetrics::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let request_spans = Arc::new(AtomicU64::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(EventCapture(events.clone()))
+            .with(RequestSpanCapture(request_spans.clone()));
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let router = router_with_metrics(
+            readiness,
+            Router::new().route("/normal", get(|| async { StatusCode::NO_CONTENT })),
+            Router::new(),
+            Router::new(),
+            metrics.clone(),
+        );
+
+        for (path, expected) in [
+            ("/health", StatusCode::OK),
+            ("/ready", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+
+        assert_eq!(request_spans.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.completed_requests(), 0);
+        assert_eq!(metrics.active_updates(), 0);
+        assert!(events.lock().unwrap().is_empty());
+
+        let response = router
+            .oneshot(Request::get("/normal").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(request_spans.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.completed_requests(), 1);
+        assert_eq!(metrics.active_updates(), 2);
+        assert_eq!(metrics.active_balance(), 0);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].fields["http.route"], "/normal");
+        assert!(events[0].in_request_span);
     }
 
     #[test]
@@ -444,6 +535,24 @@ mod tests {
                 fields: fields.0,
                 in_request_span,
             });
+        }
+    }
+
+    struct RequestSpanCapture(Arc<AtomicU64>);
+
+    impl<S> Layer<S> for RequestSpanCapture
+    where
+        S: Subscriber,
+    {
+        fn on_new_span(
+            &self,
+            attributes: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _context: Context<'_, S>,
+        ) {
+            if attributes.metadata().name() == "http.server.request" {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 

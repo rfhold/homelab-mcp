@@ -2,7 +2,7 @@
 
 ## Scope
 
-The runtime emits correlated traces, metrics, JSON logs, and CPU profiles. It also instruments HTTP, `grafana_exec`, and upstream Grafana operations.
+The runtime emits correlated traces, metrics, JSON logs, and CPU profiles. The host instruments non-probe HTTP traffic and Grafana-upstream operations. Kuri generic MCP owns standard MCP request instrumentation.
 
 ## Signal Paths
 
@@ -39,7 +39,7 @@ The global W3C Trace Context propagator extracts inbound HTTP `traceparent` and 
 
 The JSON formatter adds lowercase hexadecimal `trace_id` and `span_id` fields when an active OpenTelemetry span exists. Events outside a span omit both fields.
 
-HTTP spans record method, stable route, and outcome. Completed requests also record response status and error status for 5xx responses. Cancelled requests record error status without a response status. Grafana spans record bounded action, mode, datasource UID, and outcome values.
+HTTP spans record method, stable route, and outcome. Completed requests also record response status and error status for 5xx responses. Cancelled requests record error status without a response status. `/health` and `/ready` intentionally bypass this layer and emit no request spans, request metrics, or completion logs. Grafana-upstream `grafana.query` spans record bounded action, mode, datasource UID, and outcome values.
 
 Telemetry accepts only `homelab_mcp`, `homelab_mcp::*`, `mcp`, and `mcp::*` event and span targets. This hard allowlist applies before JSON and OpenTelemetry layers. `RUST_LOG` can adjust levels within the allowlist, but it cannot enable dependency targets.
 
@@ -50,13 +50,16 @@ Telemetry accepts only `homelab_mcp`, `homelab_mcp::*`, `mcp`, and `mcp::*` even
 | `http.server.request.count` | count | `http.request.method`, `http.route`, `http.outcome`, plus `http.response.status_code` when a response exists |
 | `http.server.active_requests` | count | `http.request.method`, `http.route` |
 | `http.server.request.duration` | seconds | Same attributes as `http.server.request.count` |
-| `homelab_mcp.grafana_exec.action.calls` | count | `action`, `outcome` |
-| `homelab_mcp.grafana_exec.action.duration` | seconds | `action`, `outcome` |
+| `mcp.server.request.count` | count | Protocol request identity and bounded outcome attributes owned by Kuri generic MCP |
+| `mcp.server.request.duration` | seconds | Same protocol and outcome attributes as the generic MCP request count |
+| `mcp.server.request.in_flight` | count | Protocol request identity attributes owned by Kuri generic MCP |
 | `homelab_mcp.grafana.upstream.requests` | count | `action`, `mode`, `datasource_uid`, `outcome` |
 | `homelab_mcp.grafana.upstream.duration` | seconds | Same attributes as upstream requests |
 | `homelab_mcp.grafana.upstream.in_flight` | count | `action`, `mode`, `datasource_uid` |
 
-HTTP route values use matched templates or bounded fallback classes. Action, mode, datasource, and outcome values pass through fixed allowlists.
+The pinned Kuri generic MCP revision provides these metrics. Homelab does not provide substitute action spans or metrics.
+
+HTTP route values use matched templates or bounded fallback classes. Action, mode, datasource, and outcome values pass through fixed allowlists. Probe routes are intentionally absent from all HTTP request telemetry.
 
 HTTP methods use canonical uppercase values for `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `CONNECT`, and `TRACE`. Every extension method becomes `OTHER` before span, metric, or log creation.
 
@@ -80,7 +83,7 @@ The agent does not add pod names, pod UIDs, user values, query text, or a second
 
 Instrumentation excludes authorization headers, tokens, request bodies, query strings, LogQL, PromQL, TraceQL, profile selectors, internal URLs, upstream errors, and upstream response bodies.
 
-HTTP fallback routes collapse unknown identifiers. Semantic tool errors expose fixed safe text. Grafana metrics and spans use fixed datasource UIDs and bounded outcomes. The target allowlist prevents permissive `RUST_LOG` directives from exposing dependency URL, body, or error events.
+HTTP fallback routes collapse unknown identifiers. Semantic tool errors expose fixed safe text. Grafana-upstream metrics and spans use fixed datasource UIDs and bounded outcomes. The target allowlist prevents permissive `RUST_LOG` directives from exposing dependency URL, body, or error events.
 
 The allowlist intentionally suppresses exporter and profiler dependency diagnostics. Runtime export and upload failures do not create local application logs. Missing or stale backend data and Alloy or backend observability provide failure evidence. Application-owned startup and shutdown events remain sanitized and available locally.
 

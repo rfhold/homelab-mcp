@@ -95,6 +95,6 @@ Each action supplies its own noun in `invalid_arguments` and `query_rejected`. E
 
 ## Observability
 
-Each domain call records action duration and an outcome of `success`, `error`, or `cancelled`. Each upstream attempt records action, mode, fixed datasource UID, duration, and a bounded outcome.
+Kuri generic MCP owns standard request spans and metrics. Homelab adds telemetry only for Grafana-upstream attempts: the `grafana.query` span and request, duration, and in-flight metrics record action, mode, fixed datasource UID, and a bounded outcome.
 
 See the [observability architecture](../../architecture/observability.md) for metric names and attributes.
