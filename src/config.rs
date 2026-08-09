@@ -48,6 +48,7 @@ pub struct Config {
     pub code_ttl: Duration,
     pub allow_dcr: bool,
     pub allow_cimd: bool,
+    pub oauth_cimd_trusted_private_origins: Vec<Url>,
     pub allow_loopback_redirects: bool,
     pub wrapping_keys_file: String,
     pub grafana_url: Url,
@@ -100,6 +101,9 @@ impl Config {
             code_ttl: seconds("OAUTH_CODE_TTL")?,
             allow_dcr: boolean("OAUTH_ALLOW_DCR")?,
             allow_cimd: boolean("OAUTH_ALLOW_CIMD")?,
+            oauth_cimd_trusted_private_origins: secure_origins(
+                "OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS",
+            )?,
             allow_loopback_redirects: boolean("OAUTH_ALLOW_LOOPBACK_REDIRECTS")?,
             wrapping_keys_file: required("OAUTH_WRAPPING_KEYS_FILE")?,
             grafana_url: secure_origin("GRAFANA_URL", &required("GRAFANA_URL")?)?,
@@ -222,6 +226,18 @@ fn secure_origin(name: &str, value: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+fn secure_origins(name: &str) -> Result<Vec<Url>, String> {
+    optional(name)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .map(|value| secure_origin(name, value))
+                .collect()
+        })
+        .unwrap_or_else(|| Ok(Vec::new()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +325,24 @@ mod tests {
     }
 
     #[test]
+    fn trusted_cimd_origins_require_exact_https_origins() {
+        for value in ["https://kuri.example/", "https://kuri.example:8443/"] {
+            assert!(secure_origin("OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS", value).is_ok());
+        }
+        for value in [
+            "http://kuri.example/",
+            "https://user@kuri.example/",
+            "https://kuri.example/client",
+            "https://kuri.example/?tenant=private",
+        ] {
+            assert_eq!(
+                secure_origin("OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS", value).unwrap_err(),
+                "invalid HOMELAB_MCP_OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS"
+            );
+        }
+    }
+
+    #[test]
     fn config_rejects_any_required_scope_other_than_mcp_use() {
         let mut config = Config {
             database_url: "postgres://localhost/test".to_owned(),
@@ -327,6 +361,7 @@ mod tests {
             code_ttl: Duration::from_secs(60),
             allow_dcr: false,
             allow_cimd: false,
+            oauth_cimd_trusted_private_origins: Vec::new(),
             allow_loopback_redirects: false,
             wrapping_keys_file: "/unused".to_owned(),
             grafana_url: Url::parse("https://grafana.example/").unwrap(),

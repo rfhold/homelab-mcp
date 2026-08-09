@@ -9,7 +9,8 @@ use mcp::{
     OAuthConsentHandler, OAuthConsentModel, OAuthConsentPresentation, OAuthResource,
     OAuthSigningKeyState, OidcEndpointPolicy, OidcPrincipalMapper, OidcPrincipalMapping,
     OidcResourceOwnerAuthenticator, OidcResourceOwnerConfig, OidcVerifiedIdentity,
-    PostgresOAuthAuthorizationStore, PostgresOidcResourceOwnerStore, server::BoxFuture,
+    PostgresOAuthAuthorizationStore, PostgresOidcResourceOwnerStore,
+    TrustedPrivateOAuthCimdDestinationPolicy, server::BoxFuture,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -100,12 +101,20 @@ pub async fn initialize(config: &Config) -> Result<OAuthRuntime, String> {
     .map_err(|_| "invalid hosted OAuth configuration".to_owned())?;
 
     if config.allow_dcr || config.allow_cimd || config.allow_loopback_redirects {
-        let metadata_fetcher = config.allow_cimd.then(|| {
-            Arc::new(
-                HardenedOAuthClientMetadataFetcher::production()
-                    .with_loopback_redirects(config.allow_loopback_redirects),
-            ) as Arc<_>
-        });
+        let metadata_fetcher = if config.allow_cimd {
+            let mut fetcher = HardenedOAuthClientMetadataFetcher::production()
+                .with_loopback_redirects(config.allow_loopback_redirects);
+            if !config.oauth_cimd_trusted_private_origins.is_empty() {
+                let destination_policy = TrustedPrivateOAuthCimdDestinationPolicy::new(
+                    config.oauth_cimd_trusted_private_origins.clone(),
+                )
+                .map_err(|_| "invalid trusted CIMD destination policy".to_owned())?;
+                fetcher = fetcher.with_destination_policy(Arc::new(destination_policy));
+            }
+            Some(Arc::new(fetcher) as Arc<_>)
+        } else {
+            None
+        };
         server = server
             .with_client_registration(OAuthClientRegistrationOptions {
                 metadata_fetcher,

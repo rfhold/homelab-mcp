@@ -42,6 +42,11 @@ const accessTokenTtl = config.require("mcpOAuthAccessTokenTtl");
 const refreshTokenTtl = config.require("mcpOAuthRefreshTokenTtl");
 const refreshFamilyTtl = config.require("mcpOAuthRefreshFamilyTtl");
 const codeTtl = config.require("mcpOAuthCodeTtl");
+const mcpOAuthCimdTrustedPrivateOrigins = (
+  config.getObject<string[]>("mcpOAuthCimdTrustedPrivateOrigins") ?? []
+).map((origin) =>
+  validateHttpsOrigin(origin, "mcpOAuthCimdTrustedPrivateOrigins"),
+);
 const wrappingKeyVersions = config.requireObject<string[]>(
   "mcpOAuthWrappingKeyVersions",
 );
@@ -324,6 +329,12 @@ const appSecret = new k8s.core.v1.Secret(
       HOMELAB_MCP_OAUTH_CODE_TTL: codeTtl,
       HOMELAB_MCP_OAUTH_ALLOW_DCR: "true",
       HOMELAB_MCP_OAUTH_ALLOW_CIMD: "true",
+      ...(mcpOAuthCimdTrustedPrivateOrigins.length > 0
+        ? {
+            HOMELAB_MCP_OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS:
+              mcpOAuthCimdTrustedPrivateOrigins.join(","),
+          }
+        : {}),
       HOMELAB_MCP_OAUTH_ALLOW_LOOPBACK_REDIRECTS: "true",
       HOMELAB_MCP_OAUTH_WRAPPING_KEYS_FILE: wrappingKeyFile,
       HOMELAB_MCP_GRAFANA_URL: grafanaUrl,

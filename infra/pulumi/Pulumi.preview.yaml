@@ -16,6 +16,8 @@ config:
   homelab-mcp:mcpOAuthRefreshTokenTtl: "86400"
   homelab-mcp:mcpOAuthRefreshFamilyTtl: "2592000"
   homelab-mcp:mcpOAuthCodeTtl: "300"
+  homelab-mcp:mcpOAuthCimdTrustedPrivateOrigins:
+    - https://preview-kuri.holdenitdown.net
   homelab-mcp:mcpOAuthWrappingKeyVersions: [v1]
   homelab-mcp:mcpOAuthActiveWrappingKeyVersion: v1
 encryptionsalt: v1:JpursO2VfUY=:v1:b36ZTkbO7H7FZE0d:kQRTPgYHEdvYZTV5kFmLRAlYatccPg==

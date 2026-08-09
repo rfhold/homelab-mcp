@@ -41,6 +41,8 @@ before(async () => {
     "homelab-mcp:mcpOAuthRefreshTokenTtl": "86400",
     "homelab-mcp:mcpOAuthRefreshFamilyTtl": "2592000",
     "homelab-mcp:mcpOAuthCodeTtl": "300",
+    "homelab-mcp:mcpOAuthCimdTrustedPrivateOrigins":
+      '["https://kuri.internal.example"]',
     "homelab-mcp:mcpOAuthWrappingKeyVersions": '["v1"]',
     "homelab-mcp:mcpOAuthActiveWrappingKeyVersion": "v1",
   });
@@ -267,6 +269,10 @@ describe("standalone resource topology", () => {
     assert.equal(app.HOMELAB_MCP_OAUTH_RESOURCE, "https://homelab-mcp.example.test/mcp");
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_DCR, "true");
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_CIMD, "true");
+    assert.equal(
+      app.HOMELAB_MCP_OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS,
+      "https://kuri.internal.example",
+    );
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_LOOPBACK_REDIRECTS, "true");
     assert.equal(
       app.HOMELAB_MCP_OAUTH_WRAPPING_KEYS_FILE,
