@@ -212,17 +212,30 @@ fn tool_error(query_name: &str, error: GrafanaError) -> McpToolResult {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use axum::{Json, Router, routing::get};
     use mcp::{
+        McpPrincipalId,
         protocol::MCP_PROTOCOL_VERSION,
         server::{
-            McpHostedTokenValidation, StreamableHttpAuthorization, StreamableHttpOptions,
-            streamable_http_router,
+            McpHostedTokenValidation, McpTokenAuthorization, StreamableHttpAuthorization,
+            StreamableHttpOptions, streamable_http_router,
         },
+    };
+    use opentelemetry::trace::{SpanId, TracerProvider as _};
+    use opentelemetry_sdk::{
+        error::OTelSdkResult,
+        trace::{SdkTracerProvider, SpanData, SpanExporter},
     };
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
     use tokio::{net::TcpListener, task::JoinHandle};
+    use tracing_subscriber::{
+        Layer as _,
+        filter::{FilterExt as _, filter_fn},
+        layer::SubscriberExt as _,
+    };
 
     use super::*;
 
@@ -287,6 +300,185 @@ mod tests {
             .find_map(|line| line.strip_prefix("data: "))
             .unwrap_or(&text);
         (status, serde_json::from_str(payload).unwrap())
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct TestSpanExporter(Arc<Mutex<Vec<SpanData>>>);
+
+    impl SpanExporter for TestSpanExporter {
+        async fn export(&self, mut batch: Vec<SpanData>) -> OTelSdkResult {
+            self.0.lock().unwrap().append(&mut batch);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct SpanTargetCapture(Arc<Mutex<Vec<(&'static str, &'static str)>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SpanTargetCapture {
+        fn on_new_span(
+            &self,
+            attributes: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let metadata = attributes.metadata();
+            self.0
+                .lock()
+                .unwrap()
+                .push((metadata.name(), metadata.target()));
+        }
+    }
+
+    fn capture_authorized_call(
+        runtime: &tokio::runtime::Runtime,
+        env_filter: tracing_subscriber::EnvFilter,
+    ) -> (Vec<SpanData>, Vec<(&'static str, &'static str)>) {
+        let exporter = TestSpanExporter::default();
+        let targets = Arc::new(Mutex::new(Vec::new()));
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let filter =
+            filter_fn(|metadata| crate::observability::test_allowed_target(metadata.target()))
+                .and(env_filter);
+        let subscriber = tracing_subscriber::registry()
+            .with(SpanTargetCapture(targets.clone()))
+            .with(
+                tracing_opentelemetry::layer()
+                    .with_tracer(provider.tracer("homelab-mcp-test"))
+                    .with_filter(filter),
+            );
+
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                let (handler, grafana_task) = test_handler().await;
+                let metadata = McpProtectedResourceMetadata::new(
+                    "https://mcp.example.test/mcp",
+                    ["https://mcp.example.test/oauth"],
+                )
+                .with_scopes(["mcp:use"]);
+                let authorization = StreamableHttpAuthorization::hosted(metadata, |_, _| {
+                    Box::pin(async {
+                        McpHostedTokenValidation::Authorized(McpTokenAuthorization {
+                            principal_id: McpPrincipalId::new("telemetry-test").unwrap(),
+                            expires_at: None,
+                            revocation: None,
+                        })
+                    })
+                })
+                .unwrap();
+                let authorization = authorization.with_required_scopes(["mcp:use"]);
+                let router = streamable_http_router_with_options(
+                    handler,
+                    StreamableHttpOptions::default()
+                        .without_root_protected_resource_metadata()
+                        .with_authorization(authorization),
+                );
+                let (origin, mcp_task) = serve(router).await;
+                let endpoint = format!("{origin}/mcp");
+                let body = request(
+                    "tools/call",
+                    "telemetry-call",
+                    json!({
+                        "name": TOOL_NAME,
+                        "arguments": {
+                            "action": "logql",
+                            "input": {"query": "{job=\"telemetry-test\"}"}
+                        }
+                    }),
+                );
+                let response = Client::new()
+                    .post(endpoint)
+                    .header("accept", "application/json, text/event-stream")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .header("mcp-protocol-version", MCP_PROTOCOL_VERSION)
+                    .header("mcp-method", "tools/call")
+                    .header("mcp-name", TOOL_NAME)
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let payload = response.text().await.unwrap();
+                assert!(payload.contains("structuredContent"));
+                assert!(!payload.contains("test-token"));
+                grafana_task.abort();
+                mcp_task.abort();
+            });
+        });
+
+        provider.force_flush().unwrap();
+        let spans = exporter.0.lock().unwrap().clone();
+        let targets = targets.lock().unwrap().clone();
+        (spans, targets)
+    }
+
+    #[test]
+    fn host_filters_export_kuri_request_as_grafana_parent() {
+        const CHILD_MARKER: &str = "HOMELAB_MCP_TELEMETRY_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "mcp::tests::host_filters_export_kuri_request_as_grafana_parent",
+                    "--nocapture",
+                ])
+                .env(CHILD_MARKER, "1")
+                .env_remove("RUST_LOG")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for (case, filter) in [
+            (
+                "no-rust-log",
+                crate::observability::test_configured_env_filter(),
+            ),
+            (
+                "explicit-default",
+                tracing_subscriber::EnvFilter::new("homelab_mcp=info,mcp=info"),
+            ),
+        ] {
+            let (spans, targets) = capture_authorized_call(&runtime, filter);
+            let exported = spans
+                .iter()
+                .map(|span| (span.name.as_ref(), span.instrumentation_scope.name()))
+                .collect::<Vec<_>>();
+            let server = spans
+                .iter()
+                .find(|span| span.name == "mcp.server.request")
+                .unwrap_or_else(|| panic!("missing Kuri server span; exported {exported:?}"));
+            let grafana = spans
+                .iter()
+                .find(|span| span.name == "grafana.query")
+                .unwrap();
+
+            assert!(targets.contains(&("mcp.server.request", "mcp::server")));
+            assert!(targets.contains(&("grafana.query", "homelab_mcp::grafana")));
+            assert_eq!(server.parent_span_id, SpanId::INVALID);
+            assert_eq!(grafana.parent_span_id, server.span_context.span_id());
+            assert_eq!(
+                grafana.span_context.trace_id(),
+                server.span_context.trace_id()
+            );
+            println!(
+                "{case}: mcp.server.request target=mcp::server trace_id={} span_id={} parent_id={}; grafana.query target=homelab_mcp::grafana trace_id={} span_id={} parent_id={}",
+                server.span_context.trace_id(),
+                server.span_context.span_id(),
+                server.parent_span_id,
+                grafana.span_context.trace_id(),
+                grafana.span_context.span_id(),
+                grafana.parent_span_id,
+            );
+        }
     }
 
     #[tokio::test]

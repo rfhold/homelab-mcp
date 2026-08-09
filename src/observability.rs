@@ -174,11 +174,21 @@ fn configured_env_filter() -> EnvFilter {
         .unwrap_or_else(|_| EnvFilter::new("homelab_mcp=info,mcp=info"))
 }
 
+#[cfg(test)]
+pub(crate) fn test_configured_env_filter() -> EnvFilter {
+    configured_env_filter()
+}
+
 fn allowed_target(target: &str) -> bool {
     target == "homelab_mcp"
         || target.starts_with("homelab_mcp::")
         || target == "mcp"
         || target.starts_with("mcp::")
+}
+
+#[cfg(test)]
+pub(crate) fn test_allowed_target(target: &str) -> bool {
+    allowed_target(target)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
