@@ -4,13 +4,14 @@ use std::{
 };
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use opentelemetry::{KeyValue, global};
+use opentelemetry::{KeyValue, global, trace::TraceContextExt as _};
 use reqwest::{Client, Method, Response, StatusCode, Url, redirect::Policy};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::Semaphore;
-use tracing::Instrument as _;
+use tracing::{Instrument as _, Span};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::{
     config::Secret,
@@ -498,12 +499,22 @@ impl GrafanaClient {
         normalize: impl FnOnce(Value) -> Result<Value, Error>,
     ) -> Result<Value, Error> {
         let mut metrics = GrafanaMetricsGuard::new(action, mode, datasource_uid);
+        let parent = Span::current();
+        let parent_name = parent.metadata().map_or("none", |metadata| metadata.name());
+        let parent_target = parent
+            .metadata()
+            .map_or("none", |metadata| metadata.target());
+        let parent_context = parent.context();
+        let parent_context_valid = parent_context.span().span_context().is_valid();
         let span = tracing::info_span!(
             "grafana.query",
             grafana.action = action,
             grafana.mode = mode,
             grafana.datasource_uid = datasource_uid,
             grafana.outcome = tracing::field::Empty,
+            trace.parent.name = parent_name,
+            trace.parent.target = parent_target,
+            trace.parent.context_valid = parent_context_valid,
         );
         let result = async {
             let _permit = self
