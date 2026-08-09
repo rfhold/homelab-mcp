@@ -1,6 +1,6 @@
 # Operations
 
-These documents describe implemented deployment declarations and pipeline behavior. The `preview` and `prod` Pulumi stacks are initialized with zero resources; neither has been previewed or applied.
+These documents describe implemented deployment declarations and pipeline behavior. The `preview` stack is deployed by the main pipeline. The `prod` stack is initialized with zero resources and has not been previewed or applied.
 
 | Document | Covers |
 | --- | --- |

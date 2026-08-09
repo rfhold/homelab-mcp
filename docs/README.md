@@ -9,4 +9,4 @@ This index routes readers to implemented foundation details and planned MCP cont
 | [Operations](operations/README.md) | Implemented deployment declarations, delivery behavior, and external-action boundaries. |
 | [Quality](quality/README.md) | Verified foundation commands and planned MCP validation. |
 
-The repository has an implemented health host and deployment declarations. The `preview` and `prod` stacks are initialized with zero resources; neither has been previewed or applied.
+The repository has an implemented health host and deployment foundation. The `preview` stack is deployed by the main pipeline. The `prod` stack is initialized with zero resources and has not been previewed or applied.

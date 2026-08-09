@@ -2,9 +2,9 @@
 
 ## Status
 
-The repository implements container, Pulumi, and preview-pipeline foundations. Pulumi stacks `preview` and `prod` are initialized with zero resources. Neither stack has been previewed or applied.
+The repository implements container, Pulumi, and preview-pipeline foundations. The `preview` stack is deployed by the main pipeline and serves its health endpoints through the default gateway. The `prod` stack is initialized with zero resources and has not been previewed or applied.
 
-Pulumi files declare resources. Those resources do not exist because no `pulumi up` has run.
+Pulumi has applied the declared resources to preview. Production remains declaration-only.
 
 ## Stack Targets
 
@@ -17,7 +17,7 @@ Pulumi files declare resources. Those resources do not exist because no `pulumi 
 
 ## Declared Resources
 
-An approved `pulumi up` would create:
+The preview stack creates, and an approved production `pulumi up` would create:
 
 - the target Namespace;
 - an ObjectBucketClaim for database backups;
@@ -45,7 +45,7 @@ BuildKit accepts optional `gitconfig` and `git-credentials` secret mounts for fu
 
 ## Credential Boundaries
 
-Pulumi declares the Grafana Viewer service account and token. A future `pulumi up` would create them and place the token in the application Secret.
+Pulumi creates the Grafana Viewer service account and token and places the token in the application Secret. These resources exist in preview only.
 
 Pulumi places runtime credentials in the application Secret. It keeps the wrapping-key file in a separate Secret and read-only mount.
 
@@ -61,7 +61,7 @@ Shared BuildKit workers receive private Git credentials through secret mounts. T
 
 The final `general-ci:latest` step maps Grafana provider credentials, runs `pulumi preview --stack preview`, then runs `pulumi up --stack preview`.
 
-The pipeline declaration exists, but no pipeline run, Pulumi preview, or Pulumi update has occurred.
+The main pipeline has completed successfully and applied the preview stack.
 
 No release pipeline exists.
 

@@ -51,4 +51,4 @@ For documentation-only changes:
 
 Do not commit, push, preview, deploy, or mutate an external system without explicit authority.
 
-Pulumi stacks `preview` and `prod` are initialized with zero resources. Do not run `pulumi preview` or `pulumi up` without explicit target-specific authority.
+The `preview` stack is deployed by the main pipeline. The `prod` stack is initialized with zero resources. Do not run `pulumi preview` or `pulumi up` without explicit target-specific authority.
