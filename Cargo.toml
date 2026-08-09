@@ -9,7 +9,7 @@ axum = "0.8.9"
 base64 = "0.22.1"
 chrono = "0.4.45"
 getrandom = "0.4.3"
-mcp = { git = "ssh://git@git.holdenitdown.net/rfhold/kuri.git", rev = "003a11f1405818f39eba01612b0d00ee552e3be0", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }
+mcp = { git = "https://git.holdenitdown.net/rfhold/kuri.git", rev = "003a11f1405818f39eba01612b0d00ee552e3be0", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls"] }
 schemars = "1.2.2"
 serde = { version = "1.0.228", features = ["derive"] }
