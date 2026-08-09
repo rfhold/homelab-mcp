@@ -505,7 +505,6 @@ const service = new k8s.core.v1.Service("homelab-mcp", {
         name: "http",
         port: 14333,
         targetPort: "http",
-        appProtocol: "kubernetes.io/h2c",
       },
     ],
   },

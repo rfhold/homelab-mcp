@@ -391,6 +391,7 @@ describe("standalone resource topology", () => {
     const service = resource("kubernetes:core/v1:Service", "homelab-mcp");
     assert.equal((service.inputs.spec as any).type, "ClusterIP");
     assert.equal((service.inputs.spec as any).ports[0].port, 14333);
+    assert.equal((service.inputs.spec as any).ports[0].appProtocol, undefined);
     const route = resourceByName("homelab-mcp-route").inputs;
     assert.equal(route.kind, "HTTPRoute");
     assert.deepEqual((route.spec as any).parentRefs[0], {
