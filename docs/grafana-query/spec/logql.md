@@ -6,7 +6,7 @@ This specification defines the implemented worktree behavior for the `logql.quer
 
 ## Tool Surface
 
-`#[mcp::progressive_server]` generates the read-only MCP tool `grafana_query`. The [feature index](../README.md) lists its six actions and the separately advertised `grafana_exec` tool.
+`#[mcp::progressive_server]` generates the read-only MCP tool `grafana_query`. The [feature index](../README.md) lists its seven actions and the separately advertised `grafana_exec` tool.
 
 The macro also generates action `help`, the filter behavior, and the tool schema. A help call takes this shape:
 
@@ -17,7 +17,7 @@ The macro also generates action `help`, the filter behavior, and the tool schema
 }
 ```
 
-Help takes no `input`. Its structured output lists all six `grafana_query` actions with their descriptions, guidance, and generated input schemas.
+Help takes no `input`. Its structured output lists all seven `grafana_query` actions with their descriptions, guidance, and generated input schemas.
 
 The [shared contract](common.md) defines generated tool behavior, shared transport limits, and common error mapping.
 

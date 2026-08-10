@@ -1,6 +1,7 @@
 mod alert_instances;
 mod alert_rules;
 mod create_silence;
+mod list_silences;
 mod logql;
 mod profiles;
 mod promql;
@@ -73,18 +74,20 @@ fn validate_matchers(matchers: &[LabelMatcher], allow_empty: bool) -> Result<(),
         return Err(InvalidArguments);
     }
     for matcher in matchers {
-        let mut characters = matcher.name.bytes();
-        if matcher.name.len() > MAX_MATCHER_NAME_BYTES
-            || !characters
-                .next()
-                .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-            || !characters.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            || matcher.value.len() > MAX_MATCHER_VALUE_BYTES
-        {
+        if !valid_matcher_name(&matcher.name) || matcher.value.len() > MAX_MATCHER_VALUE_BYTES {
             return Err(InvalidArguments);
         }
     }
     Ok(())
+}
+
+pub(crate) fn valid_matcher_name(name: &str) -> bool {
+    let mut characters = name.bytes();
+    name.len() <= MAX_MATCHER_NAME_BYTES
+        && characters
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && characters.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,3 +126,4 @@ fn valid_range(
 pub use alert_instances::{AlertInstancesInput, AlertInstancesQuery};
 pub use alert_rules::{AlertRulesInput, AlertRulesQuery};
 pub use create_silence::{CreateSilenceCommand, CreateSilenceInput};
+pub use list_silences::{ListSilencesInput, ListSilencesQuery, SilenceState};

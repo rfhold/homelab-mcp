@@ -97,6 +97,7 @@ fn metric_action(action: &'static str) -> &'static str {
         "profile.merge" => "profile.merge",
         "alert-rule.list" => "alert-rule.list",
         "alert-instance.list" => "alert-instance.list",
+        "silence.list" => "silence.list",
         "silence.create" => "silence.create",
         _ => "unknown",
     }
@@ -171,6 +172,7 @@ mod tests {
 
         assert_eq!(metric_action("alert-rule.list"), "alert-rule.list");
         assert_eq!(metric_action("alert-instance.list"), "alert-instance.list");
+        assert_eq!(metric_action("silence.list"), "silence.list");
         assert_eq!(metric_action("silence.create"), "silence.create");
         assert_eq!(metric_action("alert_rules"), "unknown");
         assert_eq!(metric_action("alert_instances"), "unknown");

@@ -89,9 +89,9 @@ It requires locally issued `mcp:use` tokens and configures DCR, CIMD, and native
 
 Generic Kuri owns strict OIDC login, callback, one-shot transaction state, ID-token verification, the mapper seam, and hosted continuation. Homelab supplies Authentik configuration and stable issuer-plus-subject mapping.
 
-The current worktree exposes six read-only actions through `grafana_query` and only `silence.create` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes both tools. Their canonical limits, results, and errors are defined by the [Grafana tool specifications](../grafana-query/README.md). The deployed preview revision predates the alerting expansion.
+The current worktree exposes seven read-only actions through `grafana_query` and only `silence.create` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes both tools. Their canonical limits, results, and errors are defined by the [Grafana tool specifications](../grafana-query/README.md). The deployed preview revision predates the alerting expansion.
 
-Silence creation performs no automatic retry. If it returns `mutation_outcome_unknown`, inspect current silences before deciding whether to retry because Grafana may already have applied the request. A silence suppresses matching notifications; it does not stop rule evaluation or delete alert data.
+Silence creation performs no automatic retry. If it returns `mutation_outcome_unknown`, use `silence.list` to inspect current silences before deciding whether to retry because Grafana may already have applied the request. A silence suppresses matching notifications; it does not stop rule evaluation or delete alert data.
 
 Commit `4f2e192` is deployed to preview. No deployment or live operation occurred for the alerting revision. Full browser OAuth, authenticated preview MCP calls, live alert API behavior, and Editor permission operation still require the layered evidence from the [testing document](../quality/testing.md) and explicit approval for each external action; basic public endpoint checks do not satisfy that boundary.
 

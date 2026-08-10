@@ -18,7 +18,7 @@ use crate::{
         Error as GrafanaError,
         actions::{
             AlertInstancesInput, AlertRulesInput, CreateSilenceCommand, CreateSilenceInput,
-            LogqlInput, ProfilesInput, PromqlInput, TraceqlInput,
+            ListSilencesInput, LogqlInput, ProfilesInput, PromqlInput, TraceqlInput,
         },
     },
     services::Services,
@@ -75,7 +75,8 @@ pub fn router(
         namespace(name = "traceql", description = "Search Tempo traces with TraceQL."),
         namespace(name = "profile", description = "Inspect Pyroscope profiles."),
         namespace(name = "alert-rule", description = "Inspect Grafana alert rules."),
-        namespace(name = "alert-instance", description = "Inspect current Grafana alert instances.")
+        namespace(name = "alert-instance", description = "Inspect current Grafana alert instances."),
+        namespace(name = "silence", description = "Inspect Grafana alert silences.")
     ),
     tool(
         name = "grafana_exec",
@@ -230,6 +231,27 @@ impl HomelabMcp {
         }
     }
 
+    /// List bounded Grafana silences, optionally filtered by state.
+    #[action(tool = "grafana_query", name = "silence.list")]
+    async fn list_silences(
+        &self,
+        input: ListSilencesInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tool_error("silence", GrafanaError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.grafana.list_silences(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(query_result(output)),
+            Err(error) => Ok(tool_error("silence", error)),
+        }
+    }
+
     /// Create a bounded Grafana silence that suppresses matching alert notifications.
     #[action(tool = "grafana_exec", name = "silence.create")]
     async fn create_silence(
@@ -366,7 +388,15 @@ mod tests {
             )
             .route(
                 "/api/alertmanager/grafana/api/v2/silences",
-                post(
+                get(|| async {
+                    Json(json!([{
+                        "id":"silence-active", "status":{"state":"active"},
+                        "startsAt":"2026-08-10T12:00:00Z", "endsAt":"2026-08-10T13:00:00Z",
+                        "createdBy":"homelab-mcp", "comment":"maintenance",
+                        "matchers":[{"name":"alertname","value":"APIError","isRegex":false,"isEqual":true}]
+                    }]))
+                })
+                .post(
                     |State(propagated): State<PropagatedRequests>,
                      headers: HeaderMap,
                      Json(_body): Json<Value>| async move {
@@ -1036,12 +1066,14 @@ mod tests {
             "help.profile",
             "help.alert-rule",
             "help.alert-instance",
+            "help.silence",
             "logql.query",
             "promql.query",
             "traceql.search",
             "profile.merge",
             "alert-rule.list",
             "alert-instance.list",
+            "silence.list",
         ] {
             assert!(
                 query_action_enum.contains(&json!(action)),
@@ -1055,6 +1087,7 @@ mod tests {
             "profiles",
             "alert_rules",
             "alert_instances",
+            "list_silences",
         ] {
             assert!(
                 !query_action_enum.contains(&json!(legacy)),
@@ -1095,7 +1128,8 @@ mod tests {
                 "traceql",
                 "profile",
                 "alert-rule",
-                "alert-instance"
+                "alert-instance",
+                "silence"
             ]
         );
         let mut query_actions = Vec::new();
@@ -1106,6 +1140,7 @@ mod tests {
             "profile",
             "alert-rule",
             "alert-instance",
+            "silence",
         ] {
             let (_, namespace_help) = post_mcp(
                 &endpoint,
@@ -1138,7 +1173,8 @@ mod tests {
                 "traceql.search",
                 "profile.merge",
                 "alert-rule.list",
-                "alert-instance.list"
+                "alert-instance.list",
+                "silence.list"
             ]
         );
         for (action, required, optional) in [
@@ -1159,6 +1195,7 @@ mod tests {
             ),
             ("alert-rule.list", vec![], vec!["limit"]),
             ("alert-instance.list", vec![], vec!["matchers", "limit"]),
+            ("silence.list", vec![], vec!["state", "limit"]),
         ] {
             let schema = &query_actions
                 .iter()
@@ -1204,6 +1241,7 @@ mod tests {
                 "alert_instances",
                 ("fingerprint", "abc123"),
             ),
+            ("silence.list", "silences", ("silence_id", "silence-active")),
         ] {
             let (_, call) = post_mcp(
                 &endpoint,
@@ -1290,6 +1328,7 @@ mod tests {
             (QUERY_TOOL_NAME, "profiles"),
             (QUERY_TOOL_NAME, "alert_rules"),
             (QUERY_TOOL_NAME, "alert_instances"),
+            (QUERY_TOOL_NAME, "list_silences"),
             (EXEC_TOOL_NAME, "create_silence"),
         ] {
             let (_, response) = post_mcp(
@@ -1308,6 +1347,7 @@ mod tests {
             (QUERY_TOOL_NAME, json!({"action":"unknown"})),
             (QUERY_TOOL_NAME, json!({"action":"silence.create"})),
             (EXEC_TOOL_NAME, json!({"action":"alert-rule.list"})),
+            (EXEC_TOOL_NAME, json!({"action":"silence.list"})),
             (
                 QUERY_TOOL_NAME,
                 json!({"action":"alert-rule.list","input":{"limit":1,"extra":true}}),

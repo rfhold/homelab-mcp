@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, six bounded Grafana reads, and bounded silence creation.
+The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, seven bounded Grafana reads, and bounded silence creation.
 
 Preview runs the authenticated runtime from commit `4f2e192`. Health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge are verified. The worktree alerting revision has not been deployed or operated live. Full browser OAuth, authenticated preview MCP calls, live Grafana behavior, and Editor permission operation remain unverified; production remains excluded.
 
@@ -29,7 +29,7 @@ The current worktree service:
 - uses Kuri's generic private `mcp` crate at a reviewed immutable Git revision;
 - serves MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
 - uses `#[mcp::progressive_server]` to generate read-only `grafana_query` and operationally consequential `grafana_exec`;
-- exposes six read actions on `grafana_query` and only `silence.create` on `grafana_exec`;
+- exposes seven read actions on `grafana_query` and only `silence.create` on `grafana_exec`;
 - queries Grafana's HTTP API through fixed Loki, Mimir, Tempo, and Pyroscope datasource UIDs;
 - reads Grafana alerting state and creates bounded silences through fixed alerting API routes;
 - enforces local OAuth access tokens before MCP request handling; and

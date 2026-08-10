@@ -44,6 +44,6 @@ The result excludes matchers, comment, `createdBy`, request data, Grafana wrappe
 
 An explicit safe Grafana rejection returns non-retryable `mutation_rejected`. A timeout, transport failure, ambiguous response status, response-read failure, malformed JSON, or malformed success response returns non-retryable `mutation_outcome_unknown` because Grafana may have created the silence.
 
-For `mutation_outcome_unknown`, inspect current silences before deciding whether to retry. Do not retry solely because the call returned an error. MCP cancellation retains generic `request cancelled` behavior.
+For `mutation_outcome_unknown`, use [`silence.list`](list-silences.md) to inspect current silences before deciding whether to retry. Compare the matchers, creator, comment, and interval with the attempted request. Do not retry solely because the call returned an error. MCP cancellation after dispatch also returns `mutation_outcome_unknown` because Grafana may have accepted the request.
 
 The exact mutation errors and safe messages are defined by the [shared mutation error contract](common.md#mutation-errors).

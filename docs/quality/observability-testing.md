@@ -46,7 +46,7 @@ Tests cover these observability contracts:
 - credential-free HTTPS root Pyroscope origins, safe tags, and the absence of conflicting or per-pod profile tags;
 - telemetry environment and Pulumi downward API wiring;
 - Alloy egress ports 4318 and 4040;
-- generated help and schemas for all six `grafana_query` actions and the sole `grafana_exec` action;
+- generated help and schemas for all seven `grafana_query` actions and the sole `grafana_exec` action;
 - exact PromQL, TraceQL, and Profiles routes, methods, parameters, and bodies;
 - action defaults, range limits, PromQL point limits, and strict flamegraph result normalization;
 - shared four-request capacity, 30-second timeout, redirect denial, permit release, and error mapping;

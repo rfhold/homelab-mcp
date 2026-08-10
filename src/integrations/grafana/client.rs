@@ -17,8 +17,9 @@ use crate::{
 use super::{
     Error,
     actions::{
-        AlertInstancesQuery, AlertRulesQuery, CreateSilenceCommand, LabelMatcher, Mode,
-        ProfilesQuery, PromqlQuery, Query, TraceqlQuery,
+        AlertInstancesQuery, AlertRulesQuery, CreateSilenceCommand, LabelMatcher,
+        ListSilencesQuery, Mode, ProfilesQuery, PromqlQuery, Query, SilenceState, TraceqlQuery,
+        valid_matcher_name,
     },
     telemetry::{GrafanaMetricsGuard, request_outcome},
 };
@@ -231,6 +232,23 @@ impl GrafanaClient {
             "grafana_alerting",
             OperationKind::Read,
             |body| normalize_alert_instances(query.limit, body),
+        )
+        .await
+    }
+
+    pub async fn list_silences(&self, query: &ListSilencesQuery) -> Result<Value, Error> {
+        self.run(
+            UpstreamRequest {
+                method: Method::GET,
+                path: "/api/alertmanager/grafana/api/v2/silences",
+                parameters: Vec::new(),
+                body: None,
+            },
+            "silence.list",
+            "list",
+            "grafana_alerting",
+            OperationKind::Read,
+            |body| normalize_silences(query.state, query.limit, body),
         )
         .await
     }
@@ -518,6 +536,91 @@ fn normalize_alert_instances(limit: u16, wrapper: Value) -> Result<Value, Error>
         "result_type": "alert_instances",
         "result": result,
     }))
+}
+
+fn normalize_silences(
+    state_filter: Option<SilenceState>,
+    limit: u16,
+    wrapper: Value,
+) -> Result<Value, Error> {
+    let silences = wrapper.as_array().ok_or(Error::InvalidResponse)?;
+    let mut result = Vec::new();
+    for silence in silences {
+        let object = silence.as_object().ok_or(Error::InvalidResponse)?;
+        let status = object
+            .get("status")
+            .and_then(Value::as_object)
+            .ok_or(Error::InvalidResponse)?;
+        let state = silence_state(status)?;
+        let matchers = normalize_silence_matchers(
+            object
+                .get("matchers")
+                .and_then(Value::as_array)
+                .ok_or(Error::InvalidResponse)?,
+        )?;
+        let normalized = json!({
+            "silence_id": bounded_string(object, "id", MAX_SAFE_KEY_BYTES)?,
+            "state": state.as_str(),
+            "starts_at": normalized_timestamp(object, "startsAt")?,
+            "ends_at": normalized_timestamp(object, "endsAt")?,
+            "created_by": bounded_string(object, "createdBy", MAX_SUMMARY_BYTES)?,
+            "comment": bounded_string(object, "comment", MAX_SAFE_VALUE_BYTES)?,
+            "matchers": matchers,
+        });
+        if state_filter.is_none_or(|filter| filter == state) && result.len() < usize::from(limit) {
+            result.push(normalized);
+        }
+    }
+    Ok(json!({
+        "mode": "list",
+        "result_type": "silences",
+        "result": result,
+    }))
+}
+
+fn silence_state(status: &Map<String, Value>) -> Result<SilenceState, Error> {
+    match bounded_string(status, "state", MAX_SAFE_KEY_BYTES)? {
+        "active" => Ok(SilenceState::Active),
+        "pending" => Ok(SilenceState::Pending),
+        "expired" => Ok(SilenceState::Expired),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+
+fn normalize_silence_matchers(matchers: &[Value]) -> Result<Vec<Value>, Error> {
+    if matchers.is_empty() || matchers.len() > 20 {
+        return Err(Error::InvalidResponse);
+    }
+    matchers
+        .iter()
+        .map(|matcher| {
+            let object = matcher.as_object().ok_or(Error::InvalidResponse)?;
+            let name = bounded_string(object, "name", 128)?;
+            if !valid_matcher_name(name) {
+                return Err(Error::InvalidResponse);
+            }
+            let value = object
+                .get("value")
+                .and_then(Value::as_str)
+                .filter(|value| value.len() <= 1024)
+                .ok_or(Error::InvalidResponse)?;
+            let is_regex = object
+                .get("isRegex")
+                .and_then(Value::as_bool)
+                .ok_or(Error::InvalidResponse)?;
+            let is_equal = object
+                .get("isEqual")
+                .and_then(Value::as_bool)
+                .ok_or(Error::InvalidResponse)?;
+            let operator = match (is_regex, is_equal) {
+                (false, true) => "=",
+                (false, false) => "!=",
+                (true, true) => "=~",
+                (true, false) => "!~",
+            };
+            Ok(json!({"name": name, "operator": operator, "value": value}))
+        })
+        .collect()
 }
 
 fn normalize_create_silence(
@@ -895,8 +998,8 @@ mod tests {
 
     use crate::integrations::grafana::actions::{
         AlertInstancesInput, AlertRulesInput, CreateSilenceInput, DEFAULT_MAX_NODES,
-        DEFAULT_PROFILE_TYPE, Direction, LabelMatcher, LogqlInput, MatcherOperator, ProfilesInput,
-        PromqlInput, TraceqlInput,
+        DEFAULT_PROFILE_TYPE, Direction, LabelMatcher, ListSilencesInput, LogqlInput,
+        MatcherOperator, ProfilesInput, PromqlInput, TraceqlInput,
     };
 
     use super::*;
@@ -1044,6 +1147,23 @@ mod tests {
         Json(json!({"silenceID":"silence-123"}))
     }
 
+    async fn record_silences_request(
+        State(record): State<Arc<Mutex<RequestRecord>>>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+    ) -> Json<Value> {
+        *record.lock().unwrap() = RequestRecord {
+            method: "GET".to_owned(),
+            path: uri.path().to_owned(),
+            authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            traceparent: traceparent(&headers),
+            parameters: HashMap::new(),
+            parameter_pairs: Vec::new(),
+            body: Value::Null,
+        };
+        Json(silences_response())
+    }
+
     fn traceparent(headers: &HeaderMap) -> String {
         headers
             .get("traceparent")
@@ -1095,6 +1215,27 @@ mod tests {
             "generatorURL": "http://grafana.internal/alerting/1",
             "labels": {"alertname":"APIError","severity":"critical"},
         }])
+    }
+
+    fn silences_response() -> Value {
+        json!([
+            {
+                "id":"silence-active", "status":{"state":"active"},
+                "startsAt":"2026-08-10T12:00:00Z", "endsAt":"2026-08-10T13:00:00Z",
+                "createdBy":"homelab-mcp", "comment":"maintenance",
+                "matchers":[
+                    {"name":"alertname","value":"API.*","isRegex":true,"isEqual":true},
+                    {"name":"severity","value":"warning","isRegex":false,"isEqual":false}
+                ],
+                "updatedAt":"2026-08-10T12:01:00Z"
+            },
+            {
+                "id":"silence-expired", "status":{"state":"expired"},
+                "startsAt":"2026-08-09T12:00:00Z", "endsAt":"2026-08-09T13:00:00Z",
+                "createdBy":"operator", "comment":"old maintenance",
+                "matchers":[{"name":"job","value":"api","isRegex":false,"isEqual":true}]
+            }
+        ])
     }
 
     async fn serve(router: Router) -> (Url, JoinHandle<()>) {
@@ -1221,6 +1362,31 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_filters_and_limits_silences_without_upstream_fields() {
+        let silences =
+            normalize_silences(Some(SilenceState::Active), 1, silences_response()).unwrap();
+        assert_eq!(silences["mode"], "list");
+        assert_eq!(silences["result_type"], "silences");
+        assert_eq!(silences["result"].as_array().unwrap().len(), 1);
+        assert_eq!(silences["result"][0]["silence_id"], "silence-active");
+        assert_eq!(silences["result"][0]["state"], "active");
+        assert_eq!(silences["result"][0]["created_by"], "homelab-mcp");
+        assert_eq!(silences["result"][0]["comment"], "maintenance");
+        assert_eq!(
+            silences["result"][0]["matchers"],
+            json!([
+                {"name":"alertname","operator":"=~","value":"API.*"},
+                {"name":"severity","operator":"!=","value":"warning"}
+            ])
+        );
+        assert!(!silences.to_string().contains("updatedAt"));
+
+        let expired =
+            normalize_silences(Some(SilenceState::Expired), 1, silences_response()).unwrap();
+        assert_eq!(expired["result"][0]["silence_id"], "silence-expired");
+    }
+
+    #[test]
     fn safe_alert_maps_omit_deterministic_url_shapes_and_preserve_text() {
         let normalized = safe_string_map(&json!({
             "http": "http://grafana.internal/d/one",
@@ -1268,6 +1434,82 @@ mod tests {
             normalize_alert_instances(1, response),
             Err(Error::InvalidResponse)
         );
+
+        let mut silences = silences_response().as_array().unwrap().clone();
+        silences.push(json!({"id":"malformed"}));
+        assert_eq!(
+            normalize_silences(None, 1, Value::Array(silences)),
+            Err(Error::InvalidResponse)
+        );
+
+        let mut invalid_state = silences_response();
+        invalid_state[0]["status"]["state"] = json!("unknown");
+        assert_eq!(
+            normalize_silences(None, 1, invalid_state),
+            Err(Error::InvalidResponse)
+        );
+
+        let mut filtered_malformed = silences_response();
+        filtered_malformed[1]["startsAt"] = json!("not-a-timestamp");
+        assert_eq!(
+            normalize_silences(Some(SilenceState::Active), 1, filtered_malformed),
+            Err(Error::InvalidResponse)
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_and_oversized_silence_fields() {
+        let mut cases = Vec::new();
+
+        let mut empty_id = silences_response();
+        empty_id[0]["id"] = json!("");
+        cases.push(empty_id);
+
+        let mut oversized_id = silences_response();
+        oversized_id[0]["id"] = json!("x".repeat(MAX_SAFE_KEY_BYTES + 1));
+        cases.push(oversized_id);
+
+        let mut empty_creator = silences_response();
+        empty_creator[0]["createdBy"] = json!("");
+        cases.push(empty_creator);
+
+        let mut oversized_creator = silences_response();
+        oversized_creator[0]["createdBy"] = json!("x".repeat(MAX_SUMMARY_BYTES + 1));
+        cases.push(oversized_creator);
+
+        let mut oversized_comment = silences_response();
+        oversized_comment[0]["comment"] = json!("x".repeat(MAX_SAFE_VALUE_BYTES + 1));
+        cases.push(oversized_comment);
+
+        let mut no_matchers = silences_response();
+        no_matchers[0]["matchers"] = json!([]);
+        cases.push(no_matchers);
+
+        let mut too_many_matchers = silences_response();
+        too_many_matchers[0]["matchers"] = json!(vec![
+            json!({"name":"job","value":"api","isRegex":false,"isEqual":true});
+            21
+        ]);
+        cases.push(too_many_matchers);
+
+        let mut invalid_name = silences_response();
+        invalid_name[0]["matchers"][0]["name"] = json!("invalid-name");
+        cases.push(invalid_name);
+
+        let mut oversized_value = silences_response();
+        oversized_value[0]["matchers"][0]["value"] = json!("x".repeat(1025));
+        cases.push(oversized_value);
+
+        let mut invalid_flag = silences_response();
+        invalid_flag[0]["matchers"][0]["isRegex"] = json!("false");
+        cases.push(invalid_flag);
+
+        for response in cases {
+            assert_eq!(
+                normalize_silences(None, 100, response),
+                Err(Error::InvalidResponse)
+            );
+        }
     }
 
     #[test]
@@ -1632,6 +1874,35 @@ mod tests {
             ]
         );
         assert!(!record.parameters.contains_key("limit"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn sends_exact_silence_list_request_and_filters_before_limiting() {
+        let record = Arc::new(Mutex::new(RequestRecord::default()));
+        let router = Router::new()
+            .route(
+                "/api/alertmanager/grafana/api/v2/silences",
+                get(record_silences_request),
+            )
+            .with_state(Arc::clone(&record));
+        let (origin, task) = serve(router).await;
+        let client = GrafanaClient::for_test(origin, TIMEOUT);
+        let query = ListSilencesInput {
+            state: Some(SilenceState::Expired),
+            limit: Some(1),
+        }
+        .validate()
+        .unwrap();
+
+        let output = client.list_silences(&query).await.unwrap();
+        let record = record.lock().unwrap();
+        assert_eq!(record.method, "GET");
+        assert_eq!(record.path, "/api/alertmanager/grafana/api/v2/silences");
+        assert_eq!(record.authorization, "Bearer grafana-secret");
+        assert!(record.parameter_pairs.is_empty());
+        assert_eq!(output["result"].as_array().unwrap().len(), 1);
+        assert_eq!(output["result"][0]["silence_id"], "silence-expired");
         task.abort();
     }
 

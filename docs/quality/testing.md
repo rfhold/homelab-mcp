@@ -47,7 +47,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
 | OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, two-tool listing and annotations, generated help, filters, calls, and safe JSON-RPC/tool-error boundaries. |
-| Grafana actions | Datasource queries, alert-rule and alert-instance reads, silence creation, input bounds, normalized results, fixed routes, redirects, read and mutation errors, timeout, capacity, and permit release against mock HTTP servers. |
+| Grafana actions | Datasource queries, alert-rule, alert-instance, and silence reads, silence creation, input bounds, normalized results, fixed routes, redirects, read and mutation errors, timeout, capacity, and permit release against mock HTTP servers. |
 | Pulumi policy | Immutable images, HTTPS origins, wrapping-key versions, Editor service-account declaration, and stack configuration safety. |
 | Pulumi topology | Namespace, backups, CNPG, Authentik, Grafana, Secrets, workload hardening, network, Service, and route. |
 | Current container runtime | Multi-architecture image delivery succeeded; the preview pod is ready with zero restarts. |
@@ -61,9 +61,9 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Hosted OAuth integration | Run complete authorization-code and refresh paths, including local token issuance and validation, beyond local consent, challenge, and mocked generic components. |
 | Live Authentik integration | Exercise OIDC discovery, browser login, callback validation, and transaction completion against the configured provider. |
 | Kuri-client integration | Exercise DCR, CIMD, native loopback authorization, token refresh, exact resource binding, and calls to both MCP tools. |
-| Live Grafana integration | Exercise controlled datasource reads, alert-rule and alert-instance reads, and silence creation without exposing credentials. Verify that Editor permits only the intended operation. |
+| Live Grafana integration | Exercise controlled datasource reads, alert-rule, alert-instance, and silence reads, and silence creation without exposing credentials. Verify that Editor permits only the intended operation. |
 | Container runtime | Basic deployed startup is verified; complete the full browser OAuth and Grafana path in the deployed container. |
-| Preview end-to-end | Prove browser login, local token issuance and refresh, authenticated `/mcp`, and controlled Grafana reads and silence creation on preview. |
+| Preview end-to-end | Prove browser login, local token issuance and refresh, authenticated `/mcp`, and controlled Grafana datasource and alerting reads and silence creation on preview. |
 
 The Rust suite supplies local and mock evidence. Deployed evidence additionally covers startup, readiness, metadata, and challenge behavior, but not browser OAuth, authenticated MCP, live alert APIs, or Editor permission operation. No deployment or live operation occurred for the alerting revision.
 
@@ -109,13 +109,14 @@ Tests must cover the [Grafana tool specifications](../grafana-query/README.md), 
 
 Alerting tests must additionally cover:
 
-- both tool annotations, six query actions, and the single exec action;
+- both tool annotations, seven query actions, and the single exec action;
 - the all-`mcp:use` authorization boundary and rejection of actions sent to the wrong tool;
 - alert-rule limits, fixed provisioning route, bounded summaries, and the documented conservative URL-field exclusions;
 - alert-instance matcher grammar and byte limits, repeated server-built filters, list limits, status booleans, and safe normalized maps;
+- silence-list state and limit bounds, fixed route without caller-controlled parameters, filtering before truncation, strict response validation, and normalized recovery fields;
 - required silence matchers, duration and comment bounds, immediate start, fixed `createdBy`, and exact three-field success output;
 - no automatic mutation retry, safe `mutation_rejected`, and non-retryable `mutation_outcome_unknown` for ambiguous post-dispatch failures; and
-- exclusion of matchers, comments, alert data, URLs, credentials, query data, and upstream bodies from results, errors, logs, spans, and metrics.
+- action-specific result allowlists, with normalized matchers and comments exposed only by `silence.list`, and exclusion of sensitive action data from errors, logs, spans, and metrics.
 
 ## Resource and Failure Coverage
 
@@ -125,7 +126,7 @@ Capacity tests must prove immediate failure with retryable `capacity_exhausted`.
 
 Tests must prove cancellation and permit release after success, timeout, transport failure, and malformed response. MCP cancellation must retain generic request-cancelled behavior for reads; cancellation of a dispatched silence POST must return safe, non-retryable `mutation_outcome_unknown` and direct callers to inspect current silences.
 
-Tests must prove that Grafana receives the validated limit. Stream tests must prove deterministic truncation when Grafana overreturns.
+For actions whose upstream API accepts a limit, tests must prove that Grafana receives the validated limit. Actions with a local result limit must prove deterministic truncation when Grafana overreturns; `silence.list` intentionally applies its limit only after local state filtering.
 
 ## Preview Evidence
 
