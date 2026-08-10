@@ -234,7 +234,7 @@ const browserApp = new OAuthApplication("homelab-mcp-browser", {
 
 const grafanaServiceAccount = new grafana.oss.ServiceAccount(
   "homelab-mcp-grafana-service-account",
-  { name: slug, role: "Viewer" },
+  { name: slug, role: "Editor" },
   { provider: grafanaProvider },
 );
 const grafanaToken = new grafana.oss.ServiceAccountToken(

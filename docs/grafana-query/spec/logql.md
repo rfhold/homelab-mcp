@@ -6,7 +6,7 @@ This specification defines the implemented worktree behavior for the `logql` act
 
 ## Tool Surface
 
-`#[mcp::progressive_server]` generates one read-only MCP tool named `grafana_query`. Its domain actions are `logql`, `promql`, `traceql`, and `profiles`.
+`#[mcp::progressive_server]` generates the read-only MCP tool `grafana_query`. The [feature index](../README.md) lists its six actions and the separately advertised `grafana_exec` tool.
 
 The macro also generates action `help`, the filter behavior, and the tool schema. A help call takes this shape:
 
@@ -17,7 +17,7 @@ The macro also generates action `help`, the filter behavior, and the tool schema
 }
 ```
 
-Help takes no `input`. Its structured output lists all four actions with their descriptions, guidance, and generated input schemas.
+Help takes no `input`. Its structured output lists all six `grafana_query` actions with their descriptions, guidance, and generated input schemas.
 
 The [shared contract](common.md) defines generated tool behavior, shared transport limits, and common error mapping.
 
@@ -78,7 +78,7 @@ Equal range endpoints are valid. Validation must finish before concurrency acqui
 | Maximum query limit | 5000 |
 | Maximum range | 24 hours |
 | Grafana request timeout | 30 seconds |
-| Service-wide concurrency across all four actions | 4 |
+| Service-wide concurrency across both tools and all actions | 4 |
 | Maximum encoded request URL | 8192 bytes |
 | Maximum decoded response body | 4 MiB |
 
@@ -96,7 +96,7 @@ Both modes must use fixed datasource UID `loki`. The service must call Grafana's
 
 Both modes send the validated `limit` as Grafana's fixed query `limit` parameter.
 
-The caller cannot select a Grafana URL, Loki URL, datasource UID, credential, or authorization header. The service sends its Viewer service-account token only in the upstream `Authorization` header.
+The caller cannot select a Grafana URL, Loki URL, datasource UID, credential, or authorization header. The service sends its Editor service-account token only in the upstream `Authorization` header.
 
 The Grafana HTTP client must disable redirects. It must not forward credentials to a redirect target.
 
@@ -151,18 +151,18 @@ Well-formed `logql` calls with semantic validation or execution failures return 
 {
   "error": {
     "code": "capacity_exhausted",
-    "message": "Grafana query capacity is currently exhausted.",
+    "message": "Grafana request capacity is currently exhausted.",
     "retryable": true
   }
 }
 ```
 
-The seven stable semantic errors follow the [shared error contract](common.md#semantic-errors). LogQL uses these action-specific messages:
+The seven stable semantic errors follow the [shared read error contract](common.md#read-results-and-errors). LogQL uses these action-specific messages:
 
 | Code | Safe message | Condition | Retryable |
 | --- | --- | --- | --- |
 | `invalid_arguments` | `The LogQL arguments are invalid.` | Invalid field value or invalid instant/range combination. | `false` |
-| `capacity_exhausted` | `Grafana query capacity is currently exhausted.` | All four query permits are in use. The service fails immediately. | `true` |
+| `capacity_exhausted` | `Grafana request capacity is currently exhausted.` | All four shared permits are in use. The service fails immediately. | `true` |
 | `timeout` | `The Grafana query timed out.` | The Grafana operation exceeds 30 seconds. | `true` |
 | `grafana_unauthorized` | `Grafana rejected the service credentials.` | Grafana returns an authentication or authorization failure. | `false` |
 | `query_rejected` | `Grafana rejected the LogQL query.` | Grafana rejects the LogQL query or request parameters. | `false` |

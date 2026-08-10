@@ -227,7 +227,7 @@ describe("standalone resource topology", () => {
     );
   });
 
-  test("bootstraps a Viewer Grafana account with a non-rotating, non-expiring token", () => {
+  test("bootstraps an Editor Grafana account with a non-rotating, non-expiring token", () => {
     const provider = resource(
       "pulumi:providers:grafana",
       "homelab-mcp-grafana",
@@ -239,7 +239,7 @@ describe("standalone resource topology", () => {
       "grafana:oss/serviceAccount:ServiceAccount",
       "homelab-mcp-grafana-service-account",
     );
-    assert.equal(account.inputs.role, "Viewer");
+    assert.equal(account.inputs.role, "Editor");
     const token = resource(
       "grafana:oss/serviceAccountToken:ServiceAccountToken",
       "homelab-mcp-grafana-token",

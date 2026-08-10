@@ -4,13 +4,13 @@
 
 The repository implements container, Pulumi, and preview-pipeline foundations. The `preview` stack is deployed by the main pipeline and serves its health endpoints through the default gateway. The `prod` stack is initialized with zero resources and has not been previewed or applied.
 
-Pulumi has applied the declared resources to preview. Production remains declaration-only.
+Pulumi has applied the previously deployed revision's resources to preview. The alerting and Editor changes remain worktree-only. Production remains declaration-only.
 
-The deployed preview process remains health-only. It does not serve `/mcp`, OAuth, browser callbacks, PostgreSQL-backed runtime state, or Grafana queries.
+The deployed preview serves health, readiness, hosted OAuth/OIDC routes, authenticated `/mcp`, PostgreSQL-backed runtime state, and the Grafana adapter.
 
 The repository implements the OAuth and LogQL contracts at a reviewed immutable Kuri Git revision.
 
-The container and pipeline declarations can build the runtime, but the new runtime has not been deployed.
+PipelineRun `homelab-mcp-preview-tfd8k` deployed commit `4f2e192` successfully.
 
 ## Stack Targets
 
@@ -23,13 +23,13 @@ The container and pipeline declarations can build the runtime, but the new runti
 
 ## Declared Resources
 
-The preview stack creates, and an approved production `pulumi up` would create:
+The current Pulumi declarations would create:
 
 - the target Namespace;
 - an ObjectBucketClaim for database backups;
 - a one-instance CloudNativePG Cluster, Database, and ScheduledBackup;
 - an Authentik confidential browser application and RSA signing certificate;
-- a Grafana Viewer service account and non-expiring token;
+- a Grafana Editor service account and non-expiring token;
 - a versioned 32-byte OAuth wrapping-key Secret and an application Secret;
 - a hardened one-replica `Recreate` Deployment;
 - an egress NetworkPolicy and ClusterIP Service; and
@@ -39,9 +39,7 @@ The Deployment runs as UID and GID 65532. It disables service-account token moun
 
 The Deployment declares startup, readiness, and liveness probes, explicit resource limits, a bounded temporary volume, and Stakater Reloader annotations.
 
-The deployed health-only host makes health and readiness unconditional. The working-tree `/health` remains unconditional.
-
-The working-tree `/ready` performs bounded live PostgreSQL and signing-key-readiness checks. It does not probe Authentik or Grafana.
+The deployed `/health` remains unconditional. `/ready` performs bounded live PostgreSQL and signing-key-readiness checks; it does not probe Authentik or Grafana.
 
 ## Container Image
 
@@ -55,15 +53,15 @@ Cargo uses CLI Git for the private Kuri dependency. The release build stages ret
 
 ## Credential Boundaries
 
-Pulumi creates the Grafana Viewer service account and token and places the token in the application Secret. These resources exist in preview only.
+The deployed preview revision created the Grafana service account with Viewer access. The worktree promotes it to Editor and places the same account's token in the application Secret so one server-held credential can read alerting state and create silences. This security expansion has not been applied or verified live.
 
 Pulumi places runtime credentials in the application Secret. It keeps the wrapping-key file in a separate Secret and read-only mount.
 
-The working-tree service issues local ES256 access tokens and uses Authentik only for browser identity. Its `/mcp` boundary accepts only locally issued tokens.
+The deployed service issues local ES256 access tokens and uses Authentik only for browser identity. Its `/mcp` boundary accepts only locally issued tokens.
 
 PostgreSQL holds generic OAuth/OIDC state and encrypted signing material in the `mcp` schema. Migrations V1-V3 own hosted OAuth, signing, and registration state; V4 adds one-shot OIDC attempts.
 
-The Grafana client sends its token only in the `Authorization` header. It uses the fixed datasource UID `loki`, Grafana's datasource proxy, and disabled redirects.
+The Grafana client sends its token only in the `Authorization` header. It uses fixed datasource and alerting API routes with disabled redirects. Callers cannot select the origin, token, path, datasource, headers, or method.
 
 Runtime logs, redirects, MCP results, image layers, rendered outputs, and health responses must not expose secret values.
 
@@ -77,23 +75,25 @@ The pipeline clones the requested revision and scans Cargo, container, Tekton, a
 
 The final `general-ci:latest` step maps Grafana provider credentials, runs `pulumi preview --stack preview`, then runs `pulumi up --stack preview`.
 
-The main pipeline has completed successfully and applied the preview stack.
+The main pipeline completed successfully for commit `4f2e192` and applied the preview stack. The current image digest is `sha256:9a9a5a9aacf508494f904a208c6c91d972ea8e568cd61f98eaa077a761c3b7fe`.
 
-That prior run proves the deployment foundation and health path. It predates the working-tree runtime and does not prove OAuth, PostgreSQL runtime, MCP, or LogQL behavior.
+That run proves image delivery, runtime startup, PostgreSQL-backed readiness, public health/readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge. It does not prove browser login, token issuance or refresh, authenticated MCP calls, or live LogQL behavior.
 
 No release pipeline exists.
 
-## Working-Tree Runtime and Preview Gate
+## Preview Runtime and Remaining Gate
 
-The working-tree runtime targets stateless MCP Streamable HTTP revision `2026-07-28` at exact resource `/mcp`.
+The preview runtime targets stateless MCP Streamable HTTP revision `2026-07-28` at exact resource `/mcp`.
 
 It requires locally issued `mcp:use` tokens and configures DCR, CIMD, and native loopback clients through PostgreSQL-backed OAuth state.
 
 Generic Kuri owns strict OIDC login, callback, one-shot transaction state, ID-token verification, the mapper seam, and hosted continuation. Homelab supplies Authentik configuration and stable issuer-plus-subject mapping.
 
-The current worktree exposes one progressive read-only `grafana_query` tool with LogQL, PromQL, TraceQL, and Profiles actions. Their limits and stable results are defined by the [Grafana Query specifications](../grafana-query/README.md). The deployed preview revision predates this rename and action expansion.
+The current worktree exposes six read-only actions through `grafana_query` and only `create_silence` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes both tools. Their canonical limits, results, and errors are defined by the [Grafana tool specifications](../grafana-query/README.md). The deployed preview revision predates the alerting expansion.
 
-No commit, push, pipeline execution, or preview deployment is authorized by these declarations. Preview acceptance requires the layered evidence from the [testing document](../quality/testing.md) and explicit approval for each external action. Existing public health checks do not satisfy that acceptance boundary.
+Silence creation performs no automatic retry. If it returns `mutation_outcome_unknown`, inspect current silences before deciding whether to retry because Grafana may already have applied the request. A silence suppresses matching notifications; it does not stop rule evaluation or delete alert data.
+
+Commit `4f2e192` is deployed to preview. No deployment or live operation occurred for the alerting revision. Full browser OAuth, authenticated preview MCP calls, live alert API behavior, and Editor permission operation still require the layered evidence from the [testing document](../quality/testing.md) and explicit approval for each external action; basic public endpoint checks do not satisfy that boundary.
 
 ## Delivery Inputs
 

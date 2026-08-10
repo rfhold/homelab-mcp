@@ -95,6 +95,9 @@ fn metric_action(action: &'static str) -> &'static str {
         "promql" => "promql",
         "traceql" => "traceql",
         "profiles" => "profiles",
+        "alert_rules" => "alert_rules",
+        "alert_instances" => "alert_instances",
+        "create_silence" => "create_silence",
         _ => "unknown",
     }
 }
@@ -104,6 +107,8 @@ fn metric_mode(mode: &'static str) -> &'static str {
         "instant" => "instant",
         "range" => "range",
         "search" => "search",
+        "list" => "list",
+        "create" => "create",
         _ => "unknown",
     }
 }
@@ -114,6 +119,7 @@ fn metric_datasource_uid(datasource_uid: &'static str) -> &'static str {
         "mimir" => "mimir",
         "tempo" => "tempo",
         "pyroscope" => "pyroscope",
+        "grafana_alerting" => "grafana_alerting",
         _ => "unknown",
     }
 }
@@ -126,6 +132,8 @@ fn metric_outcome(outcome: &'static str) -> &'static str {
         "timeout" => "timeout",
         "unauthorized" => "unauthorized",
         "query_rejected" => "query_rejected",
+        "mutation_rejected" => "mutation_rejected",
+        "mutation_outcome_unknown" => "mutation_outcome_unknown",
         "upstream_unavailable" => "upstream_unavailable",
         "invalid_response" => "invalid_response",
         "cancelled" => "cancelled",
@@ -141,6 +149,8 @@ pub(super) fn request_outcome(result: &Result<Value, Error>) -> &'static str {
         Err(Error::Timeout) => "timeout",
         Err(Error::Unauthorized) => "unauthorized",
         Err(Error::QueryRejected) => "query_rejected",
+        Err(Error::MutationRejected) => "mutation_rejected",
+        Err(Error::MutationOutcomeUnknown) => "mutation_outcome_unknown",
         Err(Error::UpstreamUnavailable) => "upstream_unavailable",
         Err(Error::InvalidResponse) => "invalid_response",
     }
@@ -158,5 +168,20 @@ mod tests {
         assert_eq!(guard.mode, "unknown");
         assert_eq!(guard.datasource_uid, "unknown");
         guard.finish("attacker-outcome");
+
+        assert_eq!(metric_action("alert_rules"), "alert_rules");
+        assert_eq!(metric_action("alert_instances"), "alert_instances");
+        assert_eq!(metric_action("create_silence"), "create_silence");
+        assert_eq!(metric_mode("list"), "list");
+        assert_eq!(metric_mode("create"), "create");
+        assert_eq!(
+            metric_datasource_uid("grafana_alerting"),
+            "grafana_alerting"
+        );
+        assert_eq!(metric_outcome("mutation_rejected"), "mutation_rejected");
+        assert_eq!(
+            metric_outcome("mutation_outcome_unknown"),
+            "mutation_outcome_unknown"
+        );
     }
 }

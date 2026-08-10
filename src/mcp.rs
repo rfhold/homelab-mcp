@@ -1,6 +1,6 @@
 #![allow(clippy::useless_vec)]
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use axum::Router;
 use mcp::{
@@ -16,13 +16,18 @@ use crate::{
     config::OAuthConfig,
     integrations::grafana::{
         Error as GrafanaError,
-        actions::{LogqlInput, ProfilesInput, PromqlInput, TraceqlInput},
+        actions::{
+            AlertInstancesInput, AlertRulesInput, CreateSilenceCommand, CreateSilenceInput,
+            LogqlInput, ProfilesInput, PromqlInput, TraceqlInput,
+        },
     },
     services::Services,
 };
 
 #[cfg(test)]
-const TOOL_NAME: &str = "grafana_query";
+const QUERY_TOOL_NAME: &str = "grafana_query";
+#[cfg(test)]
+const EXEC_TOOL_NAME: &str = "grafana_exec";
 
 #[derive(Clone)]
 pub struct HomelabMcp {
@@ -63,6 +68,16 @@ pub fn router(
             "readOnlyHint": true,
             "destructiveHint": false,
             "idempotentHint": true,
+            "openWorldHint": true
+        })
+    ),
+    tool(
+        name = "grafana_exec",
+        description = "Perform operationally consequential Grafana writes.",
+        annotations = json!({
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": false,
             "openWorldHint": true
         })
     )
@@ -163,6 +178,81 @@ impl HomelabMcp {
             Err(error) => Ok(tool_error("profile", error)),
         }
     }
+
+    /// List bounded Grafana alert-rule summaries.
+    #[action(tool = "grafana_query", name = "alert_rules")]
+    async fn alert_rules(
+        &self,
+        input: AlertRulesInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tool_error("alert rule", GrafanaError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.grafana.alert_rules(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(query_result(output)),
+            Err(error) => Ok(tool_error("alert rule", error)),
+        }
+    }
+
+    /// List bounded current Grafana alert instances, optionally filtered by labels.
+    #[action(tool = "grafana_query", name = "alert_instances")]
+    async fn alert_instances(
+        &self,
+        input: AlertInstancesInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => {
+                return Ok(tool_error("alert instance", GrafanaError::InvalidArguments));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.grafana.alert_instances(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(query_result(output)),
+            Err(error) => Ok(tool_error("alert instance", error)),
+        }
+    }
+
+    /// Create a bounded Grafana silence that suppresses matching alert notifications.
+    #[action(tool = "grafana_exec", name = "create_silence")]
+    async fn create_silence(
+        &self,
+        input: CreateSilenceInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let command = match input.validate() {
+            Ok(command) => command,
+            Err(_) => return Ok(tool_error("silence", GrafanaError::InvalidArguments)),
+        };
+        Ok(self
+            .dispatch_create_silence(&command, context.cancelled())
+            .await)
+    }
+
+    async fn dispatch_create_silence(
+        &self,
+        command: &CreateSilenceCommand,
+        cancellation: impl Future<Output = ()>,
+    ) -> McpToolResult {
+        let result = tokio::select! {
+            result = self.services.grafana.create_silence(command) => result,
+            () = cancellation => return tool_error("silence", GrafanaError::MutationOutcomeUnknown),
+        };
+        match result {
+            Ok(output) => silence_result(output),
+            Err(error) => tool_error("silence", error),
+        }
+    }
 }
 
 fn query_result(output: serde_json::Value) -> McpToolResult {
@@ -171,6 +261,14 @@ fn query_result(output: serde_json::Value) -> McpToolResult {
     let count = output["result"].as_array().map_or(1, Vec::len);
     McpToolResult::new(json!({
         "content": [{"type":"text","text":format!("{mode} {result_type} result with {count} item(s).")}],
+        "structuredContent": output
+    }))
+}
+
+fn silence_result(output: serde_json::Value) -> McpToolResult {
+    let silence_id = output["silence_id"].as_str().unwrap_or("unknown");
+    McpToolResult::new(json!({
+        "content": [{"type":"text","text":format!("Created Grafana silence {silence_id}.")}],
         "structuredContent": output
     }))
 }
@@ -184,7 +282,10 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::integrations::grafana::GrafanaClient;
-    use axum::{Json, Router, routing::get};
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
     use mcp::{
         McpPrincipalId,
         protocol::MCP_PROTOCOL_VERSION,
@@ -200,7 +301,7 @@ mod tests {
     };
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
-    use tokio::{net::TcpListener, task::JoinHandle};
+    use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
     use tracing_subscriber::{Layer as _, layer::SubscriberExt as _};
 
     use super::*;
@@ -215,15 +316,42 @@ mod tests {
     }
 
     async fn test_handler() -> (Arc<HomelabMcp>, JoinHandle<()>) {
-        let grafana = Router::new().route(
-            "/api/datasources/proxy/uid/loki/loki/api/v1/query",
-            get(|| async {
-                Json(json!({
-                    "status":"success",
-                    "data":{"resultType":"vector","result":[{"metric":{"job":"test"},"value":[1786276800,"2"]}]}
-                }))
-            }),
-        );
+        let grafana = Router::new()
+            .route(
+                "/api/datasources/proxy/uid/loki/loki/api/v1/query",
+                get(|| async {
+                    Json(json!({
+                        "status":"success",
+                        "data":{"resultType":"vector","result":[{"metric":{"job":"test"},"value":[1786276800,"2"]}]}
+                    }))
+                }),
+            )
+            .route(
+                "/api/v1/provisioning/alert-rules",
+                get(|| async {
+                    Json(json!([{
+                        "uid":"rule-1", "title":"API errors", "folderUID":"folder-1",
+                        "ruleGroup":"api", "condition":"C", "noDataState":"NoData",
+                        "execErrState":"Error", "for":"5m", "isPaused":false,
+                        "labels":{"severity":"critical"}, "annotations":{"summary":"API is failing"}
+                    }]))
+                }),
+            )
+            .route(
+                "/api/alertmanager/grafana/api/v2/alerts",
+                get(|| async {
+                    Json(json!([{
+                        "fingerprint":"abc123", "startsAt":"2026-08-10T12:00:00Z",
+                        "endsAt":"2026-08-10T13:00:00Z", "updatedAt":"2026-08-10T12:01:00Z",
+                        "status":{"state":"active","silencedBy":[],"inhibitedBy":[]},
+                        "labels":{"alertname":"APIError"}, "annotations":{"summary":"API is failing"}
+                    }]))
+                }),
+            )
+            .route(
+                "/api/alertmanager/grafana/api/v2/silences",
+                post(|| async { Json(json!({"silenceID":"silence-123"})) }),
+            );
         let (origin, task) = serve(grafana).await;
         let handler = Arc::new(HomelabMcp {
             services: Arc::new(Services::new(GrafanaClient::for_test(
@@ -345,7 +473,7 @@ mod tests {
                     "tools/call",
                     "telemetry-call",
                     json!({
-                        "name": TOOL_NAME,
+                        "name": QUERY_TOOL_NAME,
                         "arguments": {
                             "action": "logql",
                             "input": {"query": "{job=\"telemetry-test\"}"}
@@ -359,7 +487,7 @@ mod tests {
                     .header("authorization", "Bearer test-token")
                     .header("mcp-protocol-version", MCP_PROTOCOL_VERSION)
                     .header("mcp-method", "tools/call")
-                    .header("mcp-name", TOOL_NAME)
+                    .header("mcp-name", QUERY_TOOL_NAME)
                     .json(&body)
                     .send()
                     .await
@@ -445,39 +573,64 @@ mod tests {
         assert_eq!(discover["result"]["ttlMs"], 0);
 
         let (_, listed) = post_mcp(&endpoint, request("tools/list", "list", json!({}))).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 1);
-        assert_eq!(listed["result"]["tools"][0]["name"], TOOL_NAME);
+        let tools = listed["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        let query_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == QUERY_TOOL_NAME)
+            .unwrap();
+        let exec_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == EXEC_TOOL_NAME)
+            .unwrap();
         assert_eq!(
-            listed["result"]["tools"][0]["annotations"]["readOnlyHint"],
-            true
+            query_tool["annotations"],
+            json!({
+                "readOnlyHint":true, "destructiveHint":false,
+                "idempotentHint":true, "openWorldHint":true
+            })
         );
         assert_eq!(
-            listed["result"]["tools"][0]["annotations"]["destructiveHint"],
-            false
+            exec_tool["annotations"],
+            json!({
+                "readOnlyHint":false, "destructiveHint":false,
+                "idempotentHint":false, "openWorldHint":true
+            })
         );
-        assert_eq!(
-            listed["result"]["tools"][0]["inputSchema"]["additionalProperties"],
-            false
+        assert!(
+            exec_tool["description"]
+                .as_str()
+                .unwrap()
+                .contains("operationally consequential")
         );
+        assert_eq!(query_tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(exec_tool["inputSchema"]["additionalProperties"], false);
 
-        let (_, help) = post_mcp(
+        let (_, query_help) = post_mcp(
             &endpoint,
             request(
                 "tools/call",
-                "help",
-                json!({"name":TOOL_NAME,"arguments":{"action":"help","filter":".actions"}}),
+                "query-help",
+                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"help","filter":".actions"}}),
             ),
         )
         .await;
-        let actions = help["result"]["structuredContent"]["result"]
+        let query_actions = query_help["result"]["structuredContent"]["result"]
             .as_array()
             .unwrap();
         assert_eq!(
-            actions
+            query_actions
                 .iter()
                 .map(|action| action["action"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["logql", "promql", "traceql", "profiles"]
+            vec![
+                "logql",
+                "promql",
+                "traceql",
+                "profiles",
+                "alert_rules",
+                "alert_instances"
+            ]
         );
         for (action, required, optional) in [
             (
@@ -491,8 +644,10 @@ mod tests {
                 vec!["selector", "start", "end"],
                 vec!["profile_type", "max_nodes"],
             ),
+            ("alert_rules", vec![], vec!["limit"]),
+            ("alert_instances", vec![], vec!["matchers", "limit"]),
         ] {
-            let schema = &actions
+            let schema = &query_actions
                 .iter()
                 .find(|candidate| candidate["action"] == action)
                 .unwrap()["input_schema"];
@@ -501,48 +656,108 @@ mod tests {
             for field in required.iter().chain(optional.iter()) {
                 assert!(properties.contains_key(*field), "{action} missing {field}");
             }
-            assert_eq!(schema["required"], json!(required));
+            if required.is_empty() {
+                assert_eq!(schema["required"], Value::Null);
+            } else {
+                assert_eq!(schema["required"], json!(required));
+            }
         }
 
-        let (_, call) = post_mcp(
+        let (_, exec_help) = post_mcp(
             &endpoint,
             request(
                 "tools/call",
-                "call",
-                json!({"name":TOOL_NAME,"arguments":{"action":"logql","input":{"query":"{job=\"test\"}"}}}),
+                "exec-help",
+                json!({"name":EXEC_TOOL_NAME,"arguments":{"action":"help","filter":".actions"}}),
             ),
         )
         .await;
-        assert_eq!(call["result"]["isError"], Value::Null);
-        assert_eq!(call["result"]["structuredContent"]["mode"], "instant");
-        assert_eq!(call["result"]["structuredContent"]["result_type"], "vector");
-        assert!(
-            call["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("1 item")
+        let exec_actions = exec_help["result"]["structuredContent"]["result"]
+            .as_array()
+            .unwrap();
+        assert_eq!(exec_actions.len(), 1);
+        assert_eq!(exec_actions[0]["action"], "create_silence");
+        let silence_schema = &exec_actions[0]["input_schema"];
+        assert_eq!(silence_schema["additionalProperties"], false);
+        assert_eq!(
+            silence_schema["required"],
+            json!(["matchers", "duration_seconds", "comment"])
         );
 
-        let (_, filtered_call) = post_mcp(
+        for (action, result_type, expected_field) in [
+            ("alert_rules", "alert_rules", ("title", "API errors")),
+            (
+                "alert_instances",
+                "alert_instances",
+                ("fingerprint", "abc123"),
+            ),
+        ] {
+            let (_, call) = post_mcp(
+                &endpoint,
+                request(
+                    "tools/call",
+                    action,
+                    json!({"name":QUERY_TOOL_NAME,"arguments":{"action":action,"input":{}}}),
+                ),
+            )
+            .await;
+            assert_eq!(call["result"]["isError"], Value::Null, "{call}");
+            assert_eq!(call["result"]["structuredContent"]["mode"], "list");
+            assert_eq!(
+                call["result"]["structuredContent"]["result_type"],
+                result_type
+            );
+            assert_eq!(
+                call["result"]["structuredContent"]["result"][0][expected_field.0],
+                expected_field.1
+            );
+        }
+
+        let (_, silence) = post_mcp(
             &endpoint,
             request(
                 "tools/call",
-                "filtered-call",
+                "create-silence",
                 json!({
-                    "name":TOOL_NAME,
+                    "name":EXEC_TOOL_NAME,
                     "arguments":{
-                        "action":"logql",
-                        "input":{"query":"{job=\"test\"}"},
-                        "filter":".result[]"
+                        "action":"create_silence",
+                        "input":{
+                            "matchers":[{"name":"alertname","operator":"=","value":"APIError"}],
+                            "duration_seconds":3600,
+                            "comment":"maintenance"
+                        }
                     }
                 }),
             ),
         )
         .await;
-        assert!(filtered_call.get("error").is_none(), "{filtered_call}");
+        assert_eq!(silence["result"]["isError"], Value::Null, "{silence}");
+        let structured = &silence["result"]["structuredContent"];
+        assert_eq!(structured["silence_id"], "silence-123");
+        assert!(structured["starts_at"].is_string());
+        assert!(structured["ends_at"].is_string());
+        assert_eq!(structured.as_object().unwrap().len(), 3);
         assert_eq!(
-            filtered_call["result"]["structuredContent"]["metric"]["job"],
-            "test"
+            silence["result"]["content"][0]["text"],
+            "Created Grafana silence silence-123."
+        );
+
+        let (_, filtered) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "filtered-alerts",
+                json!({
+                    "name":QUERY_TOOL_NAME,
+                    "arguments":{"action":"alert_instances","input":{},"filter":".result[]"}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            filtered["result"]["structuredContent"]["fingerprint"],
+            "abc123"
         );
 
         grafana_task.abort();
@@ -554,17 +769,32 @@ mod tests {
         let (handler, grafana_task) = test_handler().await;
         let (origin, mcp_task) = serve(streamable_http_router(handler)).await;
         let endpoint = format!("{origin}/mcp");
-        for arguments in [
-            json!({"action":"unknown"}),
-            json!({"action":"help","extra":true}),
-            json!({"action":"help","filter":".["}),
+        for (tool, arguments) in [
+            (QUERY_TOOL_NAME, json!({"action":"unknown"})),
+            (QUERY_TOOL_NAME, json!({"action":"create_silence"})),
+            (EXEC_TOOL_NAME, json!({"action":"alert_rules"})),
+            (
+                QUERY_TOOL_NAME,
+                json!({"action":"alert_rules","input":{"limit":1,"extra":true}}),
+            ),
+            (
+                EXEC_TOOL_NAME,
+                json!({
+                    "action":"create_silence",
+                    "input":{
+                        "matchers":[], "duration_seconds":1, "comment":"x", "extra":true
+                    }
+                }),
+            ),
+            (QUERY_TOOL_NAME, json!({"action":"help","extra":true})),
+            (QUERY_TOOL_NAME, json!({"action":"help","filter":".["})),
         ] {
             let (_, response) = post_mcp(
                 &endpoint,
                 request(
                     "tools/call",
                     "invalid",
-                    json!({"name":TOOL_NAME,"arguments":arguments}),
+                    json!({"name":tool,"arguments":arguments}),
                 ),
             )
             .await;
@@ -576,7 +806,7 @@ mod tests {
             request(
                 "tools/call",
                 "semantic",
-                json!({"name":TOOL_NAME,"arguments":{"action":"logql","input":{"query":" "}}}),
+                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"logql","input":{"query":" "}}}),
             ),
         )
         .await;
@@ -586,6 +816,27 @@ mod tests {
             json!({"code":"invalid_arguments","message":"The LogQL arguments are invalid.","retryable":false})
         );
         assert!(!semantic.to_string().contains("grafana-secret"));
+
+        let (_, mutation_semantic) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "mutation-semantic",
+                json!({
+                    "name":EXEC_TOOL_NAME,
+                    "arguments":{
+                        "action":"create_silence",
+                        "input":{"matchers":[],"duration_seconds":0,"comment":" "}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(mutation_semantic["result"]["isError"], true);
+        assert_eq!(
+            mutation_semantic["result"]["structuredContent"]["error"],
+            json!({"code":"invalid_arguments","message":"The silence arguments are invalid.","retryable":false})
+        );
 
         let (_, unknown_tool) = post_mcp(
             &endpoint,
@@ -604,6 +855,118 @@ mod tests {
         mcp_task.abort();
     }
 
+    #[tokio::test]
+    async fn uncertain_mutation_failure_is_exact_safe_and_non_retryable() {
+        let grafana = Router::new().route(
+            "/api/alertmanager/grafana/api/v2/silences",
+            post(|| async {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unsafe upstream mutation detail",
+                )
+            }),
+        );
+        let (grafana_origin, grafana_task) = serve(grafana).await;
+        let handler = Arc::new(HomelabMcp {
+            services: Arc::new(Services::new(GrafanaClient::for_test(
+                url::Url::parse(&format!("{grafana_origin}/")).unwrap(),
+                std::time::Duration::from_secs(1),
+            ))),
+        });
+        let (origin, mcp_task) = serve(streamable_http_router(handler)).await;
+        let (_, response) = post_mcp(
+            &format!("{origin}/mcp"),
+            request(
+                "tools/call",
+                "uncertain-mutation",
+                json!({
+                    "name":EXEC_TOOL_NAME,
+                    "arguments":{
+                        "action":"create_silence",
+                        "input":{
+                            "matchers":[{"name":"alertname","operator":"=","value":"APIError"}],
+                            "duration_seconds":3600,
+                            "comment":"maintenance"
+                        }
+                    }
+                }),
+            ),
+        )
+        .await;
+
+        let message = "The Grafana mutation did not complete cleanly; its outcome may be uncertain. Check existing silences before retrying.";
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(
+            response["result"]["structuredContent"]["error"],
+            json!({"code":"mutation_outcome_unknown","message":message,"retryable":false})
+        );
+        assert_eq!(response["result"]["content"][0]["text"], message);
+        assert!(
+            !response
+                .to_string()
+                .contains("unsafe upstream mutation detail")
+        );
+
+        grafana_task.abort();
+        mcp_task.abort();
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_silence_post_is_exact_safe_and_non_retryable() {
+        let post_received = Arc::new(Notify::new());
+        let post_probe = Arc::clone(&post_received);
+        let grafana = Router::new().route(
+            "/api/alertmanager/grafana/api/v2/silences",
+            post(move || {
+                let post_probe = Arc::clone(&post_probe);
+                async move {
+                    post_probe.notify_one();
+                    std::future::pending::<Json<Value>>().await
+                }
+            }),
+        );
+        let (grafana_origin, grafana_task) = serve(grafana).await;
+        let handler = Arc::new(HomelabMcp {
+            services: Arc::new(Services::new(GrafanaClient::for_test(
+                url::Url::parse(&format!("{grafana_origin}/")).unwrap(),
+                std::time::Duration::from_secs(1),
+            ))),
+        });
+        let cancellation = Arc::new(Notify::new());
+        let cancellation_signal = Arc::clone(&cancellation);
+        let dispatch = tokio::spawn(async move {
+            let command = CreateSilenceInput {
+                matchers: vec![crate::integrations::grafana::actions::LabelMatcher {
+                    name: "alertname".to_owned(),
+                    operator: crate::integrations::grafana::actions::MatcherOperator::Equal,
+                    value: "APIError".to_owned(),
+                }],
+                duration_seconds: 3600,
+                comment: "maintenance".to_owned(),
+            }
+            .validate()
+            .unwrap();
+            handler
+                .dispatch_create_silence(&command, cancellation_signal.notified())
+                .await
+        });
+
+        post_received.notified().await;
+        cancellation.notify_one();
+        let response = dispatch.await.unwrap().raw;
+
+        let message = "The Grafana mutation did not complete cleanly; its outcome may be uncertain. Check existing silences before retrying.";
+        assert_eq!(response["isError"], true);
+        assert_eq!(
+            response["structuredContent"]["error"],
+            json!({"code":"mutation_outcome_unknown","message":message,"retryable":false})
+        );
+        assert_eq!(response["content"][0]["text"], message);
+        assert!(!response.to_string().contains("request cancelled"));
+
+        grafana_task.abort();
+    }
+
     #[test]
     fn semantic_errors_are_exact_and_safe() {
         let cases = [
@@ -616,7 +979,7 @@ mod tests {
             (
                 GrafanaError::CapacityExhausted,
                 "capacity_exhausted",
-                "Grafana query capacity is currently exhausted.",
+                "Grafana request capacity is currently exhausted.",
                 true,
             ),
             (
@@ -635,6 +998,18 @@ mod tests {
                 GrafanaError::QueryRejected,
                 "query_rejected",
                 "Grafana rejected the LogQL query.",
+                false,
+            ),
+            (
+                GrafanaError::MutationRejected,
+                "mutation_rejected",
+                "Grafana rejected the requested mutation.",
+                false,
+            ),
+            (
+                GrafanaError::MutationOutcomeUnknown,
+                "mutation_outcome_unknown",
+                "The Grafana mutation did not complete cleanly; its outcome may be uncertain. Check existing silences before retrying.",
                 false,
             ),
             (

@@ -12,13 +12,27 @@ use crate::config::Secret;
 
 use super::{
     Error,
-    actions::{Mode, ProfilesQuery, PromqlQuery, Query, TraceqlQuery},
+    actions::{
+        AlertInstancesQuery, AlertRulesQuery, CreateSilenceCommand, LabelMatcher, Mode,
+        ProfilesQuery, PromqlQuery, Query, TraceqlQuery,
+    },
     telemetry::{GrafanaMetricsGuard, request_outcome},
 };
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_URL_BYTES: usize = 8192;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SAFE_MAP_ENTRIES: usize = 64;
+const MAX_SAFE_KEY_BYTES: usize = 128;
+const MAX_SAFE_VALUE_BYTES: usize = 4096;
+const MAX_SUMMARY_BYTES: usize = 512;
+
+#[derive(Clone, Copy)]
+enum OperationKind {
+    Read,
+    Mutation,
+}
+
 struct UpstreamRequest {
     method: Method,
     path: &'static str,
@@ -89,6 +103,7 @@ impl GrafanaClient {
             "logql",
             query.mode.as_str(),
             "loki",
+            OperationKind::Read,
             |body| normalize_logql(query.mode, query.limit, body),
         )
         .await
@@ -120,6 +135,7 @@ impl GrafanaClient {
             "promql",
             query.mode.as_str(),
             "mimir",
+            OperationKind::Read,
             |body| normalize_promql(query.mode, body),
         )
         .await
@@ -146,6 +162,7 @@ impl GrafanaClient {
             "traceql",
             "search",
             "tempo",
+            OperationKind::Read,
             |body| normalize_traceql(query.limit, body),
         )
         .await
@@ -168,7 +185,90 @@ impl GrafanaClient {
             "profiles",
             "range",
             "pyroscope",
+            OperationKind::Read,
             normalize_profiles,
+        )
+        .await
+    }
+
+    pub async fn alert_rules(&self, query: &AlertRulesQuery) -> Result<Value, Error> {
+        self.run(
+            UpstreamRequest {
+                method: Method::GET,
+                path: "/api/v1/provisioning/alert-rules",
+                parameters: Vec::new(),
+                body: None,
+            },
+            "alert_rules",
+            "list",
+            "grafana_alerting",
+            OperationKind::Read,
+            |body| normalize_alert_rules(query.limit, body),
+        )
+        .await
+    }
+
+    pub async fn alert_instances(&self, query: &AlertInstancesQuery) -> Result<Value, Error> {
+        let parameters = query
+            .matchers
+            .iter()
+            .map(|matcher| ("filter", matcher_filter(matcher)))
+            .collect();
+        self.run(
+            UpstreamRequest {
+                method: Method::GET,
+                path: "/api/alertmanager/grafana/api/v2/alerts",
+                parameters,
+                body: None,
+            },
+            "alert_instances",
+            "list",
+            "grafana_alerting",
+            OperationKind::Read,
+            |body| normalize_alert_instances(query.limit, body),
+        )
+        .await
+    }
+
+    pub async fn create_silence(&self, command: &CreateSilenceCommand) -> Result<Value, Error> {
+        let starts_at = Utc::now();
+        let duration =
+            chrono::Duration::from_std(command.duration).map_err(|_| Error::InvalidArguments)?;
+        let ends_at = starts_at
+            .checked_add_signed(duration)
+            .ok_or(Error::InvalidArguments)?;
+        let starts_at = timestamp_parameter(starts_at);
+        let ends_at = timestamp_parameter(ends_at);
+        let matchers = command
+            .matchers
+            .iter()
+            .map(|matcher| {
+                json!({
+                    "name": matcher.name,
+                    "value": matcher.value,
+                    "isRegex": matcher.operator.is_regex(),
+                    "isEqual": matcher.operator.is_equal(),
+                })
+            })
+            .collect::<Vec<_>>();
+        self.run(
+            UpstreamRequest {
+                method: Method::POST,
+                path: "/api/alertmanager/grafana/api/v2/silences",
+                parameters: Vec::new(),
+                body: Some(json!({
+                    "matchers": matchers,
+                    "startsAt": starts_at,
+                    "endsAt": ends_at,
+                    "createdBy": "homelab-mcp",
+                    "comment": command.comment,
+                })),
+            },
+            "create_silence",
+            "create",
+            "grafana_alerting",
+            OperationKind::Mutation,
+            |body| normalize_create_silence(&starts_at, &ends_at, body),
         )
         .await
     }
@@ -179,6 +279,7 @@ impl GrafanaClient {
         action: &'static str,
         mode: &'static str,
         datasource_uid: &'static str,
+        kind: OperationKind,
         normalize: impl FnOnce(Value) -> Result<Value, Error>,
     ) -> Result<Value, Error> {
         let mut metrics = GrafanaMetricsGuard::new(action, mode, datasource_uid);
@@ -210,7 +311,7 @@ impl GrafanaClient {
                 let mut url = self
                     .origin
                     .join(request.path)
-                    .map_err(|_| Error::UpstreamUnavailable)?;
+                    .map_err(|_| operation_failure(kind))?;
                 url.query_pairs_mut()
                     .extend_pairs(request.parameters.iter().map(|(key, value)| (*key, value)));
                 if url.as_str().len() > MAX_URL_BYTES {
@@ -223,24 +324,39 @@ impl GrafanaClient {
                 if let Some(body) = request.body {
                     builder = builder.json(&body);
                 }
-                let response = builder
-                    .send()
-                    .await
-                    .map_err(|_| Error::UpstreamUnavailable)?;
+                let response = builder.send().await.map_err(|_| operation_failure(kind))?;
                 let status = response.status();
                 match status {
                     StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                         return Err(Error::Unauthorized);
                     }
-                    status if status.is_client_error() => return Err(Error::QueryRejected),
-                    status if !status.is_success() => return Err(Error::UpstreamUnavailable),
+                    status if status.is_client_error() => {
+                        return Err(match kind {
+                            OperationKind::Read => Error::QueryRejected,
+                            OperationKind::Mutation if status == StatusCode::BAD_REQUEST => {
+                                Error::MutationRejected
+                            }
+                            OperationKind::Mutation => Error::MutationOutcomeUnknown,
+                        });
+                    }
+                    status if !status.is_success() => return Err(operation_failure(kind)),
                     _ => {}
                 }
-                normalize(read_json(response).await?)
+                let body = read_json(response).await.map_err(|error| match kind {
+                    OperationKind::Read => error,
+                    OperationKind::Mutation => Error::MutationOutcomeUnknown,
+                })?;
+                normalize(body).map_err(|error| match kind {
+                    OperationKind::Read => error,
+                    OperationKind::Mutation => Error::MutationOutcomeUnknown,
+                })
             };
             tokio::time::timeout(self.timeout, operation)
                 .await
-                .map_err(|_| Error::Timeout)?
+                .map_err(|_| match kind {
+                    OperationKind::Read => Error::Timeout,
+                    OperationKind::Mutation => Error::MutationOutcomeUnknown,
+                })?
         }
         .instrument(span.clone())
         .await;
@@ -274,6 +390,191 @@ async fn read_json(mut response: Response) -> Result<Value, Error> {
 
 fn timestamp_parameter(timestamp: DateTime<Utc>) -> String {
     timestamp.to_rfc3339_opts(SecondsFormat::Nanos, true)
+}
+
+const fn operation_failure(kind: OperationKind) -> Error {
+    match kind {
+        OperationKind::Read => Error::UpstreamUnavailable,
+        OperationKind::Mutation => Error::MutationOutcomeUnknown,
+    }
+}
+
+fn matcher_filter(matcher: &LabelMatcher) -> String {
+    format!(
+        "{}{}{}",
+        matcher.name,
+        matcher.operator.as_str(),
+        serde_json::to_string(&matcher.value).expect("serializing a string cannot fail")
+    )
+}
+
+fn normalize_alert_rules(limit: u16, wrapper: Value) -> Result<Value, Error> {
+    let rules = wrapper.as_array().ok_or(Error::InvalidResponse)?;
+    let result = rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| {
+            let object = rule.as_object().ok_or(Error::InvalidResponse)?;
+            let normalized = json!({
+                "uid": bounded_string(object, "uid", MAX_SAFE_KEY_BYTES)?,
+                "title": bounded_string(object, "title", MAX_SUMMARY_BYTES)?,
+                "folder_uid": bounded_string(object, "folderUID", MAX_SAFE_KEY_BYTES)?,
+                "rule_group": bounded_string(object, "ruleGroup", MAX_SUMMARY_BYTES)?,
+                "condition": bounded_string(object, "condition", MAX_SAFE_KEY_BYTES)?,
+                "no_data_state": bounded_string(object, "noDataState", MAX_SAFE_KEY_BYTES)?,
+                "exec_err_state": bounded_string(object, "execErrState", MAX_SAFE_KEY_BYTES)?,
+                "for": bounded_string(object, "for", MAX_SAFE_KEY_BYTES)?,
+                "is_paused": object.get("isPaused").and_then(Value::as_bool).ok_or(Error::InvalidResponse)?,
+                "labels": safe_string_map(object.get("labels").ok_or(Error::InvalidResponse)?)?,
+                "annotations": safe_string_map(object.get("annotations").ok_or(Error::InvalidResponse)?)?,
+            });
+            Ok((index < usize::from(limit)).then_some(normalized))
+        })
+        .collect::<Result<Vec<_>, Error>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "mode": "list",
+        "result_type": "alert_rules",
+        "result": result,
+    }))
+}
+
+fn normalize_alert_instances(limit: u16, wrapper: Value) -> Result<Value, Error> {
+    let alerts = wrapper.as_array().ok_or(Error::InvalidResponse)?;
+    let result = alerts
+        .iter()
+        .enumerate()
+        .map(|(index, alert)| {
+            let object = alert.as_object().ok_or(Error::InvalidResponse)?;
+            let status = object
+                .get("status")
+                .and_then(Value::as_object)
+                .ok_or(Error::InvalidResponse)?;
+            let silenced_by = status
+                .get("silencedBy")
+                .and_then(Value::as_array)
+                .ok_or(Error::InvalidResponse)?;
+            let inhibited_by = status
+                .get("inhibitedBy")
+                .and_then(Value::as_array)
+                .ok_or(Error::InvalidResponse)?;
+            if !silenced_by.iter().all(Value::is_string)
+                || !inhibited_by.iter().all(Value::is_string)
+            {
+                return Err(Error::InvalidResponse);
+            }
+            let normalized = json!({
+                "fingerprint": bounded_string(object, "fingerprint", MAX_SAFE_KEY_BYTES)?,
+                "starts_at": normalized_timestamp(object, "startsAt")?,
+                "ends_at": normalized_timestamp(object, "endsAt")?,
+                "updated_at": normalized_timestamp(object, "updatedAt")?,
+                "state": bounded_string(status, "state", MAX_SAFE_KEY_BYTES)?,
+                "silenced": !silenced_by.is_empty(),
+                "inhibited": !inhibited_by.is_empty(),
+                "labels": safe_string_map(object.get("labels").ok_or(Error::InvalidResponse)?)?,
+                "annotations": safe_string_map(object.get("annotations").ok_or(Error::InvalidResponse)?)?,
+            });
+            Ok((index < usize::from(limit)).then_some(normalized))
+        })
+        .collect::<Result<Vec<_>, Error>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "mode": "list",
+        "result_type": "alert_instances",
+        "result": result,
+    }))
+}
+
+fn normalize_create_silence(
+    starts_at: &str,
+    ends_at: &str,
+    wrapper: Value,
+) -> Result<Value, Error> {
+    let object = wrapper.as_object().ok_or(Error::InvalidResponse)?;
+    if object.len() != 1 {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(json!({
+        "silence_id": bounded_string(object, "silenceID", MAX_SAFE_KEY_BYTES)?,
+        "starts_at": starts_at,
+        "ends_at": ends_at,
+    }))
+}
+
+fn bounded_string<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    maximum_bytes: usize,
+) -> Result<&'a str, Error> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= maximum_bytes)
+        .ok_or(Error::InvalidResponse)
+}
+
+fn normalized_timestamp(object: &Map<String, Value>, key: &str) -> Result<String, Error> {
+    let value = bounded_string(object, key, MAX_SAFE_KEY_BYTES)?;
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| {
+            timestamp
+                .to_utc()
+                .to_rfc3339_opts(SecondsFormat::Nanos, true)
+        })
+        .map_err(|_| Error::InvalidResponse)
+}
+
+fn safe_string_map(value: &Value) -> Result<Map<String, Value>, Error> {
+    let object = value.as_object().ok_or(Error::InvalidResponse)?;
+    if object.len() > MAX_SAFE_MAP_ENTRIES {
+        return Err(Error::InvalidResponse);
+    }
+    object
+        .iter()
+        .try_fold(Map::new(), |mut output, (key, value)| {
+            let value = value.as_str().ok_or(Error::InvalidResponse)?;
+            if key.is_empty()
+                || key.len() > MAX_SAFE_KEY_BYTES
+                || value.len() > MAX_SAFE_VALUE_BYTES
+            {
+                return Err(Error::InvalidResponse);
+            }
+            if !url_designated_key(key) && !url_like_value(value) {
+                output.insert(key.clone(), json!(value));
+            }
+            Ok(output)
+        })
+}
+
+fn url_designated_key(key: &str) -> bool {
+    key.to_ascii_lowercase().ends_with("url")
+}
+
+fn url_like_value(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with('/') || has_absolute_scheme(value) || has_markdown_link(value)
+}
+
+fn has_absolute_scheme(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once(':') else {
+        return false;
+    };
+    let mut characters = scheme.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && characters
+            .all(|character| character.is_ascii_alphanumeric() || "+-.".contains(character))
+}
+
+fn has_markdown_link(value: &str) -> bool {
+    value
+        .match_indices("](")
+        .any(|(index, _)| value[index + 2..].find(')').is_some_and(|end| end > 0))
 }
 
 fn normalize_logql(mode: Mode, limit: u16, wrapper: Value) -> Result<Value, Error> {
@@ -562,8 +863,9 @@ mod tests {
     use tokio::{net::TcpListener, task::JoinHandle};
 
     use crate::integrations::grafana::actions::{
-        DEFAULT_MAX_NODES, DEFAULT_PROFILE_TYPE, Direction, LogqlInput, ProfilesInput, PromqlInput,
-        TraceqlInput,
+        AlertInstancesInput, AlertRulesInput, CreateSilenceInput, DEFAULT_MAX_NODES,
+        DEFAULT_PROFILE_TYPE, Direction, LabelMatcher, LogqlInput, MatcherOperator, ProfilesInput,
+        PromqlInput, TraceqlInput,
     };
 
     use super::*;
@@ -574,6 +876,7 @@ mod tests {
         path: String,
         authorization: String,
         parameters: HashMap<String, String>,
+        parameter_pairs: Vec<(String, String)>,
         body: Value,
     }
 
@@ -592,6 +895,14 @@ mod tests {
                 .unwrap_or_default()
                 .to_owned(),
             parameters,
+            parameter_pairs: uri
+                .query()
+                .map(|query| {
+                    url::form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect()
+                })
+                .unwrap_or_default(),
             body: Value::Null,
         };
         Json(json!({"status":"success","data":{"resultType":"scalar","result":[1786276800,"1"]}}))
@@ -608,6 +919,14 @@ mod tests {
             path: uri.path().to_owned(),
             authorization: headers["authorization"].to_str().unwrap().to_owned(),
             parameters,
+            parameter_pairs: uri
+                .query()
+                .map(|query| {
+                    url::form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect()
+                })
+                .unwrap_or_default(),
             body: Value::Null,
         };
         Json(json!({"traces":[{"traceID":"one"}],"metrics":{"inspectedBytes":"10"}}))
@@ -624,9 +943,67 @@ mod tests {
             path: uri.path().to_owned(),
             authorization: headers["authorization"].to_str().unwrap().to_owned(),
             parameters: HashMap::new(),
+            parameter_pairs: Vec::new(),
             body,
         };
         Json(profile_response())
+    }
+
+    async fn record_alert_rules_request(
+        State(record): State<Arc<Mutex<RequestRecord>>>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+    ) -> Json<Value> {
+        *record.lock().unwrap() = RequestRecord {
+            method: "GET".to_owned(),
+            path: uri.path().to_owned(),
+            authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            parameters: HashMap::new(),
+            parameter_pairs: Vec::new(),
+            body: Value::Null,
+        };
+        Json(alert_rules_response())
+    }
+
+    async fn record_alert_instances_request(
+        State(record): State<Arc<Mutex<RequestRecord>>>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+    ) -> Json<Value> {
+        let parameter_pairs = uri
+            .query()
+            .map(|query| {
+                url::form_urlencoded::parse(query.as_bytes())
+                    .into_owned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        *record.lock().unwrap() = RequestRecord {
+            method: "GET".to_owned(),
+            path: uri.path().to_owned(),
+            authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            parameters: parameter_pairs.iter().cloned().collect(),
+            parameter_pairs,
+            body: Value::Null,
+        };
+        Json(alert_instances_response())
+    }
+
+    async fn record_silence_request(
+        State(record): State<Arc<Mutex<RequestRecord>>>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        *record.lock().unwrap() = RequestRecord {
+            method: "POST".to_owned(),
+            path: uri.path().to_owned(),
+            authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            parameters: HashMap::new(),
+            parameter_pairs: Vec::new(),
+            body,
+        };
+        Json(json!({"silenceID":"silence-123"}))
     }
 
     fn profile_response() -> Value {
@@ -638,6 +1015,40 @@ mod tests {
                 "maxSelf": "7"
             }
         })
+    }
+
+    fn alert_rules_response() -> Value {
+        json!([{
+            "id": 7,
+            "uid": "rule-1",
+            "orgID": 1,
+            "folderUID": "folder-1",
+            "ruleGroup": "api",
+            "title": "API errors",
+            "condition": "C",
+            "data": [{"refId":"C","model":{"datasource":{"uid":"internal"}}}],
+            "updated": "2026-08-10T12:00:00Z",
+            "noDataState": "NoData",
+            "execErrState": "Error",
+            "for": "5m",
+            "annotations": {"summary":"API is failing","dashboard_url":"http://grafana.internal/d/one"},
+            "labels": {"severity":"critical"},
+            "isPaused": false,
+        }])
+    }
+
+    fn alert_instances_response() -> Value {
+        json!([{
+            "annotations": {"summary":"API is failing","runbook_url":"https://wiki.internal/runbook"},
+            "endsAt": "2026-08-10T13:00:00Z",
+            "fingerprint": "abc123",
+            "receivers": [{"name":"internal-receiver"}],
+            "startsAt": "2026-08-10T12:00:00Z",
+            "status": {"inhibitedBy":[],"silencedBy":["secret-silence-id"],"state":"suppressed"},
+            "updatedAt": "2026-08-10T12:01:00Z",
+            "generatorURL": "http://grafana.internal/alerting/1",
+            "labels": {"alertname":"APIError","severity":"critical"},
+        }])
     }
 
     async fn serve(router: Router) -> (Url, JoinHandle<()>) {
@@ -691,6 +1102,18 @@ mod tests {
         }
     }
 
+    fn silence_input() -> CreateSilenceInput {
+        CreateSilenceInput {
+            matchers: vec![LabelMatcher {
+                name: "alertname".to_owned(),
+                operator: MatcherOperator::Equal,
+                value: "APIError".to_owned(),
+            }],
+            duration_seconds: 3600,
+            comment: "maintenance".to_owned(),
+        }
+    }
+
     #[test]
     fn normalizes_all_loki_result_types_and_stats() {
         let cases = [
@@ -724,6 +1147,107 @@ mod tests {
                 })
             );
             assert!(!normalized.to_string().contains("ignored"));
+        }
+    }
+
+    #[test]
+    fn normalizes_alert_rules_and_instances_without_upstream_internal_fields() {
+        let rules = normalize_alert_rules(1, alert_rules_response()).unwrap();
+        assert_eq!(rules["mode"], "list");
+        assert_eq!(rules["result_type"], "alert_rules");
+        assert_eq!(rules["result"][0]["uid"], "rule-1");
+        assert_eq!(rules["result"][0]["labels"]["severity"], "critical");
+        assert!(!rules.to_string().contains("datasource"));
+        assert!(!rules.to_string().contains("orgID"));
+
+        let alerts = normalize_alert_instances(1, alert_instances_response()).unwrap();
+        assert_eq!(alerts["result_type"], "alert_instances");
+        assert_eq!(alerts["result"][0]["state"], "suppressed");
+        assert_eq!(alerts["result"][0]["silenced"], true);
+        assert_eq!(alerts["result"][0]["inhibited"], false);
+        assert_eq!(
+            alerts["result"][0]["starts_at"],
+            "2026-08-10T12:00:00.000000000Z"
+        );
+        assert!(!alerts.to_string().contains("grafana.internal"));
+        assert!(!alerts.to_string().contains("secret-silence-id"));
+        assert!(!alerts.to_string().contains("internal-receiver"));
+    }
+
+    #[test]
+    fn safe_alert_maps_omit_deterministic_url_shapes_and_preserve_text() {
+        let normalized = safe_string_map(&json!({
+            "http": "http://grafana.internal/d/one",
+            "mixed_https": "HtTpS://grafana.internal/d/two",
+            "protocol_relative": "//grafana.internal/d/three",
+            "root_relative": "/alerting/rules/four",
+            "other_scheme": "ftp:internal.example/five",
+            "markdown": "See [runbook](internal.example/runbooks/six)",
+            "dashboard_url": "grafana.internal/d/seven",
+            "RUNBOOKURL": "wiki.internal/runbooks/eight",
+            "summary": "API is failing",
+            "severity": "critical"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            Value::Object(normalized),
+            json!({"summary":"API is failing","severity":"critical"})
+        );
+    }
+
+    #[test]
+    fn strictly_validates_alert_responses_including_truncated_entries() {
+        let mut rules = alert_rules_response().as_array().unwrap().clone();
+        rules.push(json!({"uid":"malformed"}));
+        assert_eq!(
+            normalize_alert_rules(1, Value::Array(rules)),
+            Err(Error::InvalidResponse)
+        );
+
+        let mut alerts = alert_instances_response().as_array().unwrap().clone();
+        alerts.push(json!({"generatorURL":"http://unsafe"}));
+        assert_eq!(
+            normalize_alert_instances(1, Value::Array(alerts)),
+            Err(Error::InvalidResponse)
+        );
+
+        let mut oversized_labels = serde_json::Map::new();
+        for index in 0..=MAX_SAFE_MAP_ENTRIES {
+            oversized_labels.insert(format!("label_{index}"), json!("value"));
+        }
+        let mut response = alert_instances_response();
+        response[0]["labels"] = Value::Object(oversized_labels);
+        assert_eq!(
+            normalize_alert_instances(1, response),
+            Err(Error::InvalidResponse)
+        );
+    }
+
+    #[test]
+    fn strictly_normalizes_only_documented_silence_creation_response() {
+        assert_eq!(
+            normalize_create_silence(
+                "2026-08-10T12:00:00Z",
+                "2026-08-10T13:00:00Z",
+                json!({"silenceID":"silence-123"})
+            )
+            .unwrap(),
+            json!({
+                "silence_id":"silence-123",
+                "starts_at":"2026-08-10T12:00:00Z",
+                "ends_at":"2026-08-10T13:00:00Z"
+            })
+        );
+        for invalid in [
+            json!({}),
+            json!({"silenceID":""}),
+            json!({"silenceID":"one","message":"unsafe"}),
+        ] {
+            assert_eq!(
+                normalize_create_silence("start", "end", invalid),
+                Err(Error::InvalidResponse)
+            );
         }
     }
 
@@ -993,6 +1517,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sends_exact_alert_rule_request_and_truncates_in_upstream_order() {
+        let record = Arc::new(Mutex::new(RequestRecord::default()));
+        let router = Router::new()
+            .route(
+                "/api/v1/provisioning/alert-rules",
+                get(record_alert_rules_request),
+            )
+            .with_state(Arc::clone(&record));
+        let (origin, task) = serve(router).await;
+        let client = GrafanaClient::for_test(origin, TIMEOUT);
+
+        let output = client
+            .alert_rules(&AlertRulesInput { limit: Some(1) }.validate().unwrap())
+            .await
+            .unwrap();
+        let record = record.lock().unwrap();
+        assert_eq!(record.method, "GET");
+        assert_eq!(record.path, "/api/v1/provisioning/alert-rules");
+        assert_eq!(record.authorization, "Bearer grafana-secret");
+        assert!(record.parameter_pairs.is_empty());
+        assert_eq!(output["result"].as_array().unwrap().len(), 1);
+        assert_eq!(output["result"][0]["title"], "API errors");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn sends_only_server_constructed_alert_instance_filters() {
+        let record = Arc::new(Mutex::new(RequestRecord::default()));
+        let router = Router::new()
+            .route(
+                "/api/alertmanager/grafana/api/v2/alerts",
+                get(record_alert_instances_request),
+            )
+            .with_state(Arc::clone(&record));
+        let (origin, task) = serve(router).await;
+        let client = GrafanaClient::for_test(origin, TIMEOUT);
+        let query = AlertInstancesInput {
+            matchers: vec![
+                LabelMatcher {
+                    name: "severity".to_owned(),
+                    operator: MatcherOperator::Equal,
+                    value: "critical".to_owned(),
+                },
+                LabelMatcher {
+                    name: "job".to_owned(),
+                    operator: MatcherOperator::RegexNotEqual,
+                    value: "api\"canary".to_owned(),
+                },
+            ],
+            limit: Some(1),
+        }
+        .validate()
+        .unwrap();
+
+        client.alert_instances(&query).await.unwrap();
+        let record = record.lock().unwrap();
+        assert_eq!(record.method, "GET");
+        assert_eq!(record.path, "/api/alertmanager/grafana/api/v2/alerts");
+        assert_eq!(record.authorization, "Bearer grafana-secret");
+        assert_eq!(
+            record.parameter_pairs,
+            vec![
+                ("filter".to_owned(), "severity=\"critical\"".to_owned()),
+                ("filter".to_owned(), "job!~\"api\\\"canary\"".to_owned()),
+            ]
+        );
+        assert!(!record.parameters.contains_key("limit"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn sends_exact_silence_body_and_returns_only_safe_operation_result() {
+        let record = Arc::new(Mutex::new(RequestRecord::default()));
+        let router = Router::new()
+            .route(
+                "/api/alertmanager/grafana/api/v2/silences",
+                post(record_silence_request),
+            )
+            .with_state(Arc::clone(&record));
+        let (origin, task) = serve(router).await;
+        let client = GrafanaClient::for_test(origin, TIMEOUT);
+        let command = CreateSilenceInput {
+            matchers: vec![
+                LabelMatcher {
+                    name: "alertname".to_owned(),
+                    operator: MatcherOperator::RegexEqual,
+                    value: "API.*".to_owned(),
+                },
+                LabelMatcher {
+                    name: "severity".to_owned(),
+                    operator: MatcherOperator::NotEqual,
+                    value: "warning".to_owned(),
+                },
+            ],
+            duration_seconds: 3600,
+            comment: "maintenance".to_owned(),
+        }
+        .validate()
+        .unwrap();
+
+        let output = client.create_silence(&command).await.unwrap();
+        let record = record.lock().unwrap();
+        assert_eq!(record.method, "POST");
+        assert_eq!(record.path, "/api/alertmanager/grafana/api/v2/silences");
+        assert_eq!(record.authorization, "Bearer grafana-secret");
+        assert!(record.parameter_pairs.is_empty());
+        assert_eq!(record.body["createdBy"], "homelab-mcp");
+        assert_eq!(record.body["comment"], "maintenance");
+        assert_eq!(
+            record.body["matchers"],
+            json!([
+                {"name":"alertname","value":"API.*","isRegex":true,"isEqual":true},
+                {"name":"severity","value":"warning","isRegex":false,"isEqual":false}
+            ])
+        );
+        let starts_at = record.body["startsAt"].as_str().unwrap();
+        let ends_at = record.body["endsAt"].as_str().unwrap();
+        let starts = DateTime::parse_from_rfc3339(starts_at).unwrap();
+        let ends = DateTime::parse_from_rfc3339(ends_at).unwrap();
+        assert_eq!(
+            ends.signed_duration_since(starts),
+            chrono::Duration::hours(1)
+        );
+        assert_eq!(output["silence_id"], "silence-123");
+        assert_eq!(output["starts_at"], starts_at);
+        assert_eq!(output["ends_at"], ends_at);
+        assert_eq!(output.as_object().unwrap().len(), 3);
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn rejects_profile_error_body_without_exposing_it() {
         let router = Router::new().route(
             "/api/datasources/proxy/uid/pyroscope/querier.v1.QuerierService/SelectMergeStacktraces",
@@ -1006,6 +1661,59 @@ mod tests {
             .await;
         assert_eq!(result, Err(Error::InvalidResponse));
         assert!(!format!("{result:?}").contains("unsafe upstream profile detail"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn maps_silence_errors_without_details_and_marks_uncertain_outcomes() {
+        for (status, expected) in [
+            (StatusCode::BAD_REQUEST, Error::MutationRejected),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Error::MutationOutcomeUnknown,
+            ),
+        ] {
+            let router = Router::new().route(
+                "/api/alertmanager/grafana/api/v2/silences",
+                post(move || async move { (status, "unsafe upstream mutation detail") }),
+            );
+            let (origin, task) = serve(router).await;
+            let client = GrafanaClient::for_test(origin, TIMEOUT);
+            let result = client
+                .create_silence(&silence_input().validate().unwrap())
+                .await;
+            assert_eq!(result, Err(expected));
+            assert!(!format!("{result:?}").contains("unsafe upstream mutation detail"));
+            task.abort();
+        }
+
+        let malformed = Router::new().route(
+            "/api/alertmanager/grafana/api/v2/silences",
+            post(|| async { Json(json!({"message":"unsafe created maybe"})) }),
+        );
+        let (origin, task) = serve(malformed).await;
+        let client = GrafanaClient::for_test(origin, TIMEOUT);
+        assert_eq!(
+            client
+                .create_silence(&silence_input().validate().unwrap())
+                .await,
+            Err(Error::MutationOutcomeUnknown)
+        );
+        task.abort();
+
+        let slow = Router::new().route(
+            "/api/alertmanager/grafana/api/v2/silences",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Json(json!({"silenceID":"late"}))
+            }),
+        );
+        let (origin, task) = serve(slow).await;
+        let client = GrafanaClient::for_test(origin, Duration::from_millis(10));
+        let result = client
+            .create_silence(&silence_input().validate().unwrap())
+            .await;
+        assert_eq!(result, Err(Error::MutationOutcomeUnknown));
         task.abort();
     }
 
@@ -1076,6 +1784,18 @@ mod tests {
         assert_eq!(
             client
                 .execute_traceql(&traceql_input().validate().unwrap())
+                .await,
+            Err(Error::CapacityExhausted)
+        );
+        assert_eq!(
+            client
+                .alert_rules(&AlertRulesInput { limit: None }.validate().unwrap())
+                .await,
+            Err(Error::CapacityExhausted)
+        );
+        assert_eq!(
+            client
+                .create_silence(&silence_input().validate().unwrap())
                 .await,
             Err(Error::CapacityExhausted)
         );

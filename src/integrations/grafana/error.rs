@@ -7,6 +7,8 @@ pub enum Error {
     Timeout,
     Unauthorized,
     QueryRejected,
+    MutationRejected,
+    MutationOutcomeUnknown,
     UpstreamUnavailable,
     InvalidResponse,
 }
@@ -19,7 +21,7 @@ impl Error {
             Self::InvalidArguments => ("invalid_arguments", invalid_arguments, false),
             Self::CapacityExhausted => (
                 "capacity_exhausted",
-                "Grafana query capacity is currently exhausted.".to_owned(),
+                "Grafana request capacity is currently exhausted.".to_owned(),
                 true,
             ),
             Self::Timeout => ("timeout", "The Grafana query timed out.".to_owned(), true),
@@ -29,6 +31,16 @@ impl Error {
                 false,
             ),
             Self::QueryRejected => ("query_rejected", query_rejected, false),
+            Self::MutationRejected => (
+                "mutation_rejected",
+                "Grafana rejected the requested mutation.".to_owned(),
+                false,
+            ),
+            Self::MutationOutcomeUnknown => (
+                "mutation_outcome_unknown",
+                "The Grafana mutation did not complete cleanly; its outcome may be uncertain. Check existing silences before retrying.".to_owned(),
+                false,
+            ),
             Self::UpstreamUnavailable => (
                 "upstream_unavailable",
                 "Grafana is currently unavailable.".to_owned(),

@@ -6,7 +6,7 @@ This document defines the implemented hosted OAuth contract. Local tests cover s
 
 The service uses generic MCP-owned OIDC resource-owner support and PostgreSQL state. Generic migration V4 adds one-shot OIDC attempts and replaces the removed browser-state migration.
 
-The service uses the reviewed immutable Kuri Git revision. No live PostgreSQL or Authentik validation exists. Preview still runs the prior health-only image, and production remains excluded.
+Preview runs the service at the reviewed immutable Kuri Git revision. Startup and readiness verify live PostgreSQL and signing-key access, and OIDC discovery succeeds at startup. Browser login, code/token exchange, refresh, and authenticated MCP calls remain unverified. Production remains excluded.
 
 ## Protocol Boundary
 
@@ -17,6 +17,8 @@ The resource value has exact-string semantics. Alternate origins, paths, query s
 Each `/mcp` request stands alone after token validation. The service requires no MCP session identifier and stores no MCP protocol session state.
 
 Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:use`.
+
+The same `mcp:use` authorization permits every action on both MCP tools, including operationally consequential `grafana_exec.create_silence`. The implementation has no separate read-only or mutation scope.
 
 Authentik provides browser identity only. Authentik access tokens, ID tokens, and other Authentik credentials never authorize `/mcp`.
 
@@ -112,6 +114,7 @@ Database transactions must enforce expiry and atomic single-use behavior for aut
 
 - The service must read Authentik, PostgreSQL, Grafana, and OAuth key material only from runtime secret sources.
 - The service must send the Grafana token only in an upstream `Authorization` header.
+- The worktree configures the shared Grafana service account with Editor privileges because the same server-held token performs reads and creates silences; this promotion is not applied or verified live.
 - Browser URLs, redirects, logs, traces, MCP content, health responses, and OAuth errors must not contain secret values.
 - The service must not persist plaintext OAuth signing keys.
 - Build output and container layers must not contain private Git or provider credentials.

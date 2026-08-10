@@ -1,100 +1,95 @@
-# Grafana Query Shared Contract
+# Grafana Tools Shared Contract
 
 ## Status
 
-This document defines implemented worktree behavior. Local tests cover the generated tool surface and mock Grafana integration. Live Grafana evidence remains outstanding.
+This document defines implemented worktree behavior. Local tests cover both generated tool surfaces and mock Grafana integration. The alerting revision has not been deployed or exercised against live Grafana.
 
-## Tool Surface
+## Tool Surfaces
 
-`#[mcp::progressive_server]` exposes one MCP tool named `grafana_query`. Its annotations declare read-only, non-destructive, idempotent, open-world behavior.
+One authenticated MCP server exposes two progressive tools:
 
-The generated top-level schema accepts:
+| Tool | Actions | MCP annotations |
+| --- | --- | --- |
+| `grafana_query` | `logql`, `promql`, `traceql`, `profiles`, `alert_rules`, `alert_instances` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
+| `grafana_exec` | `create_silence` | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false`, `openWorldHint: true` |
 
-| Field | Contract |
-| --- | --- |
-| `action` | Required. Accepts `help`, `logql`, `promql`, `traceql`, or `profiles`. |
-| `input` | Required for domain actions and forbidden for `help`. Its schema depends on `action`. |
-| `filter` | Optional jq-compatible string. Applies after successful action execution. |
+`grafana_exec` is separately advertised as operationally consequential. `create_silence` is not available through `grafana_query`, and read actions are not available through `grafana_exec`.
 
-The schema rejects unknown top-level fields. Every domain input schema also rejects unknown fields.
+Both generated top-level schemas accept `action`, action-dependent `input`, and an optional jq-compatible `filter`. Each tool also generates `help`, which takes no `input` and reports only that tool's actions and input schemas. Unknown fields, tools, actions, invalid schemas, and invalid filters produce JSON-RPC errors.
 
-`help` returns descriptions, guidance, and generated input schemas for all four domain actions. An optional help filter applies to the generated help value.
+For a schema-valid action, `filter` applies only to successful `structuredContent`. An object result becomes `structuredContent`; any other result becomes `{ "result": <value> }`. Filtering preserves `content`, `isError`, `_meta`, and extensions.
 
-For domain actions, `filter` applies only to `structuredContent` after execution. An object filter result becomes `structuredContent`. Any other result becomes `{ "result": <value> }`. Filtering preserves `content`, `isError`, `_meta`, and extensions.
+## Authorization and Destination
 
-Malformed JSON-RPC requests, unknown tools, unknown actions, invalid schemas, and invalid filters return JSON-RPC errors. Schema-valid action failures return semantic tool errors.
+The existing `mcp:use` scope authorizes every action on both tools. There is no narrower read or mutation scope, so every principal allowed to query can also request silence creation.
+
+All actions share one `GrafanaClient`, one configured Grafana origin, and one server-held Editor service-account token. Pulumi promotes this account from Viewer to Editor so the same credential can read alerting state and create silences. The caller cannot choose the origin, token, API path, datasource, headers, or HTTP method.
+
+The token is sent only as an upstream Bearer `Authorization` header. Redirects remain disabled so credentials never reach a redirect target.
 
 ## Shared Request Boundary
 
-All domain actions use one `GrafanaClient` and one Grafana origin. The caller cannot select an origin, datasource UID, credential, or authorization header.
-
-The client sends the configured Viewer token only as an upstream Bearer `Authorization` header. Redirects remain disabled, so credentials never reach a redirect target.
-
 | Limit | Contract |
 | --- | --- |
-| Concurrent Grafana operations | Four across all actions. Acquisition does not wait. |
-| Operation timeout | 30 seconds after permit acquisition. Covers request dispatch and full response read. |
+| Concurrent Grafana operations | Four across both tools and all actions. Permits are acquired immediately without waiting. |
+| Operation timeout | 30 seconds after permit acquisition, covering dispatch and the complete response read. |
 | Encoded URL | At most 8192 bytes after path join and query encoding. |
 | Decoded response body | At most 4 MiB, with or without `Content-Length`. |
 
-The client releases its permit after success, failure, timeout, or cancellation. Capacity exhaustion returns immediately and does not contact Grafana.
+The client releases its permit after success, failure, timeout, or cancellation. Capacity exhaustion returns before contacting Grafana. No action automatically retries an upstream request.
 
-The 8192-byte URL cap applies to GET requests and the Profiles POST URL. Profiles input resides in the JSON body. No separate MCP-message or serialized output cap exists.
+## Read Results and Errors
 
-## Success Envelope
+Every unfiltered `grafana_query` success returns one short text item and object-shaped `structuredContent`. Each focused action specification owns its normalized result contract. Reads never expose Grafana headers, credentials, datasource configuration, raw response wrappers, or unapproved upstream models.
 
-Every unfiltered success returns one short text item and object-shaped `structuredContent`:
+Alert-rule and alert-instance label and annotation maps apply a conservative URL-field exclusion policy. After trimming surrounding whitespace, an entry is omitted when its case-insensitive key ends in `url`, or its value starts with `/` (including `//`), starts with an absolute URI scheme of the form `[A-Za-z][A-Za-z0-9+.-]*:`, or contains a non-empty Markdown link target of the form `](...)`. This deterministic policy applies equally to labels and annotations; ordinary text such as `API is failing` remains. It does not attempt to recognize every hostname or every possible URL representation.
 
-```json
-{
-  "mode": "instant",
-  "result_type": "vector",
-  "result": []
-}
-```
-
-The text states the mode, result type, and top-level item count. Object results count as one item.
-
-Each action specification defines its modes, result types, and normalized `result`. The client never exposes Grafana headers, credentials, datasource configuration, or the Grafana response wrapper.
-
-## Semantic Errors
-
-Semantic failures return one safe text item, `isError: true`, and this envelope:
-
-```json
-{
-  "error": {
-    "code": "capacity_exhausted",
-    "message": "Grafana query capacity is currently exhausted.",
-    "retryable": true
-  }
-}
-```
+Schema-valid read failures return one safe text item, `isError: true`, and an error object containing `code`, `message`, and `retryable`:
 
 | Code | Condition | Retryable |
 | --- | --- | --- |
-| `invalid_arguments` | Semantic input validation fails, or the encoded URL exceeds 8192 bytes. | `false` |
-| `capacity_exhausted` | All four permits remain in use. | `true` |
-| `timeout` | The operation exceeds 30 seconds. | `true` |
+| `invalid_arguments` | Semantic validation fails, or the encoded URL exceeds 8192 bytes. | `false` |
+| `capacity_exhausted` | All four permits are in use. | `true` |
+| `timeout` | A read exceeds 30 seconds. | `true` |
 | `grafana_unauthorized` | Grafana returns 401 or 403. | `false` |
 | `query_rejected` | Grafana returns another 4xx response, including 429. | `false` |
 | `upstream_unavailable` | Transport fails, a redirect returns 3xx, or Grafana returns 5xx. | `true` |
-| `invalid_response` | The response exceeds 4 MiB, contains invalid JSON, or violates action normalization. | `false` |
+| `invalid_response` | The body exceeds 4 MiB, contains invalid JSON, or violates action normalization. | `false` |
 
-Shared messages remain fixed:
+Shared messages are fixed:
 
 | Code | Message |
 | --- | --- |
-| `capacity_exhausted` | `Grafana query capacity is currently exhausted.` |
+| `capacity_exhausted` | `Grafana request capacity is currently exhausted.` |
 | `timeout` | `The Grafana query timed out.` |
 | `grafana_unauthorized` | `Grafana rejected the service credentials.` |
 | `upstream_unavailable` | `Grafana is currently unavailable.` |
 | `invalid_response` | `Grafana returned an invalid response.` |
 
-Each action supplies its own noun in `invalid_arguments` and `query_rejected`. Error messages omit credentials, URLs, response bodies, query data, and transport details.
+Each read action supplies its own noun for `invalid_arguments` and `query_rejected`.
+
+## Mutation Errors
+
+`create_silence` uses the same semantic error envelope, but its post-dispatch failures distinguish explicit rejection from an uncertain outcome:
+
+| Code | Condition | Retryable |
+| --- | --- | --- |
+| `invalid_arguments` | Input validation fails before dispatch. | `false` |
+| `capacity_exhausted` | No permit is available, so Grafana is not contacted. | `true` |
+| `grafana_unauthorized` | Grafana returns 401 or 403. | `false` |
+| `mutation_rejected` | Grafana safely and explicitly rejects the mutation. | `false` |
+| `mutation_outcome_unknown` | Transport, timeout, MCP cancellation, ambiguous status, response-read, JSON, or success-normalization failure occurs after dispatch may have begun. | `false` |
+
+`mutation_rejected` uses `Grafana rejected the requested mutation.` An uncertain outcome uses `The Grafana mutation did not complete cleanly; its outcome may be uncertain. Check existing silences before retrying.` The tool does not retry automatically. Operators must inspect current silences before deciding whether to retry an uncertain request.
+
+MCP cancellation of `create_silence` returns `mutation_outcome_unknown` because Grafana may already have accepted the POST. Read-action cancellation retains the generic `request cancelled` behavior.
+
+All semantic messages omit matchers, comments, alert data, credentials, URLs, response bodies, query data, and transport details.
 
 ## Observability
 
-Kuri generic MCP owns standard request spans and metrics. Homelab adds telemetry only for Grafana-upstream attempts: the `grafana.query` span and request, duration, and in-flight metrics record action, mode, fixed datasource UID, and a bounded outcome.
+Kuri generic MCP owns standard request spans and metrics. Homelab records only bounded Grafana-upstream attributes on `grafana.query` spans and request, duration, and in-flight metrics.
 
-See the [observability architecture](../../architecture/observability.md) for metric names and attributes.
+Alerting uses fixed action values `alert_rules`, `alert_instances`, and `create_silence`; modes `list`, `list`, and `create`; and destination value `grafana_alerting`. Mutation outcomes add `mutation_rejected` and `mutation_outcome_unknown` to the fixed outcome allowlist. Telemetry never emits matchers, comments, alert data, URLs, credentials, query data, or upstream bodies.
+
+See the [observability architecture](../../architecture/observability.md) for metric names and the complete data-safety boundary.
