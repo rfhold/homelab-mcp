@@ -17,7 +17,7 @@ One authenticated MCP server exposes two progressive tools:
 
 Both generated top-level schemas accept `action`, action-dependent `input`, and an optional jq-compatible `filter`. Each tool also generates `help`, which takes no `input` and reports that tool's namespaces. Calling `help.<namespace>` reports the namespace's actions and input schemas. Unknown fields, tools, actions, invalid schemas, and invalid filters produce JSON-RPC errors.
 
-For a schema-valid action, `filter` applies only to successful `structuredContent`. An object result becomes `structuredContent`; any other result becomes `{ "result": <value> }`. Filtering preserves `content`, `isError`, `_meta`, and extensions.
+For a schema-valid action that returns a successful semantic `McpToolResult`, `filter` applies to `structuredContent`. The exact filtered JSON value becomes `structuredContent` directly, including arrays, scalars, and null, without a `{ "result": ... }` wrapper. Text content is rewritten to the compact serialized filtered JSON so visible text and structured output agree; non-text content blocks, `_meta`, and extensions remain unchanged. Generated help and other legacy JSON actions retain `{ "result": <filtered-value> }` wrapping. Calls without a filter preserve the action's original summary content, and `isError: true` results preserve their complete original envelope without applying the filter.
 
 ## Authorization and Destination
 

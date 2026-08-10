@@ -1662,7 +1662,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mcp"
 version = "0.1.0"
-source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=f427d72b2aa7b1bcef1618577da427b9e0ce5c53#f427d72b2aa7b1bcef1618577da427b9e0ce5c53"
+source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=184ce47ba45537ccb310de48a9b918d9423f3460#184ce47ba45537ccb310de48a9b918d9423f3460"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -1694,7 +1694,7 @@ dependencies = [
 [[package]]
 name = "mcp-macros"
 version = "0.1.0"
-source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=f427d72b2aa7b1bcef1618577da427b9e0ce5c53#f427d72b2aa7b1bcef1618577da427b9e0ce5c53"
+source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=184ce47ba45537ccb310de48a9b918d9423f3460#184ce47ba45537ccb310de48a9b918d9423f3460"
 dependencies = [
  "proc-macro2",
  "quote",

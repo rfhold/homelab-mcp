@@ -41,9 +41,9 @@ A LogQL call takes this nested shape:
 
 The tool schema must reject unknown top-level and `input` fields. `input` is required for `logql.query` and forbidden for `help`.
 
-Without `filter`, successful `logql.query` output uses the stable envelope below. With `filter`, the generated progressive framework applies the expression only to `structuredContent`.
+Without `filter`, successful `logql.query` output uses the stable envelope below and preserves its original summary text. With `filter`, the generated progressive framework applies the expression only to successful `structuredContent`.
 
-If a filter returns an object, that object becomes `structuredContent`. Otherwise, `structuredContent` becomes `{ "result": <filtered-value> }`. The framework preserves `content`, text, `isError`, `_meta`, and extensions.
+The exact filtered JSON value becomes `structuredContent` directly, including arrays, scalars, and null, without a `{ "result": ... }` wrapper. The framework rewrites text content to the compact serialized filtered JSON while preserving non-text content blocks, `_meta`, and extensions. It leaves `isError: true` results completely unchanged and does not apply their filters.
 
 ## LogQL Input
 
@@ -104,7 +104,7 @@ The Grafana HTTP client must disable redirects. It must not forward credentials 
 
 A successful unfiltered call returns one short text content item and object-shaped `structuredContent`. The text states the mode, result type, and item count.
 
-For a filtered call, the macro changes only `structuredContent`. It preserves the original content, text, `isError`, `_meta`, and extensions. Filtering never changes the Grafana request or line limit.
+For a successful filtered call, the macro stores the exact direct filter output in `structuredContent` and rewrites visible text to the same value's compact JSON serialization. It preserves non-text content blocks, `_meta`, and extensions. Filtering never changes the Grafana request or line limit; an unfiltered call retains the original semantic summary described above.
 
 `structuredContent` has this stable envelope:
 

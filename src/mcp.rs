@@ -1627,9 +1627,21 @@ mod tests {
             ),
         )
         .await;
+        let expected_filtered = json!({
+            "annotations": {"summary": "API is failing"},
+            "ends_at": "2026-08-10T13:00:00.000000000Z",
+            "fingerprint": "abc123",
+            "inhibited": false,
+            "labels": {"alertname": "APIError"},
+            "silenced": false,
+            "starts_at": "2026-08-10T12:00:00.000000000Z",
+            "state": "active",
+            "updated_at": "2026-08-10T12:01:00.000000000Z"
+        });
+        assert_eq!(filtered["result"]["structuredContent"], expected_filtered);
         assert_eq!(
-            filtered["result"]["structuredContent"]["fingerprint"],
-            "abc123"
+            filtered["result"]["content"][0]["text"],
+            expected_filtered.to_string()
         );
 
         grafana_task.abort();

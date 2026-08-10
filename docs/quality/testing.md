@@ -105,7 +105,8 @@ Tests must cover the [Grafana tool specifications](../grafana-query/README.md), 
 - Authorization-header-only token use and disabled redirects;
 - normalized `streams`, `matrix`, `vector`, and `scalar` results;
 - deterministic aggregate stream-entry truncation to the validated line limit;
-- optional normalized statistics, short unfiltered summaries, and filtered output wrapping;
+- optional normalized statistics and short unfiltered summaries;
+- direct successful semantic filter output, synchronized compact text, and legacy `{ "result": ... }` wrapping for generated help and other JSON actions;
 - every stable semantic error code and retryable value; and
 - JSON-RPC errors for malformed protocol, tool shape, action, and filter requests.
 
