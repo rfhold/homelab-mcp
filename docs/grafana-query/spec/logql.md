@@ -2,7 +2,7 @@
 
 ## Status
 
-This specification defines the implemented worktree behavior for the `logql` action. Local tests cover its validation, normalized responses, limits, error mapping, and mock HTTP integration. This observability revision has no coordinator-confirmed preview deployment or authenticated live Grafana query.
+This specification defines the implemented worktree behavior for the `logql.query` action. Local tests cover its validation, normalized responses, limits, error mapping, and mock HTTP integration. This observability revision has no coordinator-confirmed preview deployment or authenticated live Grafana query.
 
 ## Tool Surface
 
@@ -27,7 +27,7 @@ A LogQL call takes this nested shape:
 
 ```json
 {
-  "action": "logql",
+  "action": "logql.query",
   "input": {
     "query": "{job=\"example\"} |= \"error\"",
     "start": "2026-08-09T10:00:00Z",
@@ -39,9 +39,9 @@ A LogQL call takes this nested shape:
 }
 ```
 
-The tool schema must reject unknown top-level and `input` fields. `input` is required for `logql` and forbidden for `help`.
+The tool schema must reject unknown top-level and `input` fields. `input` is required for `logql.query` and forbidden for `help`.
 
-Without `filter`, successful `logql` output uses the stable envelope below. With `filter`, the generated progressive framework applies the expression only to `structuredContent`.
+Without `filter`, successful `logql.query` output uses the stable envelope below. With `filter`, the generated progressive framework applies the expression only to `structuredContent`.
 
 If a filter returns an object, that object becomes `structuredContent`. Otherwise, `structuredContent` becomes `{ "result": <filtered-value> }`. The framework preserves `content`, text, `isError`, `_meta`, and extensions.
 
@@ -145,7 +145,7 @@ The service must not expose Grafana's response wrapper, headers, datasource deta
 
 ## Tool Errors
 
-Well-formed `logql` calls with semantic validation or execution failures return a semantic `McpToolResult` with `isError: true`. The domain action returns that result directly with a short safe message and this stable envelope:
+Well-formed `logql.query` calls with semantic validation or execution failures return a semantic `McpToolResult` with `isError: true`. The domain action returns that result directly with a short safe message and this stable envelope:
 
 ```json
 {

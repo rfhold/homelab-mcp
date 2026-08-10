@@ -91,13 +91,13 @@ impl Drop for GrafanaMetricsGuard {
 
 fn metric_action(action: &'static str) -> &'static str {
     match action {
-        "logql" => "logql",
-        "promql" => "promql",
-        "traceql" => "traceql",
-        "profiles" => "profiles",
-        "alert_rules" => "alert_rules",
-        "alert_instances" => "alert_instances",
-        "create_silence" => "create_silence",
+        "logql.query" => "logql.query",
+        "promql.query" => "promql.query",
+        "traceql.search" => "traceql.search",
+        "profile.merge" => "profile.merge",
+        "alert-rule.list" => "alert-rule.list",
+        "alert-instance.list" => "alert-instance.list",
+        "silence.create" => "silence.create",
         _ => "unknown",
     }
 }
@@ -169,9 +169,12 @@ mod tests {
         assert_eq!(guard.datasource_uid, "unknown");
         guard.finish("attacker-outcome");
 
-        assert_eq!(metric_action("alert_rules"), "alert_rules");
-        assert_eq!(metric_action("alert_instances"), "alert_instances");
-        assert_eq!(metric_action("create_silence"), "create_silence");
+        assert_eq!(metric_action("alert-rule.list"), "alert-rule.list");
+        assert_eq!(metric_action("alert-instance.list"), "alert-instance.list");
+        assert_eq!(metric_action("silence.create"), "silence.create");
+        assert_eq!(metric_action("alert_rules"), "unknown");
+        assert_eq!(metric_action("alert_instances"), "unknown");
+        assert_eq!(metric_action("create_silence"), "unknown");
         assert_eq!(metric_mode("list"), "list");
         assert_eq!(metric_mode("create"), "create");
         assert_eq!(

@@ -12,7 +12,7 @@
 # Hints
 
 - Read [docs/README.md](docs/README.md) before work in this repository.
-- Distinguish the implemented local OAuth/MCP runtime from the prior health-only preview deployment.
+- Preview runs the OAuth/MCP runtime; distinguish verified basic endpoints from the unverified full browser OAuth and Grafana flow.
 - Keep the Kuri `mcp` dependency pinned to a reviewed immutable Git revision before delivery.
 - Preview resources exist; production declarations remain unapplied.
 - Use Rust 1.96 or the documented container fallback for Rust commands.

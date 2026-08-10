@@ -1,1 +1,6 @@
 /target/
+/infra/pulumi/node_modules/
+/infra/pulumi/.pulumi/
+/.env
+/.env.*
+!/.env.example

@@ -18,7 +18,7 @@ Each `/mcp` request stands alone after token validation. The service requires no
 
 Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:use`.
 
-The same `mcp:use` authorization permits every action on both MCP tools, including operationally consequential `grafana_exec.create_silence`. The implementation has no separate read-only or mutation scope.
+The same `mcp:use` authorization permits every action on both MCP tools, including operationally consequential `grafana_exec` action `silence.create`. The implementation has no separate read-only or mutation scope.
 
 Authentik provides browser identity only. Authentik access tokens, ID tokens, and other Authentik credentials never authorize `/mcp`.
 
@@ -66,7 +66,9 @@ PostgreSQL persists only digests for state and correlation values. A secure tran
 
 The callback verifies state, nonce, PKCE, signature, issuer, audience, expiration, and authorization response integrity. Transaction completion is atomic and single-use.
 
-`homelab-mcp` supplies Authentik configuration and stable issuer-plus-subject principal mapping. It does not own OIDC transaction persistence or callback protocol logic.
+`homelab-mcp` requests the `openid profile email` scopes from Authentik and provisions their managed property mappings. It uses only the verified issuer and subject for principal identity.
+
+`homelab-mcp` does not own OIDC transaction persistence or callback protocol logic.
 
 After successful authentication, hosted continuation approves only the configured `/mcp` resource and `mcp:use` scope. It rejects any different resource or scope.
 

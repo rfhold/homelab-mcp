@@ -59,7 +59,7 @@ OpenTelemetry trace admission is fixed. It accepts `ERROR`, `WARN`, and `INFO` s
 
 The pinned Kuri generic MCP revision provides the MCP metrics. Homelab does not provide substitute MCP action spans or metrics.
 
-HTTP route values use matched templates or bounded fallback classes. Action, mode, datasource, and outcome values pass through fixed allowlists. Alerting adds actions `alert_rules`, `alert_instances`, and `create_silence`, modes `list` and `create`, destination `grafana_alerting`, and outcomes `mutation_rejected` and `mutation_outcome_unknown`. Probe routes are intentionally absent from all HTTP request telemetry.
+HTTP route values use matched templates or bounded fallback classes. Action, mode, datasource, and outcome values pass through fixed allowlists. Alerting adds actions `alert-rule.list`, `alert-instance.list`, and `silence.create`, modes `list` and `create`, destination `grafana_alerting`, and outcomes `mutation_rejected` and `mutation_outcome_unknown`. Probe routes are intentionally absent from all HTTP request telemetry.
 
 HTTP methods use canonical uppercase values for `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `CONNECT`, and `TRACE`. Every extension method becomes `OTHER` before span, metric, or log creation.
 

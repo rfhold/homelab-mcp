@@ -164,8 +164,9 @@ impl Config {
         {
             return Err("public OAuth URLs are inconsistent".to_owned());
         }
-        if self.oidc.scopes.is_empty()
-            || !self.oidc.scopes.iter().any(|scope| scope == "openid")
+        if ["openid", "profile", "email"]
+            .iter()
+            .any(|required| !self.oidc.scopes.iter().any(|scope| scope == required))
             || self.oauth.required_scope != "mcp:use"
             || self.oauth.access_token_ttl.is_zero()
             || self.oauth.refresh_token_ttl.is_zero()
@@ -378,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn config_rejects_any_required_scope_other_than_mcp_use() {
+    fn config_requires_browser_claim_scopes_and_mcp_use() {
         let mut config = Config {
             database: DatabaseConfig {
                 url: "postgres://localhost/test".to_owned(),
@@ -389,7 +390,11 @@ mod tests {
                 client_id: "client".to_owned(),
                 client_secret: Secret("secret".to_owned()),
                 redirect_uri: "https://mcp.example/oidc/callback".to_owned(),
-                scopes: vec!["openid".to_owned()],
+                scopes: vec![
+                    "openid".to_owned(),
+                    "profile".to_owned(),
+                    "email".to_owned(),
+                ],
             },
             oauth: OAuthConfig {
                 issuer: "https://mcp.example/oauth".to_owned(),
@@ -419,5 +424,13 @@ mod tests {
         );
         config.oauth.required_scope = "mcp:use".to_owned();
         assert!(config.validate().is_ok());
+        for required in ["openid", "profile", "email"] {
+            let mut missing_scope = config.clone();
+            missing_scope.oidc.scopes.retain(|scope| scope != required);
+            assert_eq!(
+                missing_scope.validate().unwrap_err(),
+                "OAuth policy configuration is invalid"
+            );
+        }
     }
 }

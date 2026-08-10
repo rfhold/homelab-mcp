@@ -1,6 +1,6 @@
 # Grafana Tools
 
-The repository implements two progressive tools on one authenticated MCP server. `grafana_query` owns six bounded reads; `grafana_exec` advertises operationally consequential writes and owns only `create_silence`.
+The repository implements two progressive tools on one authenticated MCP server. `grafana_query` owns six bounded reads; `grafana_exec` advertises operationally consequential writes and owns only `silence.create`.
 
 Local tests cover generated schemas, annotations, dispatch, validation, limits, normalization, safe errors, and mock Grafana requests. The alerting revision has not been deployed or exercised against live Grafana.
 

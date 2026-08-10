@@ -57,6 +57,7 @@ impl GrafanaClient {
     fn new(origin: Url, token: Secret, timeout: Duration) -> Result<Self, String> {
         let client = Client::builder()
             .redirect(Policy::none())
+            .no_proxy()
             .build()
             .map_err(|_| "failed to initialize Grafana client".to_owned())?;
         Ok(Self {
@@ -100,7 +101,7 @@ impl GrafanaClient {
                 parameters,
                 body: None,
             },
-            "logql",
+            "logql.query",
             query.mode.as_str(),
             "loki",
             OperationKind::Read,
@@ -132,7 +133,7 @@ impl GrafanaClient {
                 parameters,
                 body: None,
             },
-            "promql",
+            "promql.query",
             query.mode.as_str(),
             "mimir",
             OperationKind::Read,
@@ -159,7 +160,7 @@ impl GrafanaClient {
                 parameters,
                 body: None,
             },
-            "traceql",
+            "traceql.search",
             "search",
             "tempo",
             OperationKind::Read,
@@ -182,7 +183,7 @@ impl GrafanaClient {
                     "maxNodes": query.max_nodes,
                 })),
             },
-            "profiles",
+            "profile.merge",
             "range",
             "pyroscope",
             OperationKind::Read,
@@ -199,7 +200,7 @@ impl GrafanaClient {
                 parameters: Vec::new(),
                 body: None,
             },
-            "alert_rules",
+            "alert-rule.list",
             "list",
             "grafana_alerting",
             OperationKind::Read,
@@ -221,7 +222,7 @@ impl GrafanaClient {
                 parameters,
                 body: None,
             },
-            "alert_instances",
+            "alert-instance.list",
             "list",
             "grafana_alerting",
             OperationKind::Read,
@@ -264,7 +265,7 @@ impl GrafanaClient {
                     "comment": command.comment,
                 })),
             },
-            "create_silence",
+            "silence.create",
             "create",
             "grafana_alerting",
             OperationKind::Mutation,

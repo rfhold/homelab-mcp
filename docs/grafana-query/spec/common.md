@@ -10,12 +10,12 @@ One authenticated MCP server exposes two progressive tools:
 
 | Tool | Actions | MCP annotations |
 | --- | --- | --- |
-| `grafana_query` | `logql`, `promql`, `traceql`, `profiles`, `alert_rules`, `alert_instances` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
-| `grafana_exec` | `create_silence` | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false`, `openWorldHint: true` |
+| `grafana_query` | `logql.query`, `promql.query`, `traceql.search`, `profile.merge`, `alert-rule.list`, `alert-instance.list` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
+| `grafana_exec` | `silence.create` | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false`, `openWorldHint: true` |
 
-`grafana_exec` is separately advertised as operationally consequential. `create_silence` is not available through `grafana_query`, and read actions are not available through `grafana_exec`.
+`grafana_exec` is separately advertised as operationally consequential. `silence.create` is not available through `grafana_query`, and read actions are not available through `grafana_exec`.
 
-Both generated top-level schemas accept `action`, action-dependent `input`, and an optional jq-compatible `filter`. Each tool also generates `help`, which takes no `input` and reports only that tool's actions and input schemas. Unknown fields, tools, actions, invalid schemas, and invalid filters produce JSON-RPC errors.
+Both generated top-level schemas accept `action`, action-dependent `input`, and an optional jq-compatible `filter`. Each tool also generates `help`, which takes no `input` and reports that tool's namespaces. Calling `help.<namespace>` reports the namespace's actions and input schemas. Unknown fields, tools, actions, invalid schemas, and invalid filters produce JSON-RPC errors.
 
 For a schema-valid action, `filter` applies only to successful `structuredContent`. An object result becomes `structuredContent`; any other result becomes `{ "result": <value> }`. Filtering preserves `content`, `isError`, `_meta`, and extensions.
 
@@ -70,7 +70,7 @@ Each read action supplies its own noun for `invalid_arguments` and `query_reject
 
 ## Mutation Errors
 
-`create_silence` uses the same semantic error envelope, but its post-dispatch failures distinguish explicit rejection from an uncertain outcome:
+`silence.create` uses the same semantic error envelope, but its post-dispatch failures distinguish explicit rejection from an uncertain outcome:
 
 | Code | Condition | Retryable |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ Each read action supplies its own noun for `invalid_arguments` and `query_reject
 
 `mutation_rejected` uses `Grafana rejected the requested mutation.` An uncertain outcome uses `The Grafana mutation did not complete cleanly; its outcome may be uncertain. Check existing silences before retrying.` The tool does not retry automatically. Operators must inspect current silences before deciding whether to retry an uncertain request.
 
-MCP cancellation of `create_silence` returns `mutation_outcome_unknown` because Grafana may already have accepted the POST. Read-action cancellation retains the generic `request cancelled` behavior.
+MCP cancellation of `silence.create` returns `mutation_outcome_unknown` because Grafana may already have accepted the POST. Read-action cancellation retains the generic `request cancelled` behavior.
 
 All semantic messages omit matchers, comments, alert data, credentials, URLs, response bodies, query data, and transport details.
 
@@ -90,6 +90,6 @@ All semantic messages omit matchers, comments, alert data, credentials, URLs, re
 
 Kuri generic MCP owns standard request spans and metrics. Homelab records only bounded Grafana-upstream attributes on `grafana.query` spans and request, duration, and in-flight metrics.
 
-Alerting uses fixed action values `alert_rules`, `alert_instances`, and `create_silence`; modes `list`, `list`, and `create`; and destination value `grafana_alerting`. Mutation outcomes add `mutation_rejected` and `mutation_outcome_unknown` to the fixed outcome allowlist. Telemetry never emits matchers, comments, alert data, URLs, credentials, query data, or upstream bodies.
+Alerting uses fixed action values `alert-rule.list`, `alert-instance.list`, and `silence.create`; modes `list`, `list`, and `create`; and destination value `grafana_alerting`. Mutation outcomes add `mutation_rejected` and `mutation_outcome_unknown` to the fixed outcome allowlist. Telemetry never emits matchers, comments, alert data, URLs, credentials, query data, or upstream bodies.
 
 See the [observability architecture](../../architecture/observability.md) for metric names and the complete data-safety boundary.

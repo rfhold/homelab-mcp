@@ -276,16 +276,17 @@ const wrappingKeys = wrappingKeyVersions.map((version) => ({
 const wrappingKeyring = pulumi.secret(
   pulumi
     .all(wrappingKeys.map(({ key }) => key))
-    .apply((keys) =>
-      JSON.stringify({
+    .apply((keys) => {
+      if (keys.some((key) => typeof key !== "string" || !key)) return "";
+      return JSON.stringify({
         schema_version: 1,
         active: activeWrappingKeyVersion,
         keys: wrappingKeyVersions.map((version, index) => ({
           id: version,
           key: Buffer.from(keys[index], "base64").toString("base64url"),
         })),
-      }),
-    ),
+      });
+    }),
 );
 const wrappingKeyChecksum = wrappingKeyring.apply((keyring) =>
   createHash("sha256").update(keyring).digest("hex"),

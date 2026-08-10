@@ -69,7 +69,13 @@ pub fn router(
             "destructiveHint": false,
             "idempotentHint": true,
             "openWorldHint": true
-        })
+        }),
+        namespace(name = "logql", description = "Query Loki logs with LogQL."),
+        namespace(name = "promql", description = "Query Mimir metrics with PromQL."),
+        namespace(name = "traceql", description = "Search Tempo traces with TraceQL."),
+        namespace(name = "profile", description = "Inspect Pyroscope profiles."),
+        namespace(name = "alert-rule", description = "Inspect Grafana alert rules."),
+        namespace(name = "alert-instance", description = "Inspect current Grafana alert instances.")
     ),
     tool(
         name = "grafana_exec",
@@ -79,7 +85,8 @@ pub fn router(
             "destructiveHint": false,
             "idempotentHint": false,
             "openWorldHint": true
-        })
+        }),
+        namespace(name = "silence", description = "Manage Grafana alert silences.")
     )
 )]
 impl HomelabMcp {
@@ -87,7 +94,7 @@ impl HomelabMcp {
     ///
     /// Use instant mode without start/end, or range mode with both endpoints.
     /// Log streams are normalized and limited to the requested number of lines.
-    #[action(tool = "grafana_query", name = "logql")]
+    #[action(tool = "grafana_query", name = "logql.query")]
     async fn logql(
         &self,
         input: LogqlInput,
@@ -111,7 +118,7 @@ impl HomelabMcp {
     ///
     /// Range mode requires start, end, and a positive Prometheus duration step.
     /// Ranges are limited to 24 hours and 11,000 points.
-    #[action(tool = "grafana_query", name = "promql")]
+    #[action(tool = "grafana_query", name = "promql.query")]
     async fn promql(
         &self,
         input: PromqlInput,
@@ -135,7 +142,7 @@ impl HomelabMcp {
     ///
     /// Optional start and end timestamps must appear together. Searches are
     /// limited to 24 hours and at most 100 returned traces.
-    #[action(tool = "grafana_query", name = "traceql")]
+    #[action(tool = "grafana_query", name = "traceql.search")]
     async fn traceql(
         &self,
         input: TraceqlInput,
@@ -159,7 +166,7 @@ impl HomelabMcp {
     ///
     /// Start and end are required RFC3339 timestamps. Profile ranges are
     /// limited to one hour and at most 1,000 flame graph nodes.
-    #[action(tool = "grafana_query", name = "profiles")]
+    #[action(tool = "grafana_query", name = "profile.merge")]
     async fn profiles(
         &self,
         input: ProfilesInput,
@@ -180,7 +187,7 @@ impl HomelabMcp {
     }
 
     /// List bounded Grafana alert-rule summaries.
-    #[action(tool = "grafana_query", name = "alert_rules")]
+    #[action(tool = "grafana_query", name = "alert-rule.list")]
     async fn alert_rules(
         &self,
         input: AlertRulesInput,
@@ -201,7 +208,7 @@ impl HomelabMcp {
     }
 
     /// List bounded current Grafana alert instances, optionally filtered by labels.
-    #[action(tool = "grafana_query", name = "alert_instances")]
+    #[action(tool = "grafana_query", name = "alert-instance.list")]
     async fn alert_instances(
         &self,
         input: AlertInstancesInput,
@@ -224,7 +231,7 @@ impl HomelabMcp {
     }
 
     /// Create a bounded Grafana silence that suppresses matching alert notifications.
-    #[action(tool = "grafana_exec", name = "create_silence")]
+    #[action(tool = "grafana_exec", name = "silence.create")]
     async fn create_silence(
         &self,
         input: CreateSilenceInput,
@@ -475,7 +482,7 @@ mod tests {
                     json!({
                         "name": QUERY_TOOL_NAME,
                         "arguments": {
-                            "action": "logql",
+                            "action": "logql.query",
                             "input": {"query": "{job=\"telemetry-test\"}"}
                         }
                     }),
@@ -605,47 +612,140 @@ mod tests {
         );
         assert_eq!(query_tool["inputSchema"]["additionalProperties"], false);
         assert_eq!(exec_tool["inputSchema"]["additionalProperties"], false);
+        let query_action_enum = query_tool["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        for action in [
+            "help",
+            "help.logql",
+            "help.promql",
+            "help.traceql",
+            "help.profile",
+            "help.alert-rule",
+            "help.alert-instance",
+            "logql.query",
+            "promql.query",
+            "traceql.search",
+            "profile.merge",
+            "alert-rule.list",
+            "alert-instance.list",
+        ] {
+            assert!(
+                query_action_enum.contains(&json!(action)),
+                "missing {action}"
+            );
+        }
+        for legacy in [
+            "logql",
+            "promql",
+            "traceql",
+            "profiles",
+            "alert_rules",
+            "alert_instances",
+        ] {
+            assert!(
+                !query_action_enum.contains(&json!(legacy)),
+                "found {legacy}"
+            );
+        }
+        let exec_action_enum = exec_tool["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        for action in ["help", "help.silence", "silence.create"] {
+            assert!(
+                exec_action_enum.contains(&json!(action)),
+                "missing {action}"
+            );
+        }
+        assert!(!exec_action_enum.contains(&json!("create_silence")));
 
-        let (_, query_help) = post_mcp(
+        let (_, query_root_help) = post_mcp(
             &endpoint,
             request(
                 "tools/call",
                 "query-help",
-                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"help","filter":".actions"}}),
+                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"help","filter":".namespaces"}}),
             ),
         )
         .await;
-        let query_actions = query_help["result"]["structuredContent"]["result"]
+        let query_namespaces = query_root_help["result"]["structuredContent"]["result"]
             .as_array()
             .unwrap();
+        assert_eq!(
+            query_namespaces
+                .iter()
+                .map(|namespace| namespace["namespace"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "logql",
+                "promql",
+                "traceql",
+                "profile",
+                "alert-rule",
+                "alert-instance"
+            ]
+        );
+        let mut query_actions = Vec::new();
+        for namespace in [
+            "logql",
+            "promql",
+            "traceql",
+            "profile",
+            "alert-rule",
+            "alert-instance",
+        ] {
+            let (_, namespace_help) = post_mcp(
+                &endpoint,
+                request(
+                    "tools/call",
+                    "namespace-help",
+                    json!({
+                        "name":QUERY_TOOL_NAME,
+                        "arguments":{"action":format!("help.{namespace}"),"filter":".actions"}
+                    }),
+                ),
+            )
+            .await;
+            query_actions.extend(
+                namespace_help["result"]["structuredContent"]["result"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .cloned(),
+            );
+        }
         assert_eq!(
             query_actions
                 .iter()
                 .map(|action| action["action"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             vec![
-                "logql",
-                "promql",
-                "traceql",
-                "profiles",
-                "alert_rules",
-                "alert_instances"
+                "logql.query",
+                "promql.query",
+                "traceql.search",
+                "profile.merge",
+                "alert-rule.list",
+                "alert-instance.list"
             ]
         );
         for (action, required, optional) in [
             (
-                "promql",
+                "promql.query",
                 vec!["query"],
                 vec!["start", "end", "step", "time"],
             ),
-            ("traceql", vec!["query"], vec!["start", "end", "limit"]),
             (
-                "profiles",
+                "traceql.search",
+                vec!["query"],
+                vec!["start", "end", "limit"],
+            ),
+            (
+                "profile.merge",
                 vec!["selector", "start", "end"],
                 vec!["profile_type", "max_nodes"],
             ),
-            ("alert_rules", vec![], vec!["limit"]),
-            ("alert_instances", vec![], vec!["matchers", "limit"]),
+            ("alert-rule.list", vec![], vec!["limit"]),
+            ("alert-instance.list", vec![], vec!["matchers", "limit"]),
         ] {
             let schema = &query_actions
                 .iter()
@@ -668,7 +768,7 @@ mod tests {
             request(
                 "tools/call",
                 "exec-help",
-                json!({"name":EXEC_TOOL_NAME,"arguments":{"action":"help","filter":".actions"}}),
+                json!({"name":EXEC_TOOL_NAME,"arguments":{"action":"help.silence","filter":".actions"}}),
             ),
         )
         .await;
@@ -676,7 +776,7 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(exec_actions.len(), 1);
-        assert_eq!(exec_actions[0]["action"], "create_silence");
+        assert_eq!(exec_actions[0]["action"], "silence.create");
         let silence_schema = &exec_actions[0]["input_schema"];
         assert_eq!(silence_schema["additionalProperties"], false);
         assert_eq!(
@@ -685,9 +785,9 @@ mod tests {
         );
 
         for (action, result_type, expected_field) in [
-            ("alert_rules", "alert_rules", ("title", "API errors")),
+            ("alert-rule.list", "alert_rules", ("title", "API errors")),
             (
-                "alert_instances",
+                "alert-instance.list",
                 "alert_instances",
                 ("fingerprint", "abc123"),
             ),
@@ -721,7 +821,7 @@ mod tests {
                 json!({
                     "name":EXEC_TOOL_NAME,
                     "arguments":{
-                        "action":"create_silence",
+                        "action":"silence.create",
                         "input":{
                             "matchers":[{"name":"alertname","operator":"=","value":"APIError"}],
                             "duration_seconds":3600,
@@ -750,7 +850,7 @@ mod tests {
                 "filtered-alerts",
                 json!({
                     "name":QUERY_TOOL_NAME,
-                    "arguments":{"action":"alert_instances","input":{},"filter":".result[]"}
+                    "arguments":{"action":"alert-instance.list","input":{},"filter":".result[]"}
                 }),
             ),
         )
@@ -769,18 +869,40 @@ mod tests {
         let (handler, grafana_task) = test_handler().await;
         let (origin, mcp_task) = serve(streamable_http_router(handler)).await;
         let endpoint = format!("{origin}/mcp");
+
+        for (tool, action) in [
+            (QUERY_TOOL_NAME, "logql"),
+            (QUERY_TOOL_NAME, "promql"),
+            (QUERY_TOOL_NAME, "traceql"),
+            (QUERY_TOOL_NAME, "profiles"),
+            (QUERY_TOOL_NAME, "alert_rules"),
+            (QUERY_TOOL_NAME, "alert_instances"),
+            (EXEC_TOOL_NAME, "create_silence"),
+        ] {
+            let (_, response) = post_mcp(
+                &endpoint,
+                request(
+                    "tools/call",
+                    "legacy-action",
+                    json!({"name":tool,"arguments":{"action":action}}),
+                ),
+            )
+            .await;
+            assert_eq!(response["error"]["code"], -32602, "{action}: {response}");
+        }
+
         for (tool, arguments) in [
             (QUERY_TOOL_NAME, json!({"action":"unknown"})),
-            (QUERY_TOOL_NAME, json!({"action":"create_silence"})),
-            (EXEC_TOOL_NAME, json!({"action":"alert_rules"})),
+            (QUERY_TOOL_NAME, json!({"action":"silence.create"})),
+            (EXEC_TOOL_NAME, json!({"action":"alert-rule.list"})),
             (
                 QUERY_TOOL_NAME,
-                json!({"action":"alert_rules","input":{"limit":1,"extra":true}}),
+                json!({"action":"alert-rule.list","input":{"limit":1,"extra":true}}),
             ),
             (
                 EXEC_TOOL_NAME,
                 json!({
-                    "action":"create_silence",
+                    "action":"silence.create",
                     "input":{
                         "matchers":[], "duration_seconds":1, "comment":"x", "extra":true
                     }
@@ -806,7 +928,7 @@ mod tests {
             request(
                 "tools/call",
                 "semantic",
-                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"logql","input":{"query":" "}}}),
+                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"logql.query","input":{"query":" "}}}),
             ),
         )
         .await;
@@ -825,7 +947,7 @@ mod tests {
                 json!({
                     "name":EXEC_TOOL_NAME,
                     "arguments":{
-                        "action":"create_silence",
+                        "action":"silence.create",
                         "input":{"matchers":[],"duration_seconds":0,"comment":" "}
                     }
                 }),
@@ -882,7 +1004,7 @@ mod tests {
                 json!({
                     "name":EXEC_TOOL_NAME,
                     "arguments":{
-                        "action":"create_silence",
+                        "action":"silence.create",
                         "input":{
                             "matchers":[{"name":"alertname","operator":"=","value":"APIError"}],
                             "duration_seconds":3600,

@@ -14,6 +14,9 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| std::io::Error::other("failed to install AWS-LC Rustls crypto provider"))?;
     let telemetry_config = config::TelemetryConfig::from_env().map_err(std::io::Error::other)?;
     let observability = observability::init(&telemetry_config)?;
     let profiling = profiling::init(&telemetry_config)?;

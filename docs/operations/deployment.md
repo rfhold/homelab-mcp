@@ -89,7 +89,7 @@ It requires locally issued `mcp:use` tokens and configures DCR, CIMD, and native
 
 Generic Kuri owns strict OIDC login, callback, one-shot transaction state, ID-token verification, the mapper seam, and hosted continuation. Homelab supplies Authentik configuration and stable issuer-plus-subject mapping.
 
-The current worktree exposes six read-only actions through `grafana_query` and only `create_silence` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes both tools. Their canonical limits, results, and errors are defined by the [Grafana tool specifications](../grafana-query/README.md). The deployed preview revision predates the alerting expansion.
+The current worktree exposes six read-only actions through `grafana_query` and only `silence.create` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes both tools. Their canonical limits, results, and errors are defined by the [Grafana tool specifications](../grafana-query/README.md). The deployed preview revision predates the alerting expansion.
 
 Silence creation performs no automatic retry. If it returns `mutation_outcome_unknown`, inspect current silences before deciding whether to retry because Grafana may already have applied the request. A silence suppresses matching notifications; it does not stop rule evaluation or delete alert data.
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-This specification defines implemented worktree behavior for the read-only `grafana_query.alert_instances` action. Local validation and mock Grafana tests exist; authenticated preview calls and live alert-instance API behavior remain unverified.
+This specification defines implemented worktree behavior for the read-only `grafana_query` action `alert-instance.list`. Local validation and mock Grafana tests exist; authenticated preview calls and live alert-instance API behavior remain unverified.
 
 The [shared contract](common.md) owns authorization, tool annotations, fixed-destination transport, limits, errors, filtering, and telemetry.
 

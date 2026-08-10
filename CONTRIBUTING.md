@@ -2,7 +2,7 @@
 
 The repository implements hosted OAuth, authenticated MCP, and the progressive Grafana runtime. The generic Kuri `mcp` dependency uses a reviewed immutable Git revision.
 
-This runtime is not yet deployed, and preview still runs the prior health-only image. Production remains excluded.
+Preview runs this runtime and has verified health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge. Full browser OAuth and live Grafana queries remain unverified. Production remains excluded.
 
 Use [docs/README.md](docs/README.md) to locate canonical contracts and current validation boundaries.
 
