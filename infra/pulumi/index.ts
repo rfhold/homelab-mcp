@@ -43,6 +43,7 @@ const backupEndpoint = validateHttpsOrigin(
 );
 const backupRetention = config.require("backupRetention");
 const backupSchedule = config.require("backupSchedule");
+const kubernetesApiEndpointCidr = config.require("kubernetesApiEndpointCidr");
 const accessTokenTtl = config.require("mcpOAuthAccessTokenTtl");
 const refreshTokenTtl = config.require("mcpOAuthRefreshTokenTtl");
 const refreshFamilyTtl = config.require("mcpOAuthRefreshFamilyTtl");
@@ -651,6 +652,10 @@ new k8s.networking.v1.NetworkPolicy("homelab-mcp-egress", {
           { port: 4040, protocol: "TCP" },
           { port: 4318, protocol: "TCP" },
         ],
+      },
+      {
+        to: [{ ipBlock: { cidr: kubernetesApiEndpointCidr } }],
+        ports: [{ port: 6443, protocol: "TCP" }],
       },
       {
         to: [

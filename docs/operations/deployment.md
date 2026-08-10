@@ -85,6 +85,8 @@ The CI deployment runs `pulumi up --skip-preview`. A separate authorized local p
 
 Run, task, pod, and PAC Repository access is fixed to `pipelines-as-code`. The Role remains namespace-scoped, and every tool action enforces the canonical ownership checks.
 
+Pantheon evaluates Kubernetes Service egress after DNAT to control-plane endpoints. The NetworkPolicy therefore allows TCP 6443 only to the stack-configured `kubernetesApiEndpointCidr`; allowing only the Service port 443 does not make the in-cluster API reachable.
+
 Local Pulumi mocks can verify declarations but cannot verify effective cluster authorization or controller behavior. Any Stash seed, preview, apply, credential creation, cluster read, dispatch, rerun, cancellation, or live verification requires exact target-specific authority.
 
 ## Preview Pipeline

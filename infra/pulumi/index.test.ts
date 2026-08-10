@@ -40,6 +40,7 @@ before(async () => {
     "homelab-mcp:databaseStorageSize": "2Gi",
     "homelab-mcp:backupStorageClass": "test-bucket",
     "homelab-mcp:backupEndpoint": "https://s3.example.test",
+    "homelab-mcp:kubernetesApiEndpointCidr": "172.16.3.0/24",
     "homelab-mcp:backupRetention": "7d",
     "homelab-mcp:backupSchedule": "0 30 1 * * *",
     "homelab-mcp:mcpOAuthAccessTokenTtl": "300",
@@ -652,6 +653,10 @@ describe("standalone resource topology", () => {
           { port: 4040, protocol: "TCP" },
           { port: 4318, protocol: "TCP" },
         ],
+      },
+      {
+        to: [{ ipBlock: { cidr: "172.16.3.0/24" } }],
+        ports: [{ port: 6443, protocol: "TCP" }],
       },
       {
         to: [
