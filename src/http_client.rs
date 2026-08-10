@@ -89,7 +89,7 @@ impl ReqwestOtelSpanBackend for ApplicationSpanBackend {
     fn on_request_start(_request: &Request, extensions: &mut Extensions) -> Span {
         extensions
             .get::<ApplicationSpan>()
-            .expect("Grafana requests must carry their application span")
+            .expect("traced requests must carry their application span")
             .0
             .clone()
     }

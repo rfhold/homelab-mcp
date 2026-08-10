@@ -21,6 +21,14 @@ use crate::{
             ListSilencesInput, LogqlInput, ProfilesInput, PromqlInput, TraceqlInput,
         },
     },
+    integrations::tekton::{
+        Error as TektonError,
+        actions::{
+            RepositoryListInput, RunCancelCommand, RunCancelInput, RunGetInput, RunListInput,
+            RunRerunCommand, RunRerunInput, TaskListInput, TaskLogsInput, WorkflowDispatchCommand,
+            WorkflowDispatchInput, WorkflowListInput,
+        },
+    },
     services::Services,
 };
 
@@ -28,6 +36,10 @@ use crate::{
 const QUERY_TOOL_NAME: &str = "grafana_query";
 #[cfg(test)]
 const EXEC_TOOL_NAME: &str = "grafana_exec";
+#[cfg(test)]
+const TEKTON_QUERY_TOOL_NAME: &str = "tekton_query";
+#[cfg(test)]
+const TEKTON_EXEC_TOOL_NAME: &str = "tekton_exec";
 
 #[derive(Clone)]
 pub struct HomelabMcp {
@@ -88,6 +100,32 @@ pub fn router(
             "openWorldHint": true
         }),
         namespace(name = "silence", description = "Manage Grafana alert silences.")
+    ),
+    tool(
+        name = "tekton_query",
+        description = "Inspect configured Tekton pipelines, runs, tasks, and bounded logs.",
+        annotations = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+        }),
+        namespace(name = "repository", description = "Inspect PAC-configured repositories."),
+        namespace(name = "workflow", description = "Inspect Pipeline-as-Code workflow definitions."),
+        namespace(name = "run", description = "Inspect Tekton PipelineRuns."),
+        namespace(name = "task", description = "Inspect Tekton TaskRuns and bounded logs.")
+    ),
+    tool(
+        name = "tekton_exec",
+        description = "Dispatch, rerun, or cancel operationally consequential Tekton workflows.",
+        annotations = json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+        }),
+        namespace(name = "workflow", description = "Dispatch incoming-enabled workflows."),
+        namespace(name = "run", description = "Rerun or cancel Tekton PipelineRuns.")
     )
 )]
 impl HomelabMcp {
@@ -282,6 +320,230 @@ impl HomelabMcp {
             Err(error) => tool_error("silence", error),
         }
     }
+
+    /// List PAC Repository resources with valid configured Forgejo URLs.
+    #[action(tool = "tekton_query", name = "repository.list")]
+    async fn tekton_repositories(
+        &self,
+        input: RepositoryListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => {
+                return Ok(tekton_tool_error(
+                    "repository",
+                    TektonError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.tekton.repositories(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("repository", error),
+        })
+    }
+
+    /// List bounded Pipeline-as-Code definitions from configured repositories.
+    #[action(tool = "tekton_query", name = "workflow.list")]
+    async fn tekton_workflows(
+        &self,
+        input: WorkflowListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tekton_tool_error("workflow", TektonError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.tekton.workflows(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("workflow", error),
+        })
+    }
+
+    /// List bounded PipelineRuns for an exact configured repository.
+    #[action(tool = "tekton_query", name = "run.list")]
+    async fn tekton_runs(
+        &self,
+        input: RunListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.tekton.runs(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("run", error),
+        })
+    }
+
+    /// Get one owned PipelineRun by exact namespace-qualified identity.
+    #[action(tool = "tekton_query", name = "run.get")]
+    async fn tekton_run(
+        &self,
+        input: RunGetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.tekton.run(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("run", error),
+        })
+    }
+
+    /// List owned TaskRuns for an exact PipelineRun.
+    #[action(tool = "tekton_query", name = "task.list")]
+    async fn tekton_tasks(
+        &self,
+        input: TaskListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tekton_tool_error("task", TektonError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.tekton.tasks(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("task", error),
+        })
+    }
+
+    /// Read bounded, redacted logs for an owned TaskRun and optional step.
+    #[action(tool = "tekton_query", name = "task.logs")]
+    async fn tekton_task_logs(
+        &self,
+        input: TaskLogsInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tekton_tool_error("task log", TektonError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.tekton.logs(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("task log", error),
+        })
+    }
+
+    /// Dispatch one exact incoming-enabled Pipeline-as-Code workflow.
+    #[action(tool = "tekton_exec", name = "workflow.dispatch")]
+    async fn tekton_dispatch(
+        &self,
+        input: WorkflowDispatchInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let command = match input.validate() {
+            Ok(command) => command,
+            Err(_) => return Ok(tekton_tool_error("workflow", TektonError::InvalidArguments)),
+        };
+        Ok(self
+            .dispatch_tekton_workflow(&command, context.cancelled())
+            .await)
+    }
+
+    /// Rerun one owned PipelineRun through the fixed PAC incoming route.
+    #[action(tool = "tekton_exec", name = "run.rerun")]
+    async fn tekton_rerun(
+        &self,
+        input: RunRerunInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let command = match input.validate() {
+            Ok(command) => command,
+            Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
+        };
+        Ok(self
+            .dispatch_tekton_rerun(&command, context.cancelled())
+            .await)
+    }
+
+    /// Request cancellation of one active owned PipelineRun.
+    #[action(tool = "tekton_exec", name = "run.cancel")]
+    async fn tekton_cancel(
+        &self,
+        input: RunCancelInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let command = match input.validate() {
+            Ok(command) => command,
+            Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
+        };
+        Ok(self
+            .dispatch_tekton_cancel(&command, context.cancelled())
+            .await)
+    }
+
+    async fn dispatch_tekton_workflow(
+        &self,
+        command: &WorkflowDispatchCommand,
+        cancellation: impl Future<Output = ()>,
+    ) -> McpToolResult {
+        let result = tokio::select! {
+            result = self.services.tekton.dispatch(command) => result,
+            () = cancellation => return tekton_tool_error("workflow", TektonError::MutationOutcomeUnknown),
+        };
+        match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("workflow", error),
+        }
+    }
+
+    async fn dispatch_tekton_rerun(
+        &self,
+        command: &RunRerunCommand,
+        cancellation: impl Future<Output = ()>,
+    ) -> McpToolResult {
+        let result = tokio::select! {
+            result = self.services.tekton.rerun(command) => result,
+            () = cancellation => return tekton_tool_error("run", TektonError::MutationOutcomeUnknown),
+        };
+        match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("run", error),
+        }
+    }
+
+    async fn dispatch_tekton_cancel(
+        &self,
+        command: &RunCancelCommand,
+        cancellation: impl Future<Output = ()>,
+    ) -> McpToolResult {
+        let result = tokio::select! {
+            result = self.services.tekton.cancel(command) => result,
+            () = cancellation => return tekton_tool_error("run", TektonError::MutationOutcomeUnknown),
+        };
+        match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("run", error),
+        }
+    }
 }
 
 fn query_result(output: serde_json::Value) -> McpToolResult {
@@ -304,6 +566,18 @@ fn silence_result(output: serde_json::Value) -> McpToolResult {
 
 fn tool_error(query_name: &str, error: GrafanaError) -> McpToolResult {
     error.into_tool_error(query_name).into_mcp_result()
+}
+
+fn tekton_result(output: serde_json::Value) -> McpToolResult {
+    let result_type = output["result_type"].as_str().unwrap_or("mutation");
+    McpToolResult::new(json!({
+        "content": [{"type":"text", "text":format!("Tekton {result_type} request completed.")}],
+        "structuredContent": output,
+    }))
+}
+
+fn tekton_tool_error(subject: &str, error: TektonError) -> McpToolResult {
+    error.into_tool_error(subject).into_mcp_result()
 }
 
 #[cfg(test)]
@@ -1024,7 +1298,7 @@ mod tests {
 
         let (_, listed) = post_mcp(&endpoint, request("tools/list", "list", json!({}))).await;
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 4);
         let query_tool = tools
             .iter()
             .find(|tool| tool["name"] == QUERY_TOOL_NAME)
@@ -1033,6 +1307,53 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == EXEC_TOOL_NAME)
             .unwrap();
+        let tekton_query_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == TEKTON_QUERY_TOOL_NAME)
+            .unwrap();
+        let tekton_exec_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == TEKTON_EXEC_TOOL_NAME)
+            .unwrap();
+        assert_eq!(
+            tekton_query_tool["annotations"],
+            json!({
+                "readOnlyHint":true, "destructiveHint":false,
+                "idempotentHint":true, "openWorldHint":true
+            })
+        );
+        assert_eq!(
+            tekton_exec_tool["annotations"],
+            json!({
+                "readOnlyHint":false, "destructiveHint":true,
+                "idempotentHint":false, "openWorldHint":true
+            })
+        );
+        let tekton_query_actions = tekton_query_tool["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        for action in [
+            "repository.list",
+            "workflow.list",
+            "run.list",
+            "run.get",
+            "task.list",
+            "task.logs",
+        ] {
+            assert!(
+                tekton_query_actions.contains(&json!(action)),
+                "missing {action}"
+            );
+        }
+        let tekton_exec_actions = tekton_exec_tool["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        for action in ["workflow.dispatch", "run.rerun", "run.cancel"] {
+            assert!(
+                tekton_exec_actions.contains(&json!(action)),
+                "missing {action}"
+            );
+        }
         assert_eq!(
             query_tool["annotations"],
             json!({

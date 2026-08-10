@@ -9,3 +9,4 @@ The previously committed runtime is deployed to preview. Basic runtime and disco
 | [Overview](overview.md) | Components, dependencies, trust boundaries, and request flow. |
 | [Access and authentication](access-authentication.md) | Hosted MCP OAuth roles, token boundaries, scopes, and durable state. |
 | [Observability](observability.md) | Signal paths, bounded telemetry attributes, lifecycle, and data safety. |
+| [Tekton tools](../tekton/README.md) | Planned integration behavior and evidence boundaries. |

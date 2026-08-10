@@ -22,8 +22,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let profiling = profiling::init(&telemetry_config)?;
     tracing::info!(listen.address = LISTEN_ADDR, "service startup started");
     let config = config::Config::from_env().map_err(std::io::Error::other)?;
-    let services =
-        Arc::new(Services::production(&config.integrations).map_err(std::io::Error::other)?);
+    let services = Arc::new(Services::production(&config).map_err(std::io::Error::other)?);
     let runtime = Arc::new(
         oauth::initialize(&config.database, &config.oidc, &config.oauth)
             .await

@@ -67,6 +67,8 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 
 The Rust suite supplies local and mock evidence. Deployed evidence additionally covers startup, readiness, metadata, and challenge behavior, but not browser OAuth, authenticated MCP, live alert APIs, or Editor permission operation. No deployment or live operation occurred for the alerting revision.
 
+The Tekton feature has worktree implementation, Rust unit and MCP discovery tests, and passing Pulumi declaration tests. It has no deployment or live evidence. Existing preview evidence does not cover `tekton_query`, `tekton_exec`, Forgejo, PAC, effective Kubernetes RBAC, or task logs.
+
 Preview end-to-end checks require explicit target authority. Production checks and production deployment remain excluded.
 
 ## OAuth Contract Coverage
@@ -127,6 +129,30 @@ Capacity tests must prove immediate failure with retryable `capacity_exhausted`.
 Tests must prove cancellation and permit release after success, timeout, transport failure, and malformed response. MCP cancellation must retain generic request-cancelled behavior for reads; cancellation of a dispatched silence POST must return safe, non-retryable `mutation_outcome_unknown` and direct callers to inspect current silences.
 
 For actions whose upstream API accepts a limit, tests must prove that Grafana receives the validated limit. Actions with a local result limit must prove deterministic truncation when Grafana overreturns; `silence.list` intentionally applies its limit only after local state filtering.
+
+## Tekton Contract Coverage
+
+Tests must cover the [Tekton tool specifications](../tekton/README.md), including:
+
+- generated help, schemas, filters, action separation, and exact MCP annotations;
+- all-`mcp:use` authorization, including access by every current MCP principal;
+- PAC `Repository` authority in fixed namespace `pipelines-as-code`;
+- exclusion of invalid repository URLs and normalization to the fixed Forgejo origin;
+- direct root `.tekton/*.yaml` and `.tekton/*.yml` discovery only;
+- fixed fanout, file, byte, YAML document, result, step, tail, and log-byte limits;
+- partial workflow-discovery failures and every `PipelineRun` definition and event;
+- triggerable status only for exact `incoming` events;
+- namespace-qualified run and task IDs, ownership validation, reverse chronology, and output allowlists;
+- task-log truncation metadata, MCP-held secret redaction, and no telemetry log content;
+- dispatch validation, fixed PAC POST `/incoming`, caller-control rejection, and 2xx acceptance semantics;
+- safe rerun replay of the prior branch and parameters;
+- active owned-run checks and a `spec.status=Cancelled`-only patch;
+- no automatic retries and non-retryable `mutation_outcome_unknown` after ambiguous sends; and
+- exclusion of secrets, raw objects, internal routes, and upstream bodies from MCP, logs, traces, metrics, and errors.
+
+Pulumi mock tests must cover separate env-backed Stashes, environment seed names, application Secret projection, the dedicated ServiceAccount, explicit token projection, namespace Role rules, and absence of Secret or cluster-wide permissions.
+
+Live preview evidence requires separate approval for each target and action. It must verify effective RBAC, PAC repository mapping, Forgejo reads, bounded logs, dispatch acceptance, rerun behavior, cancellation requests, and uncertain mutation recovery.
 
 ## Preview Evidence
 

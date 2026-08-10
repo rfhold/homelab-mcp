@@ -72,6 +72,7 @@ pub struct OAuthConfig {
 #[derive(Clone)]
 pub struct IntegrationsConfig {
     pub grafana: GrafanaConfig,
+    pub tekton: TektonConfig,
 }
 
 #[derive(Clone)]
@@ -81,11 +82,25 @@ pub struct GrafanaConfig {
 }
 
 #[derive(Clone)]
+pub struct TektonConfig {
+    pub forgejo_origin: Url,
+    pub forgejo_token: Secret,
+    pub namespace: String,
+    pub pac_origin: Url,
+    pub pac_incoming_secret: Secret,
+}
+
+#[derive(Clone)]
 pub struct Secret(pub(crate) String);
 
 impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self(value.to_owned())
     }
 }
 
@@ -140,6 +155,13 @@ impl Config {
                     origin: secure_origin("GRAFANA_URL", &required("GRAFANA_URL")?)?,
                     token: secret("GRAFANA_TOKEN")?,
                 },
+                tekton: TektonConfig {
+                    forgejo_origin: secure_origin("FORGEJO_ORIGIN", &required("FORGEJO_ORIGIN")?)?,
+                    forgejo_token: secret("FORGEJO_TOKEN")?,
+                    namespace: required("TEKTON_NAMESPACE")?,
+                    pac_origin: internal_http_origin("PAC_URL", &required("PAC_URL")?)?,
+                    pac_incoming_secret: secret("PAC_INCOMING_SECRET")?,
+                },
             },
         };
         config.validate()?;
@@ -174,6 +196,13 @@ impl Config {
             || self.oauth.code_ttl.is_zero()
         {
             return Err("OAuth policy configuration is invalid".to_owned());
+        }
+        if self.integrations.tekton.namespace != "pipelines-as-code"
+            || self.integrations.tekton.forgejo_origin.as_str() != "https://git.holdenitdown.net/"
+            || self.integrations.tekton.pac_origin.as_str()
+                != "http://pipelines-as-code-controller.pipelines-as-code.svc.cluster.local:8080/"
+        {
+            return Err("Tekton integration configuration is invalid".to_owned());
         }
         Ok(())
     }
@@ -259,6 +288,22 @@ fn secure_origin(name: &str, value: &str) -> Result<Url, String> {
     if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
         return Err(format!("invalid {PREFIX}{name}"));
     }
+    Ok(url)
+}
+
+fn internal_http_origin(name: &str, value: &str) -> Result<Url, String> {
+    let mut url = Url::parse(value).map_err(|_| format!("invalid {PREFIX}{name}"))?;
+    if url.scheme() != "http"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || (url.path() != "/" && !url.path().is_empty())
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!("invalid {PREFIX}{name}"));
+    }
+    url.set_path("/");
     Ok(url)
 }
 
@@ -414,6 +459,13 @@ mod tests {
                 grafana: GrafanaConfig {
                     origin: Url::parse("https://grafana.example/").unwrap(),
                     token: Secret("secret".to_owned()),
+                },
+                tekton: TektonConfig {
+                    forgejo_origin: Url::parse("https://git.holdenitdown.net/").unwrap(),
+                    forgejo_token: Secret("forgejo-secret".to_owned()),
+                    namespace: "pipelines-as-code".to_owned(),
+                    pac_origin: Url::parse("http://pipelines-as-code-controller.pipelines-as-code.svc.cluster.local:8080/").unwrap(),
+                    pac_incoming_secret: Secret("pac-secret".to_owned()),
                 },
             },
         };

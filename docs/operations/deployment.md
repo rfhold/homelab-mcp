@@ -67,6 +67,24 @@ Runtime logs, redirects, MCP results, image layers, rendered outputs, and health
 
 The non-expiring Grafana token requires explicit rotation and revocation procedures before production readiness.
 
+## Tekton Access
+
+The worktree implements the Tekton runtime and Pulumi declarations in this section. They remain unapplied; production remains unapplied.
+
+The [Tekton tool specifications](../tekton/README.md) own action behavior, authority checks, and mutation outcomes. This section owns the deployment and credential boundaries.
+
+Pulumi declares separate env-backed Stashes for Tekton credentials. `FORGEJO_HOLDENITDOWN_TOKEN` seeds the Forgejo Stash. `PAC_INCOMING_SECRET` seeds the PAC Stash. Pulumi projects both outputs into `homelab-mcp-app` without placing values in stack configuration or rendered documentation.
+
+The runtime uses fixed Forgejo origin `https://git.holdenitdown.net`. It sends PAC dispatches only to `http://pipelines-as-code-controller.pipelines-as-code.svc.cluster.local:8080/incoming`.
+
+The Deployment declares a dedicated ServiceAccount and an explicit one-hour projected Kubernetes token that the runtime reloads from disk for each Kubernetes request. It does not use the default automatic token mount.
+
+A namespace Role in `pipelines-as-code` grants only the resource reads required for repositories, runs, tasks, pod ownership, and logs. It grants `PipelineRun` patch only for cancellation. The runtime receives no Secret read, Secret create, Secret delete, cluster role, or unrelated write permission.
+
+Run, task, pod, and PAC Repository access is fixed to `pipelines-as-code`. The Role remains namespace-scoped, and every tool action enforces the canonical ownership checks.
+
+Local Pulumi mocks can verify declarations but cannot verify effective cluster authorization or controller behavior. Any Stash seed, preview, apply, credential creation, cluster read, dispatch, rerun, cancellation, or live verification requires exact target-specific authority.
+
 ## Preview Pipeline
 
 `.tekton/homelab-mcp-preview.yaml` targets `main` push and incoming events. It defines one preview path and no release path.

@@ -20,6 +20,10 @@ const calls: ResourceRecord[] = [];
 const previousConfig = process.env.PULUMI_CONFIG;
 const previousGrafanaUrl = process.env.GRAFANA_URL;
 const previousGrafanaAuth = process.env.GRAFANA_AUTH;
+const previousForgejoToken = process.env.FORGEJO_HOLDENITDOWN_TOKEN;
+const previousPacIncomingSecret = process.env.PAC_INCOMING_SECRET;
+const forgejoTokenFixture = "test-forgejo-token";
+const pacIncomingSecretFixture = "test-pac-incoming-secret";
 let program: typeof import("./index");
 
 before(async () => {
@@ -49,6 +53,8 @@ before(async () => {
   });
   process.env.GRAFANA_URL = "https://grafana.example.test";
   process.env.GRAFANA_AUTH = "bootstrap:test-password";
+  process.env.FORGEJO_HOLDENITDOWN_TOKEN = forgejoTokenFixture;
+  process.env.PAC_INCOMING_SECRET = pacIncomingSecretFixture;
 
   pulumi.runtime.setMocks(
     {
@@ -78,6 +84,9 @@ before(async () => {
         }
         if (args.type === "grafana:oss/serviceAccountToken:ServiceAccountToken") {
           outputs.key = "test-grafana-token";
+        }
+        if (args.type === "pulumi:index:Stash") {
+          outputs.output = args.inputs.input;
         }
         if (args.name === "homelab-mcp-backups-generated-config") {
           outputs.data = { BUCKET_NAME: "test-backup-bucket" };
@@ -116,6 +125,8 @@ after(() => {
   restoreEnv("PULUMI_CONFIG", previousConfig);
   restoreEnv("GRAFANA_URL", previousGrafanaUrl);
   restoreEnv("GRAFANA_AUTH", previousGrafanaAuth);
+  restoreEnv("FORGEJO_HOLDENITDOWN_TOKEN", previousForgejoToken);
+  restoreEnv("PAC_INCOMING_SECRET", previousPacIncomingSecret);
 });
 
 describe("configuration policy", () => {
@@ -306,6 +317,20 @@ describe("standalone resource topology", () => {
     );
     assert.equal(app.HOMELAB_MCP_GRAFANA_URL, "https://grafana.example.test");
     assert.equal(app.HOMELAB_MCP_GRAFANA_TOKEN, "test-grafana-token");
+    assert.equal(
+      app.HOMELAB_MCP_FORGEJO_ORIGIN,
+      "https://git.holdenitdown.net",
+    );
+    assert.equal(app.HOMELAB_MCP_FORGEJO_TOKEN, forgejoTokenFixture);
+    assert.equal(app.HOMELAB_MCP_TEKTON_NAMESPACE, "pipelines-as-code");
+    assert.equal(
+      app.HOMELAB_MCP_PAC_URL,
+      "http://pipelines-as-code-controller.pipelines-as-code.svc.cluster.local:8080",
+    );
+    assert.equal(
+      app.HOMELAB_MCP_PAC_INCOMING_SECRET,
+      pacIncomingSecretFixture,
+    );
     assert.equal(app.HOMELAB_MCP_DEPLOYMENT_ENVIRONMENT, "test");
     assert.equal(app.HOMELAB_MCP_SERVICE_NAMESPACE, "homelab");
     assert.equal(
@@ -324,14 +349,173 @@ describe("standalone resource topology", () => {
     );
 
     for (const candidate of resources.filter(
-      (entry) => entry.type !== "kubernetes:core/v1:Secret",
+      (entry) =>
+        entry.type !== "kubernetes:core/v1:Secret" &&
+        entry.type !== "pulumi:index:Stash",
     )) {
       assert.doesNotMatch(
         JSON.stringify(candidate.inputs),
-        /HOMELAB_MCP_(?:DATABASE_URL|OIDC_CLIENT_SECRET|GRAFANA_TOKEN)/,
+        /HOMELAB_MCP_(?:DATABASE_URL|OIDC_CLIENT_SECRET|GRAFANA_TOKEN|FORGEJO_TOKEN|PAC_INCOMING_SECRET)/,
       );
       assert.doesNotMatch(JSON.stringify(candidate.inputs), /test-grafana-token/);
+      assert.doesNotMatch(JSON.stringify(candidate.inputs), /test-forgejo-token/);
+      assert.doesNotMatch(
+        JSON.stringify(candidate.inputs),
+        /test-pac-incoming-secret/,
+      );
     }
+  });
+
+  test("stashes secret seed inputs and projects only their outputs", () => {
+    const forgejo = resource("pulumi:index:Stash", "homelab-mcp-forgejo-token");
+    const pac = resource(
+      "pulumi:index:Stash",
+      "homelab-mcp-pac-incoming-secret",
+    );
+    assert.ok(isSecret(forgejo.inputs.input));
+    assert.ok(isSecret(pac.inputs.input));
+    assert.equal(unwrapSecrets(forgejo.inputs.input), forgejoTokenFixture);
+    assert.equal(unwrapSecrets(pac.inputs.input), pacIncomingSecretFixture);
+
+    const appSecret = resource(
+      "kubernetes:core/v1:Secret",
+      "homelab-mcp-app",
+    );
+    assert.ok(isSecret(appSecret.inputs.stringData));
+    const app = unwrapSecrets(appSecret.inputs.stringData) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(app.HOMELAB_MCP_FORGEJO_TOKEN, forgejoTokenFixture);
+    assert.equal(
+      app.HOMELAB_MCP_PAC_INCOMING_SECRET,
+      pacIncomingSecretFixture,
+    );
+  });
+
+  test("uses an explicit bounded service-account credential projection", () => {
+    const account = resource(
+      "kubernetes:core/v1:ServiceAccount",
+      "homelab-mcp",
+    );
+    assert.equal((account.inputs.metadata as any).name, "homelab-mcp");
+    assert.equal(
+      (account.inputs.metadata as any).namespace,
+      "homelab-mcp-test",
+    );
+    assert.equal(account.inputs.automountServiceAccountToken, false);
+
+    const deployment = resource(
+      "kubernetes:apps/v1:Deployment",
+      "homelab-mcp",
+    );
+    const pod = (unwrapSecrets(deployment.inputs.spec) as any).template.spec;
+    assert.equal(pod.automountServiceAccountToken, false);
+    assert.equal(pod.serviceAccountName, "homelab-mcp");
+    assert.deepEqual(
+      pod.containers[0].volumeMounts.find(
+        (mount: any) => mount.name === "kube-api-access",
+      ),
+      {
+        name: "kube-api-access",
+        mountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+        readOnly: true,
+      },
+    );
+    assert.deepEqual(
+      pod.volumes.find((volume: any) => volume.name === "kube-api-access"),
+      {
+        name: "kube-api-access",
+        projected: {
+          defaultMode: 0o444,
+          sources: [
+            {
+              serviceAccountToken: {
+                expirationSeconds: 3600,
+                path: "token",
+              },
+            },
+            {
+              configMap: {
+                name: "kube-root-ca.crt",
+                items: [{ key: "ca.crt", path: "ca.crt" }],
+              },
+            },
+            {
+              downwardAPI: {
+                items: [
+                  {
+                    path: "namespace",
+                    fieldRef: {
+                      apiVersion: "v1",
+                      fieldPath: "metadata.namespace",
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    );
+  });
+
+  test("grants exact namespace-scoped Tekton and PAC permissions", () => {
+    const role = resource(
+      "kubernetes:rbac.authorization.k8s.io/v1:Role",
+      "homelab-mcp-tekton",
+    );
+    assert.equal((role.inputs.metadata as any).namespace, "pipelines-as-code");
+    assert.deepEqual(role.inputs.rules, [
+      {
+        apiGroups: ["tekton.dev"],
+        resources: ["pipelineruns"],
+        verbs: ["get", "list", "patch"],
+      },
+      {
+        apiGroups: ["tekton.dev"],
+        resources: ["taskruns"],
+        verbs: ["get", "list"],
+      },
+      {
+        apiGroups: ["pipelinesascode.tekton.dev"],
+        resources: ["repositories"],
+        verbs: ["get", "list"],
+      },
+      { apiGroups: [""], resources: ["pods"], verbs: ["get"] },
+      { apiGroups: [""], resources: ["pods/log"], verbs: ["get"] },
+    ]);
+
+    const binding = resource(
+      "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding",
+      "homelab-mcp-tekton",
+    );
+    assert.equal((binding.inputs.metadata as any).namespace, "pipelines-as-code");
+    assert.deepEqual(binding.inputs.roleRef, {
+      apiGroup: "rbac.authorization.k8s.io",
+      kind: "Role",
+      name: "homelab-mcp",
+    });
+    assert.deepEqual(binding.inputs.subjects, [
+      {
+        kind: "ServiceAccount",
+        name: "homelab-mcp",
+        namespace: "homelab-mcp-test",
+      },
+    ]);
+
+    assert.equal(
+      resources.some((candidate) => candidate.type.includes(":ClusterRole")),
+      false,
+    );
+    const rules = role.inputs.rules as Array<{ resources: string[]; verbs: string[] }>;
+    assert.equal(rules.some((rule) => rule.resources.includes("secrets")), false);
+    assert.equal(
+      rules.some((rule) =>
+        rule.verbs.some((verb) => ["create", "delete", "update"].includes(verb)),
+      ),
+      false,
+    );
   });
 
   test("creates a versioned 32-byte keyring with checksum rollout", () => {
@@ -492,6 +676,18 @@ describe("standalone resource topology", () => {
           },
         ],
         ports: [{ port: 5432, protocol: "TCP" }],
+      },
+      {
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: {
+                "kubernetes.io/metadata.name": "pipelines-as-code",
+              },
+            },
+          },
+        ],
+        ports: [{ port: 8080, protocol: "TCP" }],
       },
     ]);
   });

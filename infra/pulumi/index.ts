@@ -18,6 +18,11 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function optionalEnv(name: string): string | undefined {
+  const value = process.env[name];
+  return value === undefined || value.trim() === "" ? undefined : value;
+}
+
 const config = new pulumi.Config();
 const namespaceName = config.require("namespace");
 const hostname = config.require("hostname");
@@ -60,6 +65,12 @@ const grafanaProvider = new grafana.Provider("homelab-mcp-grafana", {
   url: grafanaUrl,
   auth: pulumi.secret(requireEnv("GRAFANA_AUTH")),
 });
+const forgejoToken = new pulumi.Stash("homelab-mcp-forgejo-token", {
+  input: pulumi.secret(optionalEnv("FORGEJO_HOLDENITDOWN_TOKEN")),
+});
+const pacIncomingSecret = new pulumi.Stash("homelab-mcp-pac-incoming-secret", {
+  input: pulumi.secret(optionalEnv("PAC_INCOMING_SECRET")),
+});
 
 const labels = {
   "app.kubernetes.io/name": "homelab-mcp",
@@ -69,6 +80,10 @@ const labels = {
 };
 const workloadLabels = { ...labels, "app.kubernetes.io/component": "server" };
 const deploymentEnvironment = pulumi.getStack();
+const tektonNamespace = "pipelines-as-code";
+const forgejoOrigin = "https://git.holdenitdown.net";
+const pacUrl =
+  "http://pipelines-as-code-controller.pipelines-as-code.svc.cluster.local:8080";
 const publicUrl = `https://${hostname}`;
 const browserCallback = `${publicUrl}/oidc/callback`;
 const mcpIssuer = `${publicUrl}/oauth`;
@@ -81,6 +96,78 @@ const postgresCaFile = `${postgresTrustMountPath}/ca.crt`;
 const namespace = new k8s.core.v1.Namespace("homelab-mcp-namespace", {
   metadata: { name: namespaceName, labels },
 });
+
+const appServiceAccount = new k8s.core.v1.ServiceAccount(
+  "homelab-mcp",
+  {
+    metadata: {
+      name: "homelab-mcp",
+      namespace: namespace.metadata.name,
+      labels,
+    },
+    automountServiceAccountToken: false,
+  },
+  { dependsOn: [namespace] },
+);
+
+const tektonRole = new k8s.rbac.v1.Role("homelab-mcp-tekton", {
+  metadata: {
+    name: "homelab-mcp",
+    namespace: tektonNamespace,
+    labels,
+  },
+  rules: [
+    {
+      apiGroups: ["tekton.dev"],
+      resources: ["pipelineruns"],
+      verbs: ["get", "list", "patch"],
+    },
+    {
+      apiGroups: ["tekton.dev"],
+      resources: ["taskruns"],
+      verbs: ["get", "list"],
+    },
+    {
+      apiGroups: ["pipelinesascode.tekton.dev"],
+      resources: ["repositories"],
+      verbs: ["get", "list"],
+    },
+    {
+      apiGroups: [""],
+      resources: ["pods"],
+      verbs: ["get"],
+    },
+    {
+      apiGroups: [""],
+      resources: ["pods/log"],
+      verbs: ["get"],
+    },
+  ],
+});
+
+new k8s.rbac.v1.RoleBinding(
+  "homelab-mcp-tekton",
+  {
+    metadata: {
+      name: "homelab-mcp",
+      namespace: tektonNamespace,
+      labels,
+    },
+    roleRef: {
+      apiGroup: "rbac.authorization.k8s.io",
+      kind: "Role",
+      name: tektonRole.metadata.name,
+    },
+    subjects: [
+      {
+        kind: "ServiceAccount",
+        name: appServiceAccount.metadata.name,
+        namespace: namespace.metadata.name,
+      },
+    ],
+  },
+  { dependsOn: [appServiceAccount, tektonRole] },
+);
 
 const backupBucket = new k8s.apiextensions.CustomResource(
   "homelab-mcp-backups-bucket",
@@ -340,6 +427,11 @@ const appSecret = new k8s.core.v1.Secret(
       HOMELAB_MCP_OAUTH_WRAPPING_KEYS_FILE: wrappingKeyFile,
       HOMELAB_MCP_GRAFANA_URL: grafanaUrl,
       HOMELAB_MCP_GRAFANA_TOKEN: pulumi.secret(grafanaToken.key),
+      HOMELAB_MCP_FORGEJO_ORIGIN: forgejoOrigin,
+      HOMELAB_MCP_FORGEJO_TOKEN: forgejoToken.output,
+      HOMELAB_MCP_TEKTON_NAMESPACE: tektonNamespace,
+      HOMELAB_MCP_PAC_URL: pacUrl,
+      HOMELAB_MCP_PAC_INCOMING_SECRET: pacIncomingSecret.output,
       HOMELAB_MCP_DEPLOYMENT_ENVIRONMENT: deploymentEnvironment,
       HOMELAB_MCP_SERVICE_NAMESPACE: "homelab",
       HOMELAB_MCP_PYROSCOPE_URL: "https://telemetry.holdenitdown.net:4040",
@@ -349,7 +441,15 @@ const appSecret = new k8s.core.v1.Secret(
       OTEL_RESOURCE_ATTRIBUTES: `service.namespace=homelab,deployment.environment.name=${deploymentEnvironment}`,
     },
   },
-  { dependsOn: [database, browserApp, grafanaToken] },
+  {
+    dependsOn: [
+      database,
+      browserApp,
+      grafanaToken,
+      forgejoToken,
+      pacIncomingSecret,
+    ],
+  },
 );
 
 new k8s.apps.v1.Deployment(
@@ -382,6 +482,7 @@ new k8s.apps.v1.Deployment(
         },
         spec: {
           automountServiceAccountToken: false,
+          serviceAccountName: appServiceAccount.metadata.name,
           securityContext: {
             runAsNonRoot: true,
             runAsUser: 65532,
@@ -451,6 +552,11 @@ new k8s.apps.v1.Deployment(
                   mountPath: postgresTrustMountPath,
                   readOnly: true,
                 },
+                {
+                  name: "kube-api-access",
+                  mountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
+                  readOnly: true,
+                },
               ],
             },
           ],
@@ -474,12 +580,45 @@ new k8s.apps.v1.Deployment(
                 items: [{ key: "ca.crt", path: "ca.crt", mode: 0o444 }],
               },
             },
+            {
+              name: "kube-api-access",
+              projected: {
+                defaultMode: 0o444,
+                sources: [
+                  {
+                    serviceAccountToken: {
+                      expirationSeconds: 3600,
+                      path: "token",
+                    },
+                  },
+                  {
+                    configMap: {
+                      name: "kube-root-ca.crt",
+                      items: [{ key: "ca.crt", path: "ca.crt" }],
+                    },
+                  },
+                  {
+                    downwardAPI: {
+                      items: [
+                        {
+                          path: "namespace",
+                          fieldRef: {
+                            apiVersion: "v1",
+                            fieldPath: "metadata.namespace",
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            },
           ],
         },
       },
     },
   },
-  { dependsOn: [appSecret, wrappingKeySecret] },
+  { dependsOn: [appSecret, wrappingKeySecret, appServiceAccount] },
 );
 
 new k8s.networking.v1.NetworkPolicy("homelab-mcp-egress", {
@@ -538,6 +677,18 @@ new k8s.networking.v1.NetworkPolicy("homelab-mcp-egress", {
           },
         ],
         ports: [{ port: 5432, protocol: "TCP" }],
+      },
+      {
+        to: [
+          {
+            namespaceSelector: {
+              matchLabels: {
+                "kubernetes.io/metadata.name": tektonNamespace,
+              },
+            },
+          },
+        ],
+        ports: [{ port: 8080, protocol: "TCP" }],
       },
     ],
   },

@@ -971,13 +971,6 @@ fn copy_number(
 }
 
 #[cfg(test)]
-impl Secret {
-    fn for_test(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::{
         collections::HashMap,

@@ -2,13 +2,13 @@
 
 ## Status
 
-The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, seven bounded Grafana reads, and bounded silence creation.
+The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, seven bounded Grafana reads, bounded silence creation, and bounded Tekton and PAC tools in the current worktree.
 
-Preview runs the authenticated runtime from commit `4f2e192`. Health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge are verified. The worktree alerting revision has not been deployed or operated live. Full browser OAuth, authenticated preview MCP calls, live Grafana behavior, and Editor permission operation remain unverified; production remains excluded.
+Preview runs the authenticated runtime from commit `4f2e192`. Health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge are verified. The worktree alerting and Tekton revisions have not been deployed or operated live. Full browser OAuth, authenticated preview MCP calls, live integration behavior, and permission operation remain unverified; production remains excluded.
 
 ## Purpose
 
-`homelab-mcp` exposes bounded homelab integrations through MCP. Grafana reads and silence creation are the first integration; the service does not expose Grafana credentials or direct datasource access to clients.
+`homelab-mcp` exposes bounded homelab integrations through MCP. Grafana tools provide reads and silence creation. Tekton tools add PAC-authorized repository, workflow, run, task, log, and mutation access in the current worktree.
 
 ## Service Boundary
 
@@ -28,14 +28,14 @@ The current worktree service:
 
 - uses Kuri's generic private `mcp` crate at a reviewed immutable Git revision;
 - serves MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
-- uses `#[mcp::progressive_server]` to generate read-only `grafana_query` and operationally consequential `grafana_exec`;
-- exposes seven read actions on `grafana_query` and only `silence.create` on `grafana_exec`;
+- uses `#[mcp::progressive_server]` to generate read-only query and operationally consequential exec tools for Grafana and Tekton;
+- exposes seven Grafana read actions, bounded silence creation, six Tekton read actions, and three Tekton mutations;
 - queries Grafana's HTTP API through fixed Loki, Mimir, Tempo, and Pyroscope datasource UIDs;
 - reads Grafana alerting state and creates bounded silences through fixed alerting API routes;
 - enforces local OAuth access tokens before MCP request handling; and
 - persists generic OAuth and OIDC state in PostgreSQL schema `mcp`.
 
-The [Grafana tool specifications](../grafana-query/README.md) own action inputs, routes, bounds, results, and errors. The [access document](access-authentication.md) owns authentication and authorization details.
+The [Grafana tool specifications](../grafana-query/README.md) and [Tekton tool specifications](../tekton/README.md) own implemented tool behavior. The [access document](access-authentication.md) owns authentication and authorization details.
 
 ## Component Status
 
@@ -48,6 +48,7 @@ The [Grafana tool specifications](../grafana-query/README.md) own action inputs,
 | Hosted OAuth issuer | Deployed to preview | Publish metadata, issue local access tokens, and manage durable OAuth client and token state; metadata is verified. |
 | Generic OIDC integration | Deployed, flow unverified | Use MCP-owned one-shot OIDC transactions and hosted continuation with Authentik. |
 | Grafana integration | Worktree implemented; deployment pending | Own fixed-destination reads and writes, action validation, response normalization, safe error translation, and bounded telemetry for datasource and alerting APIs. |
+| Tekton integration | Worktree implemented; deployment pending | Own PAC repository authority, fixed Forgejo and PAC access, Kubernetes run and task access, normalized results, and bounded mutations. |
 | PostgreSQL use | Deployed to preview | Store generic OAuth state and encrypted signing material through migrations V1-V3, with one-shot OIDC attempts added by V4. |
 | Wrapping-key use | Deployed to preview | Load the mounted keyring and protect persisted OAuth signing keys. |
 
@@ -58,8 +59,8 @@ The [Grafana tool specifications](../grafana-query/README.md) own action inputs,
 3. The service completes browser authentication and issues its own access token.
 4. The client sends the local access token to `/mcp`.
 5. The service validates the token and required `mcp:use` scope.
-6. The service validates the selected `grafana_query` or `grafana_exec` action arguments.
-7. The service contacts only the action's fixed Grafana route with its Editor service-account token.
+6. The service validates the selected query or exec action arguments.
+7. The service contacts only the action's fixed Grafana, Forgejo, PAC, or Kubernetes route with the integration-specific credential.
 8. The action returns a semantic `McpToolResult`.
 
 ## Trust Boundaries
@@ -67,7 +68,9 @@ The [Grafana tool specifications](../grafana-query/README.md) own action inputs,
 - Authentik authenticates a browser user. It does not issue tokens accepted by `/mcp`.
 - The local OAuth issuer authorizes MCP access.
 - The single `mcp:use` scope authorizes every read and silence-creation action; there is no narrower mutation scope.
+- The same scope authorizes every Tekton read and mutation. Every current MCP principal can dispatch, rerun, and cancel.
 - Grafana receives only server-originated requests with the service-account token.
+- Tekton access uses fixed Forgejo, PAC controller, and Kubernetes destinations. Callers do not control credentials or upstream routes.
 - Loki remains behind Grafana and has no direct service integration.
 - PostgreSQL and the wrapping-key file hold separate parts of durable OAuth protection.
 

@@ -2,7 +2,7 @@
 
 ## Scope
 
-The runtime emits correlated traces, metrics, JSON logs, and CPU profiles. The host instruments non-probe HTTP traffic and Grafana-upstream operations. Kuri generic MCP owns standard MCP request instrumentation.
+The runtime emits correlated traces, metrics, JSON logs, and CPU profiles. The host instruments non-probe HTTP traffic and Grafana-upstream operations. Kuri generic MCP owns standard MCP request instrumentation. Tekton actions currently receive host and generic MCP instrumentation; integration-specific upstream telemetry remains pending.
 
 ## Signal Paths
 
@@ -82,6 +82,10 @@ The agent does not add pod names, pod UIDs, user values, query text, or a second
 ## Data Safety
 
 Instrumentation excludes authorization headers, tokens, request bodies, query strings, LogQL, PromQL, TraceQL, profile selectors, alert matchers, silence comments, alert data, internal URLs, upstream errors, and upstream response bodies.
+
+Future Tekton integration-specific telemetry must use fixed action, destination, and outcome values. It must exclude repository file bodies, workflow parameters, Git references, task logs, Kubernetes objects, headers, internal routes, and secret values.
+
+Task-log results will redact MCP-held secrets before return. Telemetry will never record returned task-log content. Arbitrary workload secrets remain a residual confidentiality risk because the runtime cannot reliably recognize them.
 
 HTTP fallback routes collapse unknown identifiers. Semantic tool errors expose fixed safe text. Grafana-upstream metrics and spans use fixed datasource UIDs and bounded outcomes. The JSON target allowlist prevents permissive `RUST_LOG` directives from exposing dependency URL, body, or error events.
 
