@@ -1,15 +1,7 @@
-mod app;
-mod config;
-mod grafana;
-mod logql;
-mod mcp;
-mod oauth;
-mod observability;
-mod profiling;
-
 use std::{error::Error, sync::Arc, time::Duration};
 
 use ::mcp::server::BoxFuture;
+use homelab_mcp::{app, config, mcp, oauth, observability, profiling, services::Services};
 use tokio::{
     net::TcpListener,
     sync::watch,
@@ -27,12 +19,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let profiling = profiling::init(&telemetry_config)?;
     tracing::info!(listen.address = LISTEN_ADDR, "service startup started");
     let config = config::Config::from_env().map_err(std::io::Error::other)?;
+    let services =
+        Arc::new(Services::production(&config.integrations).map_err(std::io::Error::other)?);
     let runtime = Arc::new(
-        oauth::initialize(&config)
+        oauth::initialize(&config.database, &config.oidc, &config.oauth)
             .await
             .map_err(std::io::Error::other)?,
     );
-    let mcp = mcp::router(&config, &runtime.server).map_err(std::io::Error::other)?;
+    let mcp =
+        mcp::router(&config.oauth, services, &runtime.server).map_err(std::io::Error::other)?;
     let router = app::router(
         runtime.clone(),
         runtime.server.router(),

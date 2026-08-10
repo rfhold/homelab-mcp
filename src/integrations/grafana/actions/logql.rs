@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use super::{InvalidArguments, Mode};
+
 pub const DEFAULT_LIMIT: u16 = 1000;
 pub const MAX_LIMIT: u16 = 5000;
 
@@ -38,45 +40,30 @@ pub struct LogqlInput {
     pub limit: Option<u16>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Instant,
-    Range,
-}
-
-impl Mode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Instant => "instant",
-            Self::Range => "range",
-        }
-    }
-}
-
 pub struct Query {
-    pub query: String,
-    pub mode: Mode,
-    pub start: Option<DateTime<Utc>>,
-    pub end: Option<DateTime<Utc>>,
-    pub time: Option<DateTime<Utc>>,
-    pub direction: Option<Direction>,
-    pub limit: u16,
+    pub(crate) query: String,
+    pub(crate) mode: Mode,
+    pub(crate) start: Option<DateTime<Utc>>,
+    pub(crate) end: Option<DateTime<Utc>>,
+    pub(crate) time: Option<DateTime<Utc>>,
+    pub(crate) direction: Option<Direction>,
+    pub(crate) limit: u16,
 }
 
 impl LogqlInput {
-    pub fn validate(self) -> Result<Query, ()> {
+    pub fn validate(self) -> Result<Query, InvalidArguments> {
         if self.query.trim().is_empty() {
-            return Err(());
+            return Err(InvalidArguments);
         }
         let limit = self.limit.unwrap_or(DEFAULT_LIMIT);
         if !(1..=MAX_LIMIT).contains(&limit) {
-            return Err(());
+            return Err(InvalidArguments);
         }
         let parse = |value: Option<String>| {
             value
                 .map(|value| DateTime::parse_from_rfc3339(&value).map(|time| time.to_utc()))
                 .transpose()
-                .map_err(|_| ())
+                .map_err(|_| InvalidArguments)
         };
         let start = parse(self.start)?;
         let end = parse(self.end)?;
@@ -88,7 +75,7 @@ impl LogqlInput {
                     || start > end
                     || end.signed_duration_since(start) > chrono::Duration::hours(24)
                 {
-                    return Err(());
+                    return Err(InvalidArguments);
                 }
                 Ok(Query {
                     query: self.query,
@@ -102,7 +89,7 @@ impl LogqlInput {
             }
             (None, None) => {
                 if self.direction.is_some() {
-                    return Err(());
+                    return Err(InvalidArguments);
                 }
                 Ok(Query {
                     query: self.query,
@@ -114,7 +101,7 @@ impl LogqlInput {
                     limit,
                 })
             }
-            _ => Err(()),
+            _ => Err(InvalidArguments),
         }
     }
 }

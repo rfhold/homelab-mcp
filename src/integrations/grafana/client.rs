@@ -1,335 +1,29 @@
-use std::{
-    sync::{Arc, OnceLock},
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use opentelemetry::{KeyValue, global, trace::TraceContextExt as _};
+use opentelemetry::trace::TraceContextExt as _;
 use reqwest::{Client, Method, Response, StatusCode, Url, redirect::Policy};
-use schemars::JsonSchema;
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::Semaphore;
 use tracing::{Instrument as _, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
-use crate::{
-    config::Secret,
-    logql::{Mode, Query},
+use crate::config::Secret;
+
+use super::{
+    Error,
+    actions::{Mode, ProfilesQuery, PromqlQuery, Query, TraceqlQuery},
+    telemetry::{GrafanaMetricsGuard, request_outcome},
 };
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_URL_BYTES: usize = 8192;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RANGE: chrono::Duration = chrono::Duration::hours(24);
-const MAX_PROFILE_RANGE: chrono::Duration = chrono::Duration::hours(1);
-
-pub const DEFAULT_TRACE_LIMIT: u16 = 20;
-pub const MAX_TRACE_LIMIT: u16 = 100;
-pub const DEFAULT_PROFILE_TYPE: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
-pub const DEFAULT_MAX_NODES: u16 = 256;
-pub const MAX_MAX_NODES: u16 = 1000;
-pub const MAX_PROMQL_POINTS: u64 = 11_000;
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PromqlInput {
-    /// PromQL query to execute.
-    pub query: String,
-    /// Inclusive range start as an RFC3339 timestamp.
-    pub start: Option<String>,
-    /// Inclusive range end as an RFC3339 timestamp.
-    pub end: Option<String>,
-    /// Positive Prometheus duration used as the range query step.
-    pub step: Option<String>,
-    /// Instant query time as an RFC3339 timestamp.
-    pub time: Option<String>,
-}
-
-pub struct PromqlQuery {
-    query: String,
-    mode: Mode,
-    start: Option<DateTime<Utc>>,
-    end: Option<DateTime<Utc>>,
-    step: Option<String>,
-    time: Option<DateTime<Utc>>,
-}
-
-impl PromqlInput {
-    pub fn validate(self) -> Result<PromqlQuery, ()> {
-        if self.query.trim().is_empty() {
-            return Err(());
-        }
-        let start = parse_timestamp(self.start)?;
-        let end = parse_timestamp(self.end)?;
-        let time = parse_timestamp(self.time)?;
-        match (start, end, self.step) {
-            (Some(start), Some(end), Some(step)) => {
-                let step_nanos = prometheus_duration_nanos(&step).ok_or(())?;
-                let range = valid_range(start, end, MAX_RANGE)?;
-                let range_nanos =
-                    u64::try_from(range.num_nanoseconds().ok_or(())?).map_err(|_| ())?;
-                if range_nanos / step_nanos + 1 > MAX_PROMQL_POINTS || time.is_some() {
-                    return Err(());
-                }
-                Ok(PromqlQuery {
-                    query: self.query,
-                    mode: Mode::Range,
-                    start: Some(start),
-                    end: Some(end),
-                    step: Some(step),
-                    time: None,
-                })
-            }
-            (None, None, None) => Ok(PromqlQuery {
-                query: self.query,
-                mode: Mode::Instant,
-                start: None,
-                end: None,
-                step: None,
-                time,
-            }),
-            _ => Err(()),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TraceqlInput {
-    /// TraceQL query to execute.
-    pub query: String,
-    /// Inclusive range start as an RFC3339 timestamp.
-    pub start: Option<String>,
-    /// Inclusive range end as an RFC3339 timestamp.
-    pub end: Option<String>,
-    /// Maximum returned traces, from 1 through 100.
-    pub limit: Option<u16>,
-}
-
-pub struct TraceqlQuery {
-    query: String,
-    start: Option<DateTime<Utc>>,
-    end: Option<DateTime<Utc>>,
-    limit: u16,
-}
-
-impl TraceqlInput {
-    pub fn validate(self) -> Result<TraceqlQuery, ()> {
-        if self.query.trim().is_empty() {
-            return Err(());
-        }
-        let limit = self.limit.unwrap_or(DEFAULT_TRACE_LIMIT);
-        if !(1..=MAX_TRACE_LIMIT).contains(&limit) {
-            return Err(());
-        }
-        let start = parse_timestamp(self.start)?;
-        let end = parse_timestamp(self.end)?;
-        match (start, end) {
-            (Some(start), Some(end)) => {
-                valid_range(start, end, MAX_RANGE)?;
-                Ok(TraceqlQuery {
-                    query: self.query,
-                    start: Some(start),
-                    end: Some(end),
-                    limit,
-                })
-            }
-            (None, None) => Ok(TraceqlQuery {
-                query: self.query,
-                start: None,
-                end: None,
-                limit,
-            }),
-            _ => Err(()),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ProfilesInput {
-    /// Pyroscope label selector to query.
-    pub selector: String,
-    /// Inclusive range start as an RFC3339 timestamp.
-    pub start: String,
-    /// Inclusive range end as an RFC3339 timestamp.
-    pub end: String,
-    /// Pyroscope profile type, defaulting to process CPU.
-    pub profile_type: Option<String>,
-    /// Maximum returned flame graph nodes, from 1 through 1000.
-    pub max_nodes: Option<u16>,
-}
-
-pub struct ProfilesQuery {
-    selector: String,
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    profile_type: String,
-    max_nodes: u16,
-}
-
-impl ProfilesInput {
-    pub fn validate(self) -> Result<ProfilesQuery, ()> {
-        if self.selector.trim().is_empty() {
-            return Err(());
-        }
-        let profile_type = self
-            .profile_type
-            .unwrap_or_else(|| DEFAULT_PROFILE_TYPE.to_owned());
-        if profile_type.trim().is_empty() {
-            return Err(());
-        }
-        let max_nodes = self.max_nodes.unwrap_or(DEFAULT_MAX_NODES);
-        if !(1..=MAX_MAX_NODES).contains(&max_nodes) {
-            return Err(());
-        }
-        let start = DateTime::parse_from_rfc3339(&self.start)
-            .map_err(|_| ())?
-            .to_utc();
-        let end = DateTime::parse_from_rfc3339(&self.end)
-            .map_err(|_| ())?
-            .to_utc();
-        valid_range(start, end, MAX_PROFILE_RANGE)?;
-        Ok(ProfilesQuery {
-            selector: self.selector,
-            start,
-            end,
-            profile_type,
-            max_nodes,
-        })
-    }
-}
-
 struct UpstreamRequest {
     method: Method,
     path: &'static str,
     parameters: Vec<(&'static str, String)>,
     body: Option<Value>,
-}
-
-struct GrafanaMetrics {
-    requests: opentelemetry::metrics::Counter<u64>,
-    duration: opentelemetry::metrics::Histogram<f64>,
-    in_flight: opentelemetry::metrics::UpDownCounter<i64>,
-}
-
-fn grafana_metrics() -> &'static GrafanaMetrics {
-    static METRICS: OnceLock<GrafanaMetrics> = OnceLock::new();
-    METRICS.get_or_init(|| {
-        let meter = global::meter("homelab_mcp.grafana");
-        GrafanaMetrics {
-            requests: meter
-                .u64_counter("homelab_mcp.grafana.upstream.requests")
-                .with_description("Completed Grafana upstream request attempts")
-                .build(),
-            duration: meter
-                .f64_histogram("homelab_mcp.grafana.upstream.duration")
-                .with_unit("s")
-                .with_description("Grafana upstream request attempt duration")
-                .build(),
-            in_flight: meter
-                .i64_up_down_counter("homelab_mcp.grafana.upstream.in_flight")
-                .with_description("Active Grafana upstream request attempts")
-                .build(),
-        }
-    })
-}
-
-struct GrafanaMetricsGuard {
-    action: &'static str,
-    mode: &'static str,
-    datasource_uid: &'static str,
-    started: Instant,
-    finished: bool,
-}
-
-impl GrafanaMetricsGuard {
-    fn new(action: &'static str, mode: &'static str, datasource_uid: &'static str) -> Self {
-        let guard = Self {
-            action: metric_action(action),
-            mode: metric_mode(mode),
-            datasource_uid: metric_datasource_uid(datasource_uid),
-            started: Instant::now(),
-            finished: false,
-        };
-        grafana_metrics().in_flight.add(1, &guard.base_attributes());
-        guard
-    }
-
-    fn base_attributes(&self) -> [KeyValue; 3] {
-        [
-            KeyValue::new("action", self.action),
-            KeyValue::new("mode", self.mode),
-            KeyValue::new("datasource_uid", self.datasource_uid),
-        ]
-    }
-
-    fn finish(&mut self, outcome: &'static str) {
-        if self.finished {
-            return;
-        }
-        let base_attributes = self.base_attributes();
-        let mut completed_attributes = base_attributes.to_vec();
-        completed_attributes.push(KeyValue::new("outcome", metric_outcome(outcome)));
-        let metrics = grafana_metrics();
-        metrics.in_flight.add(-1, &base_attributes);
-        metrics.requests.add(1, &completed_attributes);
-        metrics
-            .duration
-            .record(self.started.elapsed().as_secs_f64(), &completed_attributes);
-        self.finished = true;
-    }
-}
-
-fn metric_action(action: &'static str) -> &'static str {
-    match action {
-        "logql" => "logql",
-        "promql" => "promql",
-        "traceql" => "traceql",
-        "profiles" => "profiles",
-        _ => "unknown",
-    }
-}
-
-fn metric_mode(mode: &'static str) -> &'static str {
-    match mode {
-        "instant" => "instant",
-        "range" => "range",
-        "search" => "search",
-        _ => "unknown",
-    }
-}
-
-fn metric_datasource_uid(datasource_uid: &'static str) -> &'static str {
-    match datasource_uid {
-        "loki" => "loki",
-        "mimir" => "mimir",
-        "tempo" => "tempo",
-        "pyroscope" => "pyroscope",
-        _ => "unknown",
-    }
-}
-
-fn metric_outcome(outcome: &'static str) -> &'static str {
-    match outcome {
-        "success" => "success",
-        "invalid_arguments" => "invalid_arguments",
-        "capacity_exhausted" => "capacity_exhausted",
-        "timeout" => "timeout",
-        "unauthorized" => "unauthorized",
-        "query_rejected" => "query_rejected",
-        "upstream_unavailable" => "upstream_unavailable",
-        "invalid_response" => "invalid_response",
-        "cancelled" => "cancelled",
-        _ => "upstream_unavailable",
-    }
-}
-
-impl Drop for GrafanaMetricsGuard {
-    fn drop(&mut self) {
-        self.finish("cancelled");
-    }
 }
 
 #[derive(Clone)]
@@ -339,17 +33,6 @@ pub struct GrafanaClient {
     client: Client,
     permits: Arc<Semaphore>,
     timeout: Duration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
-    InvalidArguments,
-    CapacityExhausted,
-    Timeout,
-    Unauthorized,
-    QueryRejected,
-    UpstreamUnavailable,
-    InvalidResponse,
 }
 
 impl GrafanaClient {
@@ -507,6 +190,7 @@ impl GrafanaClient {
         let parent_context = parent.context();
         let parent_context_valid = parent_context.span().span_context().is_valid();
         let span = tracing::info_span!(
+            target: "homelab_mcp::grafana",
             "grafana.query",
             grafana.action = action,
             grafana.mode = mode,
@@ -567,19 +251,6 @@ impl GrafanaClient {
     }
 }
 
-fn request_outcome(result: &Result<Value, Error>) -> &'static str {
-    match result {
-        Ok(_) => "success",
-        Err(Error::InvalidArguments) => "invalid_arguments",
-        Err(Error::CapacityExhausted) => "capacity_exhausted",
-        Err(Error::Timeout) => "timeout",
-        Err(Error::Unauthorized) => "unauthorized",
-        Err(Error::QueryRejected) => "query_rejected",
-        Err(Error::UpstreamUnavailable) => "upstream_unavailable",
-        Err(Error::InvalidResponse) => "invalid_response",
-    }
-}
-
 async fn read_json(mut response: Response) -> Result<Value, Error> {
     if response
         .content_length()
@@ -599,63 +270,6 @@ async fn read_json(mut response: Response) -> Result<Value, Error> {
         body.extend_from_slice(&chunk);
     }
     serde_json::from_slice(&body).map_err(|_| Error::InvalidResponse)
-}
-
-fn parse_timestamp(value: Option<String>) -> Result<Option<DateTime<Utc>>, ()> {
-    value
-        .map(|value| DateTime::parse_from_rfc3339(&value).map(|time| time.to_utc()))
-        .transpose()
-        .map_err(|_| ())
-}
-
-fn valid_range(
-    start: DateTime<Utc>,
-    end: DateTime<Utc>,
-    maximum: chrono::Duration,
-) -> Result<chrono::Duration, ()> {
-    let range = end.signed_duration_since(start);
-    if range < chrono::Duration::zero() || range > maximum {
-        return Err(());
-    }
-    Ok(range)
-}
-
-fn prometheus_duration_nanos(value: &str) -> Option<u64> {
-    let bytes = value.as_bytes();
-    let mut offset = 0;
-    let mut total = 0_u64;
-    let mut previous_rank = u8::MAX;
-    while offset < bytes.len() {
-        let digits_start = offset;
-        while offset < bytes.len() && bytes[offset].is_ascii_digit() {
-            offset += 1;
-        }
-        if digits_start == offset {
-            return None;
-        }
-        let amount = value[digits_start..offset].parse::<u64>().ok()?;
-        let (unit_nanos, rank, unit_length) = if value[offset..].starts_with("ms") {
-            (1_000_000_u64, 0, 2)
-        } else {
-            let unit = *bytes.get(offset)?;
-            match unit {
-                b's' => (1_000_000_000, 1, 1),
-                b'm' => (60 * 1_000_000_000, 2, 1),
-                b'h' => (60 * 60 * 1_000_000_000, 3, 1),
-                b'd' => (24 * 60 * 60 * 1_000_000_000, 4, 1),
-                b'w' => (7 * 24 * 60 * 60 * 1_000_000_000, 5, 1),
-                b'y' => (365 * 24 * 60 * 60 * 1_000_000_000, 6, 1),
-                _ => return None,
-            }
-        };
-        if rank >= previous_rank {
-            return None;
-        }
-        previous_rank = rank;
-        offset += unit_length;
-        total = total.checked_add(amount.checked_mul(unit_nanos)?)?;
-    }
-    (total > 0).then_some(total)
 }
 
 fn timestamp_parameter(timestamp: DateTime<Utc>) -> String {
@@ -947,7 +561,10 @@ mod tests {
     };
     use tokio::{net::TcpListener, task::JoinHandle};
 
-    use crate::logql::{Direction, LogqlInput};
+    use crate::integrations::grafana::actions::{
+        DEFAULT_MAX_NODES, DEFAULT_PROFILE_TYPE, Direction, LogqlInput, ProfilesInput, PromqlInput,
+        TraceqlInput,
+    };
 
     use super::*;
 
@@ -1072,120 +689,6 @@ mod tests {
             profile_type: None,
             max_nodes: None,
         }
-    }
-
-    #[test]
-    fn validates_promql_modes_durations_ranges_and_point_bound() {
-        let instant = promql_input().validate().unwrap();
-        assert_eq!(instant.mode, Mode::Instant);
-
-        let mut range = promql_input();
-        range.start = Some("2026-08-09T10:00:00Z".to_owned());
-        range.end = Some("2026-08-09T11:00:00Z".to_owned());
-        range.step = Some("1m".to_owned());
-        assert_eq!(range.validate().unwrap().mode, Mode::Range);
-        assert_eq!(
-            prometheus_duration_nanos("1h30m5s"),
-            Some(5_405_000_000_000)
-        );
-
-        let mut zero_step = promql_input();
-        zero_step.start = Some("2026-08-09T10:00:00Z".to_owned());
-        zero_step.end = Some("2026-08-09T11:00:00Z".to_owned());
-        zero_step.step = Some("0s".to_owned());
-        assert!(zero_step.validate().is_err());
-
-        let mut too_many_points = promql_input();
-        too_many_points.start = Some("2026-08-09T10:00:00Z".to_owned());
-        too_many_points.end = Some("2026-08-09T10:00:11Z".to_owned());
-        too_many_points.step = Some("1ms".to_owned());
-        assert!(too_many_points.validate().is_err());
-
-        let mut exactly_max_points = promql_input();
-        exactly_max_points.start = Some("2026-08-09T10:00:00Z".to_owned());
-        exactly_max_points.end = Some("2026-08-09T10:00:10.999Z".to_owned());
-        exactly_max_points.step = Some("1ms".to_owned());
-        assert!(exactly_max_points.validate().is_ok());
-
-        let mut too_long = promql_input();
-        too_long.start = Some("2026-08-09T10:00:00Z".to_owned());
-        too_long.end = Some("2026-08-10T10:00:00.001Z".to_owned());
-        too_long.step = Some("1h".to_owned());
-        assert!(too_long.validate().is_err());
-
-        let mut incomplete = promql_input();
-        incomplete.start = Some("2026-08-09T10:00:00Z".to_owned());
-        assert!(incomplete.validate().is_err());
-        assert!(prometheus_duration_nanos("1m1h").is_none());
-        assert!(prometheus_duration_nanos("1").is_none());
-    }
-
-    #[test]
-    fn validates_traceql_and_profile_defaults_and_bounds() {
-        let trace = traceql_input().validate().unwrap();
-        assert_eq!(trace.limit, DEFAULT_TRACE_LIMIT);
-        let mut trace_range = traceql_input();
-        trace_range.start = Some("2026-08-09T10:00:00Z".to_owned());
-        trace_range.end = Some("2026-08-10T10:00:00Z".to_owned());
-        trace_range.limit = Some(MAX_TRACE_LIMIT);
-        assert!(trace_range.validate().is_ok());
-        let mut invalid_trace = traceql_input();
-        invalid_trace.limit = Some(MAX_TRACE_LIMIT + 1);
-        assert!(invalid_trace.validate().is_err());
-        let mut incomplete_trace = traceql_input();
-        incomplete_trace.start = Some("2026-08-09T10:00:00Z".to_owned());
-        assert!(incomplete_trace.validate().is_err());
-
-        let profile = profiles_input().validate().unwrap();
-        assert_eq!(profile.profile_type, DEFAULT_PROFILE_TYPE);
-        assert_eq!(profile.max_nodes, DEFAULT_MAX_NODES);
-        let mut invalid_profile = profiles_input();
-        invalid_profile.end = "2026-08-09T11:00:00.001Z".to_owned();
-        assert!(invalid_profile.validate().is_err());
-        let mut invalid_nodes = profiles_input();
-        invalid_nodes.max_nodes = Some(MAX_MAX_NODES + 1);
-        assert!(invalid_nodes.validate().is_err());
-        let mut empty_selector = profiles_input();
-        empty_selector.selector = " ".to_owned();
-        assert!(empty_selector.validate().is_err());
-    }
-
-    #[test]
-    fn grafana_metric_labels_outcomes_and_guard_are_bounded() {
-        assert_eq!(metric_action("profiles"), "profiles");
-        assert_eq!(metric_action("raw-query"), "unknown");
-        assert_eq!(metric_mode("instant"), "instant");
-        assert_eq!(metric_mode("user-mode"), "unknown");
-        assert_eq!(metric_datasource_uid("tempo"), "tempo");
-        assert_eq!(metric_datasource_uid("user-uid"), "unknown");
-        assert_eq!(metric_outcome("timeout"), "timeout");
-        assert_eq!(metric_outcome("raw-error"), "upstream_unavailable");
-
-        for (result, expected) in [
-            (Ok(json!({})), "success"),
-            (Err(Error::InvalidArguments), "invalid_arguments"),
-            (Err(Error::CapacityExhausted), "capacity_exhausted"),
-            (Err(Error::Timeout), "timeout"),
-            (Err(Error::Unauthorized), "unauthorized"),
-            (Err(Error::QueryRejected), "query_rejected"),
-            (Err(Error::UpstreamUnavailable), "upstream_unavailable"),
-            (Err(Error::InvalidResponse), "invalid_response"),
-        ] {
-            assert_eq!(request_outcome(&result), expected);
-        }
-
-        let mut guard = GrafanaMetricsGuard::new("not-an-action", "not-a-mode", "not-a-uid");
-        assert_eq!(guard.action, "unknown");
-        assert_eq!(guard.mode, "unknown");
-        assert_eq!(guard.datasource_uid, "unknown");
-        assert!(!guard.finished);
-        guard.finish("success");
-        assert!(guard.finished);
-        guard.finish("timeout");
-        assert!(guard.finished);
-
-        // Dropping an unfinished guard exercises the cancellation completion path.
-        drop(GrafanaMetricsGuard::new("logql", "instant", "loki"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# Grafana Exec Shared Contract
+# Grafana Query Shared Contract
 
 ## Status
 
@@ -6,7 +6,7 @@ This document defines implemented worktree behavior. Local tests cover the gener
 
 ## Tool Surface
 
-`#[mcp::progressive_server]` exposes one MCP tool named `grafana_exec`. Its annotations declare read-only, non-destructive, idempotent, open-world behavior.
+`#[mcp::progressive_server]` exposes one MCP tool named `grafana_query`. Its annotations declare read-only, non-destructive, idempotent, open-world behavior.
 
 The generated top-level schema accepts:
 

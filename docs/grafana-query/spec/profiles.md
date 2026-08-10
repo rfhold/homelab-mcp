@@ -1,6 +1,6 @@
 # Profiles Action Specification
 
-The `profiles` action merges stacktraces from fixed Pyroscope datasource UID `pyroscope`. The [shared contract](common.md) defines tool behavior, transport limits, and common errors.
+The read-only `profiles` action merges stacktraces from fixed Pyroscope datasource UID `pyroscope`. The [shared contract](common.md) defines tool behavior, transport limits, and common errors.
 
 ## Input
 

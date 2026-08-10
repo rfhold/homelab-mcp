@@ -13,33 +13,33 @@ use mcp::{
 use serde_json::json;
 
 use crate::{
-    config::Config,
-    grafana::{Error as GrafanaError, GrafanaClient, ProfilesInput, PromqlInput, TraceqlInput},
-    logql::LogqlInput,
+    config::OAuthConfig,
+    integrations::grafana::{
+        Error as GrafanaError,
+        actions::{LogqlInput, ProfilesInput, PromqlInput, TraceqlInput},
+    },
+    services::Services,
 };
 
 #[cfg(test)]
-const TOOL_NAME: &str = "grafana_exec";
+const TOOL_NAME: &str = "grafana_query";
 
 #[derive(Clone)]
 pub struct HomelabMcp {
-    grafana: GrafanaClient,
+    services: Arc<Services>,
 }
 
-pub fn router(config: &Config, oauth: &OAuthAuthorizationServer) -> Result<Router, String> {
-    let handler = Arc::new(HomelabMcp {
-        grafana: GrafanaClient::production(
-            config.grafana_url.clone(),
-            config.grafana_token.clone(),
-        )?,
-    });
-    let required_scope = config.oauth_required_scope.clone();
-    let metadata = McpProtectedResourceMetadata::new(
-        config.oauth_resource.clone(),
-        [config.oauth_issuer.clone()],
-    )
-    .with_scopes([required_scope.clone()])
-    .with_resource_name("Homelab MCP");
+pub fn router(
+    config: &OAuthConfig,
+    services: Arc<Services>,
+    oauth: &OAuthAuthorizationServer,
+) -> Result<Router, String> {
+    let handler = Arc::new(HomelabMcp { services });
+    let required_scope = config.required_scope.clone();
+    let metadata =
+        McpProtectedResourceMetadata::new(config.resource.clone(), [config.issuer.clone()])
+            .with_scopes([required_scope.clone()])
+            .with_resource_name("Homelab MCP");
     let hosted = oauth.clone();
     let authorization = StreamableHttpAuthorization::hosted(metadata, move |token, context| {
         hosted.authorize_token(token, context)
@@ -57,7 +57,7 @@ pub fn router(config: &Config, oauth: &OAuthAuthorizationServer) -> Result<Route
     version = "0.1.0",
     description = "Authenticated homelab observability tools.",
     tool(
-        name = "grafana_exec",
+        name = "grafana_query",
         description = "Execute bounded, read-only Grafana queries.",
         annotations = json!({
             "readOnlyHint": true,
@@ -72,7 +72,7 @@ impl HomelabMcp {
     ///
     /// Use instant mode without start/end, or range mode with both endpoints.
     /// Log streams are normalized and limited to the requested number of lines.
-    #[action(tool = "grafana_exec", name = "logql")]
+    #[action(tool = "grafana_query", name = "logql")]
     async fn logql(
         &self,
         input: LogqlInput,
@@ -80,10 +80,10 @@ impl HomelabMcp {
     ) -> ServerResult<McpToolResult> {
         let query = match input.validate() {
             Ok(query) => query,
-            Err(()) => return Ok(tool_error("LogQL", GrafanaError::InvalidArguments)),
+            Err(_) => return Ok(tool_error("LogQL", GrafanaError::InvalidArguments)),
         };
         let result = tokio::select! {
-            result = self.grafana.execute(&query) => result,
+            result = self.services.grafana.execute(&query) => result,
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
@@ -96,7 +96,7 @@ impl HomelabMcp {
     ///
     /// Range mode requires start, end, and a positive Prometheus duration step.
     /// Ranges are limited to 24 hours and 11,000 points.
-    #[action(tool = "grafana_exec", name = "promql")]
+    #[action(tool = "grafana_query", name = "promql")]
     async fn promql(
         &self,
         input: PromqlInput,
@@ -104,10 +104,10 @@ impl HomelabMcp {
     ) -> ServerResult<McpToolResult> {
         let query = match input.validate() {
             Ok(query) => query,
-            Err(()) => return Ok(tool_error("PromQL", GrafanaError::InvalidArguments)),
+            Err(_) => return Ok(tool_error("PromQL", GrafanaError::InvalidArguments)),
         };
         let result = tokio::select! {
-            result = self.grafana.execute_promql(&query) => result,
+            result = self.services.grafana.execute_promql(&query) => result,
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
@@ -120,7 +120,7 @@ impl HomelabMcp {
     ///
     /// Optional start and end timestamps must appear together. Searches are
     /// limited to 24 hours and at most 100 returned traces.
-    #[action(tool = "grafana_exec", name = "traceql")]
+    #[action(tool = "grafana_query", name = "traceql")]
     async fn traceql(
         &self,
         input: TraceqlInput,
@@ -128,10 +128,10 @@ impl HomelabMcp {
     ) -> ServerResult<McpToolResult> {
         let query = match input.validate() {
             Ok(query) => query,
-            Err(()) => return Ok(tool_error("TraceQL", GrafanaError::InvalidArguments)),
+            Err(_) => return Ok(tool_error("TraceQL", GrafanaError::InvalidArguments)),
         };
         let result = tokio::select! {
-            result = self.grafana.execute_traceql(&query) => result,
+            result = self.services.grafana.execute_traceql(&query) => result,
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
@@ -144,7 +144,7 @@ impl HomelabMcp {
     ///
     /// Start and end are required RFC3339 timestamps. Profile ranges are
     /// limited to one hour and at most 1,000 flame graph nodes.
-    #[action(tool = "grafana_exec", name = "profiles")]
+    #[action(tool = "grafana_query", name = "profiles")]
     async fn profiles(
         &self,
         input: ProfilesInput,
@@ -152,10 +152,10 @@ impl HomelabMcp {
     ) -> ServerResult<McpToolResult> {
         let query = match input.validate() {
             Ok(query) => query,
-            Err(()) => return Ok(tool_error("profile", GrafanaError::InvalidArguments)),
+            Err(_) => return Ok(tool_error("profile", GrafanaError::InvalidArguments)),
         };
         let result = tokio::select! {
-            result = self.grafana.execute_profiles(&query) => result,
+            result = self.services.grafana.execute_profiles(&query) => result,
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
@@ -176,44 +176,14 @@ fn query_result(output: serde_json::Value) -> McpToolResult {
 }
 
 fn tool_error(query_name: &str, error: GrafanaError) -> McpToolResult {
-    let invalid_arguments = format!("The {query_name} arguments are invalid.");
-    let query_rejected = format!("Grafana rejected the {query_name} query.");
-    let (code, message, retryable) = match error {
-        GrafanaError::InvalidArguments => ("invalid_arguments", invalid_arguments.as_str(), false),
-        GrafanaError::CapacityExhausted => (
-            "capacity_exhausted",
-            "Grafana query capacity is currently exhausted.",
-            true,
-        ),
-        GrafanaError::Timeout => ("timeout", "The Grafana query timed out.", true),
-        GrafanaError::Unauthorized => (
-            "grafana_unauthorized",
-            "Grafana rejected the service credentials.",
-            false,
-        ),
-        GrafanaError::QueryRejected => ("query_rejected", query_rejected.as_str(), false),
-        GrafanaError::UpstreamUnavailable => (
-            "upstream_unavailable",
-            "Grafana is currently unavailable.",
-            true,
-        ),
-        GrafanaError::InvalidResponse => (
-            "invalid_response",
-            "Grafana returned an invalid response.",
-            false,
-        ),
-    };
-    McpToolResult::new(json!({
-        "content": [{"type":"text","text":message}],
-        "structuredContent":{"error":{"code":code,"message":message,"retryable":retryable}},
-        "isError": true
-    }))
+    error.into_tool_error(query_name).into_mcp_result()
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
 
+    use crate::integrations::grafana::GrafanaClient;
     use axum::{Json, Router, routing::get};
     use mcp::{
         McpPrincipalId,
@@ -256,10 +226,10 @@ mod tests {
         );
         let (origin, task) = serve(grafana).await;
         let handler = Arc::new(HomelabMcp {
-            grafana: GrafanaClient::for_test(
+            services: Arc::new(Services::new(GrafanaClient::for_test(
                 url::Url::parse(&format!("{origin}/")).unwrap(),
                 std::time::Duration::from_secs(1),
-            ),
+            ))),
         });
         (handler, task)
     }

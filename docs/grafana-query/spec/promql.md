@@ -1,6 +1,6 @@
 # PromQL Action Specification
 
-The `promql` action executes Prometheus-compatible queries against fixed Mimir datasource UID `mimir`. The [shared contract](common.md) defines tool behavior, transport limits, and common errors.
+The read-only `promql` action executes Prometheus-compatible queries against fixed Mimir datasource UID `mimir`. The [shared contract](common.md) defines tool behavior, transport limits, and common errors.
 
 ## Input
 

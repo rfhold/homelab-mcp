@@ -2,19 +2,21 @@
 
 ## Status
 
-The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, and Grafana LogQL. Its 25 Rust tests pass against the exact reviewed Kuri Git pin.
+The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, and four bounded Grafana query actions.
 
 The container and pipeline declarations can build the runtime, but it has not been deployed. Preview still runs the prior health-only image, and production remains excluded.
 
 ## Purpose
 
-`homelab-mcp` exposes bounded Grafana LogQL access through MCP. It does not expose Grafana credentials or direct Loki access to clients.
+`homelab-mcp` exposes bounded homelab integrations through MCP. Grafana query access is the first integration; the service does not expose Grafana credentials or direct datasource access to clients.
 
 ## Service Boundary
 
-### Working-Tree Runtime
+### Runtime
 
-`src/main.rs` starts a Rust 1.96, edition 2024 Axum process. It loads configuration, connects to PostgreSQL, initializes hosted OAuth, creates the MCP/Grafana handler, and binds `0.0.0.0:14333`.
+`src/main.rs` is the composition root for a Rust 1.96, edition 2024 Axum process. It loads concern-specific configuration, builds the concrete `Services` collection, initializes hosted OAuth, creates the MCP handler, and binds `0.0.0.0:14333`.
+
+`src/lib.rs` exposes the application modules to the binary and future integration tests. `src/services.rs` owns configured integration services. Each integration owns its client lifecycle, actions, private errors, telemetry, and upstream translation under `src/integrations/`; MCP handlers depend on `Services`, not third-party clients or application configuration.
 
 `GET /health` returns unconditional process health. `GET /ready` performs bounded live PostgreSQL and signing-key-readiness checks. It does not probe Authentik or Grafana.
 
@@ -22,17 +24,17 @@ The router merges generic OAuth and OIDC endpoints with authenticated stateless 
 
 ### MCP Service
 
-The working-tree service:
+The current worktree service:
 
 - uses Kuri's generic private `mcp` crate at a reviewed immutable Git revision;
 - serves MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
-- uses `#[mcp::progressive_server]` to generate one read-only progressive tool, `grafana_exec`;
-- exposes one domain action, `logql`;
-- queries Grafana's HTTP API through the fixed datasource UID `loki`;
+- uses `#[mcp::progressive_server]` to generate one read-only progressive tool, `grafana_query`;
+- exposes `logql`, `promql`, `traceql`, and `profiles` actions;
+- queries Grafana's HTTP API through fixed Loki, Mimir, Tempo, and Pyroscope datasource UIDs;
 - enforces local OAuth access tokens before MCP request handling; and
 - persists generic OAuth and OIDC state in PostgreSQL schema `mcp`.
 
-The [LogQL specification](../grafana-exec/spec/logql.md) owns query bounds and results. The [access document](access-authentication.md) owns authentication and authorization details.
+The [Grafana Query specifications](../grafana-query/README.md) own query bounds and results. The [access document](access-authentication.md) owns authentication and authorization details.
 
 ## Component Status
 
@@ -44,7 +46,7 @@ The [LogQL specification](../grafana-exec/spec/logql.md) owns query bounds and r
 | MCP endpoint | Implemented locally | Negotiate stateless Streamable HTTP and dispatch authenticated tool calls. |
 | Hosted OAuth issuer | Implemented locally | Issue local access tokens and manage durable OAuth client and token state. |
 | Generic OIDC integration | Implemented locally | Use MCP-owned one-shot OIDC transactions and hosted continuation with Authentik. |
-| Grafana adapter | Implemented locally | Send bounded instant or range queries through Grafana's Loki datasource proxy. |
+| Grafana integration | Worktree implemented; deployment pending | Own fixed-destination clients, action validation, response normalization, safe error translation, and bounded telemetry for four datasource families. |
 | PostgreSQL use | Implemented locally | Store generic OAuth state and encrypted signing material through migrations V1-V3, with one-shot OIDC attempts added by V4. |
 | Wrapping-key use | Implemented locally | Load the mounted keyring and protect persisted OAuth signing keys. |
 
@@ -55,7 +57,7 @@ The [LogQL specification](../grafana-exec/spec/logql.md) owns query bounds and r
 3. The service completes browser authentication and issues its own access token.
 4. The client sends the local access token to `/mcp`.
 5. The service validates the token and required `mcp:use` scope.
-6. The service validates the `grafana_exec` and `logql` arguments.
+6. The service validates the `grafana_query` action arguments.
 7. The service queries Grafana with its Viewer service-account token.
 8. The action returns a semantic `McpToolResult`.
 

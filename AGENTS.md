@@ -2,7 +2,7 @@
 
 | Path | Info |
 | --- | --- |
-| [src/](src/) | Rust 1.96 hosted OAuth, generic OIDC resource-owner integration, MCP server, and bounded Grafana LogQL adapter. |
+| [src/](src/) | Rust 1.96 application composition, hosted OAuth, MCP server, shared services, and integration-owned adapters. |
 | [Dockerfile](Dockerfile) | Multi-stage Rust build and non-root Debian runtime image. |
 | [infra/pulumi/](infra/pulumi/) | Preview and production deployment declarations plus mock tests. |
 | [.tekton/](.tekton/) | Main-branch preview build and deployment pipeline; no release pipeline exists. |

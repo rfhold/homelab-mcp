@@ -15,7 +15,10 @@ use mcp::{
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
-use crate::{app::ReadinessCheck, config::Config};
+use crate::{
+    app::ReadinessCheck,
+    config::{DatabaseConfig, OAuthConfig, OidcConfig},
+};
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -25,10 +28,14 @@ pub struct OAuthRuntime {
     pool: PgPool,
 }
 
-pub async fn initialize(config: &Config) -> Result<OAuthRuntime, String> {
+pub async fn initialize(
+    database: &DatabaseConfig,
+    oidc_config: &OidcConfig,
+    oauth: &OAuthConfig,
+) -> Result<OAuthRuntime, String> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
-        .connect(&config.database_url)
+        .connect(&database.url)
         .await
         .map_err(|_| "failed to connect to PostgreSQL".to_owned())?;
     let store = Arc::new(
@@ -41,16 +48,18 @@ pub async fn initialize(config: &Config) -> Result<OAuthRuntime, String> {
             .await
             .map_err(|_| "failed to initialize OIDC persistence".to_owned())?,
     );
-    let keyring = config.load_keyring()?;
+    let keyring = oauth.load_keyring()?;
     let entropy: Arc<dyn McpOAuthEntropy> = Arc::new(SystemEntropy);
     let oidc_config = OidcResourceOwnerConfig::new(
-        config.oidc_issuer.clone(),
-        config.oidc_client_id.clone(),
-        Some(McpOAuthSecret::new(config.oidc_client_secret.clone())),
-        &config.oidc_redirect_uri,
-        format!("{}/authorize", config.oauth_issuer.trim_end_matches('/')),
-        config.oidc_scopes.clone(),
-        config.code_ttl.min(Duration::from_secs(10 * 60)),
+        oidc_config.issuer.clone(),
+        oidc_config.client_id.clone(),
+        Some(McpOAuthSecret::new(
+            oidc_config.client_secret.expose().to_owned(),
+        )),
+        &oidc_config.redirect_uri,
+        format!("{}/authorize", oauth.issuer.trim_end_matches('/')),
+        oidc_config.scopes.clone(),
+        oauth.code_ttl.min(Duration::from_secs(10 * 60)),
         OidcEndpointPolicy::HttpsOnly,
     )
     .map_err(|_| "invalid OIDC resource-owner configuration".to_owned())?;
@@ -68,26 +77,24 @@ pub async fn initialize(config: &Config) -> Result<OAuthRuntime, String> {
     .await
     .map_err(|_| "failed to initialize OIDC resource-owner authentication".to_owned())?;
     let mut policy = OAuthAuthorizationServerConfig::new(
-        config.oauth_issuer.clone(),
+        oauth.issuer.clone(),
         vec![OAuthResource {
-            resource: config.oauth_resource.clone(),
-            scopes: vec![config.oauth_required_scope.clone()],
+            resource: oauth.resource.clone(),
+            scopes: vec![oauth.required_scope.clone()],
         }],
     );
-    policy.authorization_code_lifetime = config.code_ttl;
-    policy.access_token_lifetime = config.access_token_ttl;
-    policy.refresh_token_lifetime = config.refresh_token_ttl;
-    policy.refresh_family_lifetime = config.refresh_family_ttl;
-    if config.allow_dcr {
-        policy.registration_endpoint = Some(format!(
-            "{}/register",
-            config.oauth_issuer.trim_end_matches('/')
-        ));
+    policy.authorization_code_lifetime = oauth.code_ttl;
+    policy.access_token_lifetime = oauth.access_token_ttl;
+    policy.refresh_token_lifetime = oauth.refresh_token_ttl;
+    policy.refresh_family_lifetime = oauth.refresh_family_ttl;
+    if oauth.allow_dcr {
+        policy.registration_endpoint =
+            Some(format!("{}/register", oauth.issuer.trim_end_matches('/')));
     }
 
     let consent = Arc::new(AutoApproveConsent {
-        resource: config.oauth_resource.clone(),
-        scope: config.oauth_required_scope.clone(),
+        resource: oauth.resource.clone(),
+        scope: oauth.required_scope.clone(),
     });
     let mut server = OAuthAuthorizationServer::new(
         policy,
@@ -100,13 +107,13 @@ pub async fn initialize(config: &Config) -> Result<OAuthRuntime, String> {
     )
     .map_err(|_| "invalid hosted OAuth configuration".to_owned())?;
 
-    if config.allow_dcr || config.allow_cimd || config.allow_loopback_redirects {
-        let metadata_fetcher = if config.allow_cimd {
+    if oauth.allow_dcr || oauth.allow_cimd || oauth.allow_loopback_redirects {
+        let metadata_fetcher = if oauth.allow_cimd {
             let mut fetcher = HardenedOAuthClientMetadataFetcher::production()
-                .with_loopback_redirects(config.allow_loopback_redirects);
-            if !config.oauth_cimd_trusted_private_origins.is_empty() {
+                .with_loopback_redirects(oauth.allow_loopback_redirects);
+            if !oauth.cimd_trusted_private_origins.is_empty() {
                 let destination_policy = TrustedPrivateOAuthCimdDestinationPolicy::new(
-                    config.oauth_cimd_trusted_private_origins.clone(),
+                    oauth.cimd_trusted_private_origins.clone(),
                 )
                 .map_err(|_| "invalid trusted CIMD destination policy".to_owned())?;
                 fetcher = fetcher.with_destination_policy(Arc::new(destination_policy));
@@ -118,15 +125,15 @@ pub async fn initialize(config: &Config) -> Result<OAuthRuntime, String> {
         server = server
             .with_client_registration(OAuthClientRegistrationOptions {
                 metadata_fetcher,
-                dynamic_registration: config.allow_dcr,
-                allow_loopback_redirects: config.allow_loopback_redirects,
+                dynamic_registration: oauth.allow_dcr,
+                allow_loopback_redirects: oauth.allow_loopback_redirects,
                 source_resolver: None,
                 ..OAuthClientRegistrationOptions::default()
             })
             .map_err(|_| "invalid OAuth client registration policy".to_owned())?;
     }
 
-    initialize_signing_key(&pool, store.as_ref(), &server, &config.oauth_issuer).await?;
+    initialize_signing_key(&pool, store.as_ref(), &server, &oauth.issuer).await?;
     Ok(OAuthRuntime { server, oidc, pool })
 }
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository runtime has 25 passing Rust tests under Rust 1.96. They cover local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, LogQL, Grafana, and cleanup control.
+The repository runtime has a passing Rust suite under Rust 1.96. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query actions, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. The deployed preview still runs the prior health-only image.
 
@@ -42,7 +42,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 
 | Layer | Implemented coverage |
 | --- | --- |
-| Rust local suite | 25 tests pass with `cargo +1.96.0 test --locked --all-features`; no tests are ignored. |
+| Rust local suite | The library and binary tests pass with `cargo +1.96.0 test --locked --all-features`; no tests are ignored. |
 | Generic Kuri `mcp` | 111 standard all-feature tests pass; both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly. |
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
@@ -60,12 +60,12 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | PostgreSQL integration | Apply the real embedded migrations and exercise expiry, atomic single use, replay prevention, refresh rotation, and encrypted signing-key persistence against a disposable database. |
 | Hosted OAuth integration | Run complete authorization-code and refresh paths, including local token issuance and validation, beyond local consent, challenge, and mocked generic components. |
 | Live Authentik integration | Exercise OIDC discovery, browser login, callback validation, and transaction completion against the configured provider. |
-| Kuri-client integration | Exercise DCR, CIMD, native loopback authorization, token refresh, exact resource binding, and `grafana_exec` calls. |
+| Kuri-client integration | Exercise DCR, CIMD, native loopback authorization, token refresh, exact resource binding, and `grafana_query` calls. |
 | Live Grafana integration | Execute controlled instant and range LogQL through Grafana's datasource proxy without exposing credentials. |
 | Container runtime | Build the new image, inspect it for private material, and start it with controlled PostgreSQL, keyring, OAuth/OIDC, and Grafana inputs. |
 | Preview end-to-end | After explicit approval, prove browser login, local token issuance, authenticated `/mcp`, and controlled Grafana LogQL on the updated preview image. |
 
-The current 25-test suite supplies local and mock evidence only. It does not supply live Authentik, live Grafana, container-runtime, or preview end-to-end evidence.
+The Rust suite supplies local and mock evidence only. It does not supply live Authentik, live Grafana, container-runtime, or preview end-to-end evidence.
 
 Preview end-to-end checks require explicit target authority. Production checks and production deployment remain excluded.
 
@@ -91,7 +91,7 @@ Negative tests must verify that errors, logs, redirects, traces, and MCP content
 
 ## LogQL Contract Coverage
 
-Tests must cover the [LogQL action specification](../grafana-exec/spec/logql.md), including:
+Tests must cover the [Grafana Query specifications](../grafana-query/README.md), including:
 
 - macro-generated `help`, nested `input`, schema, and optional jq-compatible `filter` behavior;
 - every instant and range field combination;

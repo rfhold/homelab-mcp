@@ -26,7 +26,7 @@ bun test index.test.ts
 For a documentation-only change, also run:
 
 ```bash
-git diff --check -- docs/grafana-exec docs/architecture/observability.md docs/operations/observability.md docs/quality/observability-testing.md
+git diff --check -- docs/grafana-query docs/architecture/observability.md docs/operations/observability.md docs/quality/observability-testing.md
 ```
 
 ## Local Coverage
@@ -46,7 +46,7 @@ Tests cover these observability contracts:
 - credential-free HTTPS root Pyroscope origins, safe tags, and the absence of conflicting or per-pod profile tags;
 - telemetry environment and Pulumi downward API wiring;
 - Alloy egress ports 4318 and 4040;
-- generated help and schemas for all four `grafana_exec` actions;
+- generated help and schemas for all four `grafana_query` actions;
 - exact PromQL, TraceQL, and Profiles routes, methods, parameters, and bodies;
 - action defaults, range limits, PromQL point limits, and strict flamegraph result normalization;
 - shared four-request capacity, 30-second timeout, redirect denial, permit release, and error mapping; and
@@ -75,6 +75,6 @@ After an authorized deployment, record evidence for each row. Use timestamps, no
 | Export outage | A controlled non-production outage leaves HTTP handling available. Missing or stale data appears in the affected backend, with evidence from Alloy or backend observability and no local dependency diagnostics. |
 | Shutdown | Pyroscope stop and shutdown run on a dedicated thread. Main waits at most ten seconds, detaches a timed-out worker, then applies sequential five-second meter and tracer limits. Application logs contain only sanitized shutdown status. |
 
-Use the [operations queries](../operations/observability.md#validation) for backend checks. Follow each action's specification under [Grafana Exec](../grafana-exec/README.md).
+Use the [operations queries](../operations/observability.md#validation) for backend checks. Follow each action's specification under [Grafana Query](../grafana-query/README.md).
 
 Do not record credentials, authorization headers, Secret values, or full environment output as evidence.

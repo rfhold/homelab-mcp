@@ -1,6 +1,6 @@
 # TraceQL Action Specification
 
-The `traceql` action searches fixed Tempo datasource UID `tempo`. The [shared contract](common.md) defines tool behavior, transport limits, and common errors.
+The read-only `traceql` action searches fixed Tempo datasource UID `tempo`. The [shared contract](common.md) defines tool behavior, transport limits, and common errors.
 
 ## Input
 

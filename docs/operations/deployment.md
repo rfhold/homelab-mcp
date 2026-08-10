@@ -91,7 +91,7 @@ It requires locally issued `mcp:use` tokens and configures DCR, CIMD, and native
 
 Generic Kuri owns strict OIDC login, callback, one-shot transaction state, ID-token verification, the mapper seam, and hosted continuation. Homelab supplies Authentik configuration and stable issuer-plus-subject mapping.
 
-The runtime exposes one progressive `grafana_exec` tool. Its only domain action is `logql`, with the limits and stable results from the [LogQL specification](../grafana-exec/spec/logql.md).
+The current worktree exposes one progressive read-only `grafana_query` tool with LogQL, PromQL, TraceQL, and Profiles actions. Their limits and stable results are defined by the [Grafana Query specifications](../grafana-query/README.md). The deployed preview revision predates this rename and action expansion.
 
 No commit, push, pipeline execution, or preview deployment is authorized by these declarations. Preview acceptance requires the layered evidence from the [testing document](../quality/testing.md) and explicit approval for each external action. Existing public health checks do not satisfy that acceptance boundary.
 

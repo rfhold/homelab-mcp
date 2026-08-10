@@ -32,27 +32,52 @@ impl TelemetryConfig {
 
 #[derive(Clone)]
 pub struct Config {
-    pub database_url: String,
+    pub database: DatabaseConfig,
+    pub oidc: OidcConfig,
+    pub oauth: OAuthConfig,
+    pub integrations: IntegrationsConfig,
+}
+
+#[derive(Clone)]
+pub struct DatabaseConfig {
+    pub url: String,
+}
+
+#[derive(Clone)]
+pub struct OidcConfig {
     pub public_url: String,
-    pub oidc_issuer: String,
-    pub oidc_client_id: String,
-    pub oidc_client_secret: String,
-    pub oidc_redirect_uri: String,
-    pub oidc_scopes: Vec<String>,
-    pub oauth_issuer: String,
-    pub oauth_resource: String,
-    pub oauth_required_scope: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: Secret,
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct OAuthConfig {
+    pub issuer: String,
+    pub resource: String,
+    pub required_scope: String,
     pub access_token_ttl: Duration,
     pub refresh_token_ttl: Duration,
     pub refresh_family_ttl: Duration,
     pub code_ttl: Duration,
     pub allow_dcr: bool,
     pub allow_cimd: bool,
-    pub oauth_cimd_trusted_private_origins: Vec<Url>,
+    pub cimd_trusted_private_origins: Vec<Url>,
     pub allow_loopback_redirects: bool,
     pub wrapping_keys_file: String,
-    pub grafana_url: Url,
-    pub grafana_token: Secret,
+}
+
+#[derive(Clone)]
+pub struct IntegrationsConfig {
+    pub grafana: GrafanaConfig,
+}
+
+#[derive(Clone)]
+pub struct GrafanaConfig {
+    pub origin: Url,
+    pub token: Secret,
 }
 
 #[derive(Clone)]
@@ -82,43 +107,51 @@ struct KeyringKey {
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         let config = Self {
-            database_url: required("DATABASE_URL")?,
-            public_url: required("PUBLIC_URL")?,
-            oidc_issuer: required("OIDC_ISSUER")?,
-            oidc_client_id: required("OIDC_CLIENT_ID")?,
-            oidc_client_secret: required("OIDC_CLIENT_SECRET")?,
-            oidc_redirect_uri: required("OIDC_REDIRECT_URI")?,
-            oidc_scopes: required("OIDC_SCOPES")?
-                .split_ascii_whitespace()
-                .map(str::to_owned)
-                .collect(),
-            oauth_issuer: required("OAUTH_ISSUER")?,
-            oauth_resource: required("OAUTH_RESOURCE")?,
-            oauth_required_scope: required("OAUTH_REQUIRED_SCOPE")?,
-            access_token_ttl: seconds("OAUTH_ACCESS_TOKEN_TTL")?,
-            refresh_token_ttl: seconds("OAUTH_REFRESH_TOKEN_TTL")?,
-            refresh_family_ttl: seconds("OAUTH_REFRESH_FAMILY_TTL")?,
-            code_ttl: seconds("OAUTH_CODE_TTL")?,
-            allow_dcr: boolean("OAUTH_ALLOW_DCR")?,
-            allow_cimd: boolean("OAUTH_ALLOW_CIMD")?,
-            oauth_cimd_trusted_private_origins: secure_origins(
-                "OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS",
-            )?,
-            allow_loopback_redirects: boolean("OAUTH_ALLOW_LOOPBACK_REDIRECTS")?,
-            wrapping_keys_file: required("OAUTH_WRAPPING_KEYS_FILE")?,
-            grafana_url: secure_origin("GRAFANA_URL", &required("GRAFANA_URL")?)?,
-            grafana_token: secret("GRAFANA_TOKEN")?,
+            database: DatabaseConfig {
+                url: required("DATABASE_URL")?,
+            },
+            oidc: OidcConfig {
+                public_url: required("PUBLIC_URL")?,
+                issuer: required("OIDC_ISSUER")?,
+                client_id: required("OIDC_CLIENT_ID")?,
+                client_secret: secret("OIDC_CLIENT_SECRET")?,
+                redirect_uri: required("OIDC_REDIRECT_URI")?,
+                scopes: required("OIDC_SCOPES")?
+                    .split_ascii_whitespace()
+                    .map(str::to_owned)
+                    .collect(),
+            },
+            oauth: OAuthConfig {
+                issuer: required("OAUTH_ISSUER")?,
+                resource: required("OAUTH_RESOURCE")?,
+                required_scope: required("OAUTH_REQUIRED_SCOPE")?,
+                access_token_ttl: seconds("OAUTH_ACCESS_TOKEN_TTL")?,
+                refresh_token_ttl: seconds("OAUTH_REFRESH_TOKEN_TTL")?,
+                refresh_family_ttl: seconds("OAUTH_REFRESH_FAMILY_TTL")?,
+                code_ttl: seconds("OAUTH_CODE_TTL")?,
+                allow_dcr: boolean("OAUTH_ALLOW_DCR")?,
+                allow_cimd: boolean("OAUTH_ALLOW_CIMD")?,
+                cimd_trusted_private_origins: secure_origins("OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS")?,
+                allow_loopback_redirects: boolean("OAUTH_ALLOW_LOOPBACK_REDIRECTS")?,
+                wrapping_keys_file: required("OAUTH_WRAPPING_KEYS_FILE")?,
+            },
+            integrations: IntegrationsConfig {
+                grafana: GrafanaConfig {
+                    origin: secure_origin("GRAFANA_URL", &required("GRAFANA_URL")?)?,
+                    token: secret("GRAFANA_TOKEN")?,
+                },
+            },
         };
         config.validate()?;
         Ok(config)
     }
 
     fn validate(&self) -> Result<(), String> {
-        let public = secure_url("PUBLIC_URL", &self.public_url)?;
-        let oidc_issuer = secure_url("OIDC_ISSUER", &self.oidc_issuer)?;
-        let redirect = secure_url("OIDC_REDIRECT_URI", &self.oidc_redirect_uri)?;
-        let oauth_issuer = secure_url("OAUTH_ISSUER", &self.oauth_issuer)?;
-        let resource = secure_url("OAUTH_RESOURCE", &self.oauth_resource)?;
+        let public = secure_url("PUBLIC_URL", &self.oidc.public_url)?;
+        let oidc_issuer = secure_url("OIDC_ISSUER", &self.oidc.issuer)?;
+        let redirect = secure_url("OIDC_REDIRECT_URI", &self.oidc.redirect_uri)?;
+        let oauth_issuer = secure_url("OAUTH_ISSUER", &self.oauth.issuer)?;
+        let resource = secure_url("OAUTH_RESOURCE", &self.oauth.resource)?;
 
         if oidc_issuer.query().is_some()
             || oidc_issuer.fragment().is_some()
@@ -131,19 +164,21 @@ impl Config {
         {
             return Err("public OAuth URLs are inconsistent".to_owned());
         }
-        if self.oidc_scopes.is_empty()
-            || !self.oidc_scopes.iter().any(|scope| scope == "openid")
-            || self.oauth_required_scope != "mcp:use"
-            || self.access_token_ttl.is_zero()
-            || self.refresh_token_ttl.is_zero()
-            || self.refresh_family_ttl < self.refresh_token_ttl
-            || self.code_ttl.is_zero()
+        if self.oidc.scopes.is_empty()
+            || !self.oidc.scopes.iter().any(|scope| scope == "openid")
+            || self.oauth.required_scope != "mcp:use"
+            || self.oauth.access_token_ttl.is_zero()
+            || self.oauth.refresh_token_ttl.is_zero()
+            || self.oauth.refresh_family_ttl < self.oauth.refresh_token_ttl
+            || self.oauth.code_ttl.is_zero()
         {
             return Err("OAuth policy configuration is invalid".to_owned());
         }
         Ok(())
     }
+}
 
+impl OAuthConfig {
     pub fn load_keyring(&self) -> Result<Arc<VersionedOAuthWrappingKeyring>, String> {
         let bytes = fs::read(&self.wrapping_keys_file)
             .map_err(|_| "failed to read OAuth wrapping keyring".to_owned())?;
@@ -345,34 +380,44 @@ mod tests {
     #[test]
     fn config_rejects_any_required_scope_other_than_mcp_use() {
         let mut config = Config {
-            database_url: "postgres://localhost/test".to_owned(),
-            public_url: "https://mcp.example/".to_owned(),
-            oidc_issuer: "https://auth.example/application/o/homelab/".to_owned(),
-            oidc_client_id: "client".to_owned(),
-            oidc_client_secret: "secret".to_owned(),
-            oidc_redirect_uri: "https://mcp.example/oidc/callback".to_owned(),
-            oidc_scopes: vec!["openid".to_owned()],
-            oauth_issuer: "https://mcp.example/oauth".to_owned(),
-            oauth_resource: "https://mcp.example/mcp".to_owned(),
-            oauth_required_scope: "other:scope".to_owned(),
-            access_token_ttl: Duration::from_secs(60),
-            refresh_token_ttl: Duration::from_secs(60),
-            refresh_family_ttl: Duration::from_secs(120),
-            code_ttl: Duration::from_secs(60),
-            allow_dcr: false,
-            allow_cimd: false,
-            oauth_cimd_trusted_private_origins: Vec::new(),
-            allow_loopback_redirects: false,
-            wrapping_keys_file: "/unused".to_owned(),
-            grafana_url: Url::parse("https://grafana.example/").unwrap(),
-            grafana_token: Secret("secret".to_owned()),
+            database: DatabaseConfig {
+                url: "postgres://localhost/test".to_owned(),
+            },
+            oidc: OidcConfig {
+                public_url: "https://mcp.example/".to_owned(),
+                issuer: "https://auth.example/application/o/homelab/".to_owned(),
+                client_id: "client".to_owned(),
+                client_secret: Secret("secret".to_owned()),
+                redirect_uri: "https://mcp.example/oidc/callback".to_owned(),
+                scopes: vec!["openid".to_owned()],
+            },
+            oauth: OAuthConfig {
+                issuer: "https://mcp.example/oauth".to_owned(),
+                resource: "https://mcp.example/mcp".to_owned(),
+                required_scope: "other:scope".to_owned(),
+                access_token_ttl: Duration::from_secs(60),
+                refresh_token_ttl: Duration::from_secs(60),
+                refresh_family_ttl: Duration::from_secs(120),
+                code_ttl: Duration::from_secs(60),
+                allow_dcr: false,
+                allow_cimd: false,
+                cimd_trusted_private_origins: Vec::new(),
+                allow_loopback_redirects: false,
+                wrapping_keys_file: "/unused".to_owned(),
+            },
+            integrations: IntegrationsConfig {
+                grafana: GrafanaConfig {
+                    origin: Url::parse("https://grafana.example/").unwrap(),
+                    token: Secret("secret".to_owned()),
+                },
+            },
         };
 
         assert_eq!(
             config.validate().unwrap_err(),
             "OAuth policy configuration is invalid"
         );
-        config.oauth_required_scope = "mcp:use".to_owned();
+        config.oauth.required_scope = "mcp:use".to_owned();
         assert!(config.validate().is_ok());
     }
 }

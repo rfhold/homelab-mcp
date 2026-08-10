@@ -6,7 +6,7 @@ This specification defines the implemented worktree behavior for the `logql` act
 
 ## Tool Surface
 
-`#[mcp::progressive_server]` generates one read-only MCP tool named `grafana_exec`. Its domain actions are `logql`, `promql`, `traceql`, and `profiles`.
+`#[mcp::progressive_server]` generates one read-only MCP tool named `grafana_query`. Its domain actions are `logql`, `promql`, `traceql`, and `profiles`.
 
 The macro also generates action `help`, the filter behavior, and the tool schema. A help call takes this shape:
 

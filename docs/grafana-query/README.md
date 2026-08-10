@@ -1,6 +1,6 @@
-# Grafana Exec
+# Grafana Query
 
-The repository implements one progressive, read-only `grafana_exec` tool. Local tests cover validation, dispatch, limits, normalization, and mock Grafana requests.
+The repository implements one progressive, read-only `grafana_query` tool. Local tests cover validation, dispatch, limits, normalization, and mock Grafana requests.
 
 The generated tool provides `help`, jq-compatible output filters, and four domain actions. Live Grafana verification for this worktree remains outstanding.
 

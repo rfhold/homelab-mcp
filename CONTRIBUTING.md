@@ -19,7 +19,7 @@ cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
 cargo +1.96.0 test --locked --all-features
 ```
 
-These commands pass against the exact Kuri Git pin. The local Rust suite contains 25 tests.
+These commands pass against the exact Kuri Git pin.
 
 Build the private-dependency runtime image with BuildKit secret handling:
 
