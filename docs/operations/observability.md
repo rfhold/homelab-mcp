@@ -37,6 +37,16 @@ If a request loses its task before a response, the metrics guard finalizes it as
 
 `/health` and `/ready` intentionally emit no HTTP request spans, metrics, or completion logs. Diagnose probe failures from Kubernetes probe status and endpoint behavior rather than expecting application request telemetry.
 
+Service-owned Grafana calls have the span hierarchy `mcp.server.request` -> `grafana.query` -> `http.client.request`. The final span covers the centralized Grafana HTTP attempt and uses the admitted `homelab_mcp::http_client` target. This boundary does not instrument dependency-owned OAuth or CIMD clients and does not require admitting Reqwest or middleware dependency targets.
+
+`GrafanaClient::run` creates one `http.client.request` span before dispatch. The reqwest-tracing middleware uses that same span for W3C `traceparent` and active-context `tracestate` injection. A lifecycle guard keeps the span open through response body transfer and records `cancelled` if the request future drops before finalization.
+
+The span records client kind, the controlled request method, response status when available, and one bounded outcome. A complete successful body transfer records `success`. A non-success HTTP response records `http_error`. A send or body transfer failure records `transport_error`. A response rejected by the body-size cap records `response_error`. Cancellation or timeout before finalization records `cancelled`. JSON parsing and schema validation occur after complete body transfer, so those application errors do not become transport errors.
+
+HTTP 4xx and 5xx responses set OpenTelemetry error status from the HTTP status. Transport, response, and cancellation failures also set error status without raw details. Redirect responses retain `http_error` without OpenTelemetry error status. Transport failures do not record an error or cause string.
+
+Grafana client spans omit server address, host, port, URL scheme, path, query, full URL, headers, body, query text, selectors, matchers, comments, tokens, user agent, and raw error or cause strings. The middleware does not change the current Grafana timeout, capacity, redirect, proxy, authorization, response, semantic error, or mutation uncertainty behavior.
+
 At 100 Hz, the profiler samples each process one hundred times per second. Watch CPU usage and request latency after rollout. Disable profiling by removing `HOMELAB_MCP_PYROSCOPE_URL` if overhead breaches the service budget.
 
 ## Validation
@@ -86,7 +96,7 @@ Metric backend translation can replace dots with underscores and append `_total`
 | Metrics do not appear | Confirm the same OTLP settings, wait for the periodic export interval, then inspect Alloy and Mimir observability. |
 | Probe request telemetry does not appear | This is intentional for `/health` and `/ready`; use Kubernetes probe status and direct endpoint behavior. |
 | Trace IDs do not appear in logs | Confirm the event occurs inside an instrumented HTTP or Grafana span. Startup events legitimately omit IDs. |
-| Parent traces do not connect | Confirm the caller sends valid W3C `traceparent` headers. Proxies must preserve those headers. |
+| Parent traces do not connect | For inbound traces, confirm the caller sends valid W3C `traceparent` headers and proxies preserve them. For Grafana calls, confirm `http.client.request` is a child of `grafana.query` and Grafana receives its propagated `traceparent`. |
 | Profiles do not appear | Confirm `HOMELAB_MCP_PYROSCOPE_URL` exists and egress reaches port 4040. Match the exact profile tags, then inspect Alloy and Pyroscope observability. |
 | CPU or latency rises | Compare against a window without profiling. Remove the Pyroscope URL if 100 Hz sampling causes unacceptable overhead. |
 | Grafana-upstream failures spike | Group upstream outcomes by action, mode, and datasource UID. Use `grafana.query` traces and correlated logs for the same interval. |

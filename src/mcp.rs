@@ -291,6 +291,8 @@ mod tests {
     use crate::integrations::grafana::GrafanaClient;
     use axum::{
         Json, Router,
+        extract::State,
+        http::HeaderMap,
         routing::{get, post},
     };
     use mcp::{
@@ -301,17 +303,19 @@ mod tests {
             StreamableHttpOptions, streamable_http_router,
         },
     };
-    use opentelemetry::trace::{SpanId, TracerProvider as _};
+    use opentelemetry::trace::{SpanId, SpanKind, Status, TracerProvider as _};
     use opentelemetry_sdk::{
         error::OTelSdkResult,
         trace::{SdkTracerProvider, SpanData, SpanExporter},
     };
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
-    use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
+    use tokio::{io::AsyncWriteExt as _, net::TcpListener, sync::Notify, task::JoinHandle};
     use tracing_subscriber::{Layer as _, layer::SubscriberExt as _};
 
     use super::*;
+
+    type PropagatedRequests = Arc<Mutex<Vec<(String, String)>>>;
 
     async fn serve(router: Router) -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -322,16 +326,21 @@ mod tests {
         (origin, task)
     }
 
-    async fn test_handler() -> (Arc<HomelabMcp>, JoinHandle<()>) {
+    async fn test_handler() -> (Arc<HomelabMcp>, PropagatedRequests, JoinHandle<()>) {
+        let propagated = Arc::new(Mutex::new(Vec::new()));
         let grafana = Router::new()
             .route(
                 "/api/datasources/proxy/uid/loki/loki/api/v1/query",
-                get(|| async {
+                get(
+                    |State(propagated): State<PropagatedRequests>,
+                     headers: HeaderMap| async move {
+                        record_propagated_context(&propagated, "GET", &headers);
                     Json(json!({
                         "status":"success",
                         "data":{"resultType":"vector","result":[{"metric":{"job":"test"},"value":[1786276800,"2"]}]}
                     }))
-                }),
+                    },
+                ),
             )
             .route(
                 "/api/v1/provisioning/alert-rules",
@@ -357,8 +366,16 @@ mod tests {
             )
             .route(
                 "/api/alertmanager/grafana/api/v2/silences",
-                post(|| async { Json(json!({"silenceID":"silence-123"})) }),
-            );
+                post(
+                    |State(propagated): State<PropagatedRequests>,
+                     headers: HeaderMap,
+                     Json(_body): Json<Value>| async move {
+                        record_propagated_context(&propagated, "POST", &headers);
+                        Json(json!({"silenceID":"silence-123"}))
+                    },
+                ),
+            )
+            .with_state(Arc::clone(&propagated));
         let (origin, task) = serve(grafana).await;
         let handler = Arc::new(HomelabMcp {
             services: Arc::new(Services::new(GrafanaClient::for_test(
@@ -366,7 +383,22 @@ mod tests {
                 std::time::Duration::from_secs(1),
             ))),
         });
-        (handler, task)
+        (handler, propagated, task)
+    }
+
+    fn record_propagated_context(
+        propagated: &Mutex<Vec<(String, String)>>,
+        method: &str,
+        headers: &HeaderMap,
+    ) {
+        propagated.lock().unwrap().push((
+            method.to_owned(),
+            headers
+                .get("traceparent")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned(),
+        ));
     }
 
     fn request(method: &str, id: &str, params: Value) -> Value {
@@ -431,9 +463,13 @@ mod tests {
         }
     }
 
-    fn capture_authorized_call(
-        runtime: &tokio::runtime::Runtime,
-    ) -> (Vec<SpanData>, Vec<(&'static str, &'static str)>) {
+    struct TelemetryCapture {
+        spans: Vec<SpanData>,
+        targets: Vec<(&'static str, &'static str)>,
+        propagated: Vec<(String, String)>,
+    }
+
+    fn capture_authorized_call(runtime: &tokio::runtime::Runtime) -> TelemetryCapture {
         let exporter = TestSpanExporter::default();
         let targets = Arc::new(Mutex::new(Vec::new()));
         let provider = SdkTracerProvider::builder()
@@ -449,9 +485,12 @@ mod tests {
             )
             .with(crate::observability::test_trace_filter());
 
-        tracing::subscriber::with_default(subscriber, || {
+        let propagated = tracing::subscriber::with_default(subscriber, || {
             runtime.block_on(async {
-                let (handler, grafana_task) = test_handler().await;
+                opentelemetry::global::set_text_map_propagator(
+                    opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+                );
+                let (handler, propagated, grafana_task) = test_handler().await;
                 let metadata = McpProtectedResourceMetadata::new(
                     "https://mcp.example.test/mcp",
                     ["https://mcp.example.test/oauth"],
@@ -488,7 +527,7 @@ mod tests {
                     }),
                 );
                 let response = Client::new()
-                    .post(endpoint)
+                    .post(&endpoint)
                     .header("accept", "application/json, text/event-stream")
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
@@ -503,25 +542,230 @@ mod tests {
                 let payload = response.text().await.unwrap();
                 assert!(payload.contains("structuredContent"));
                 assert!(!payload.contains("test-token"));
+
+                let body = request(
+                    "tools/call",
+                    "telemetry-post",
+                    json!({
+                        "name": EXEC_TOOL_NAME,
+                        "arguments": {
+                            "action": "silence.create",
+                            "input": {
+                                "matchers": [{"name":"alertname","operator":"=","value":"SensitiveMatcher"}],
+                                "duration_seconds": 3600,
+                                "comment": "SensitiveComment"
+                            }
+                        }
+                    }),
+                );
+                let response = Client::new()
+                    .post(&endpoint)
+                    .header("accept", "application/json, text/event-stream")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .header("mcp-protocol-version", MCP_PROTOCOL_VERSION)
+                    .header("mcp-method", "tools/call")
+                    .header("mcp-name", EXEC_TOOL_NAME)
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                assert!(response.text().await.unwrap().contains("structuredContent"));
+
+                let disconnect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let disconnect_origin = url::Url::parse(&format!(
+                    "http://{}/sensitive-path?secret=query",
+                    disconnect_listener.local_addr().unwrap()
+                ))
+                .unwrap();
+                let disconnect_task = tokio::spawn(async move {
+                    let (connection, _) = disconnect_listener.accept().await.unwrap();
+                    drop(connection);
+                });
+                let unavailable = GrafanaClient::for_test(
+                    disconnect_origin,
+                    std::time::Duration::from_secs(1),
+                );
+                assert!(
+                    unavailable
+                        .execute(
+                            &crate::integrations::grafana::actions::LogqlInput {
+                                query: "SensitiveRawErrorQuery".to_owned(),
+                                start: None,
+                                end: None,
+                                time: None,
+                                direction: None,
+                                limit: None,
+                            }
+                            .validate()
+                            .unwrap()
+                        )
+                        .await
+                        .is_err()
+                );
+                disconnect_task.await.unwrap();
+
+                let http_error = Router::new().route(
+                    "/api/datasources/proxy/uid/loki/loki/api/v1/query",
+                    get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+                );
+                let (origin, http_error_task) = serve(http_error).await;
+                let unavailable = GrafanaClient::for_test(
+                    url::Url::parse(&format!("{origin}/")).unwrap(),
+                    std::time::Duration::from_secs(1),
+                );
+                assert!(
+                    unavailable
+                        .execute(
+                            &crate::integrations::grafana::actions::LogqlInput {
+                                query: "SensitiveHttpErrorQuery".to_owned(),
+                                start: None,
+                                end: None,
+                                time: None,
+                                direction: None,
+                                limit: None,
+                            }
+                            .validate()
+                            .unwrap()
+                        )
+                        .await
+                        .is_err()
+                );
+                http_error_task.abort();
+
+                let slow = Router::new().route(
+                    "/api/datasources/proxy/uid/loki/loki/api/v1/query",
+                    get(|| async {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        Json(json!({}))
+                    }),
+                );
+                let (origin, slow_task) = serve(slow).await;
+                let timeout = GrafanaClient::for_test(
+                    url::Url::parse(&format!("{origin}/")).unwrap(),
+                    std::time::Duration::from_millis(10),
+                );
+                assert_eq!(
+                    timeout
+                        .execute(
+                            &crate::integrations::grafana::actions::LogqlInput {
+                                query: "SensitiveTimeoutQuery".to_owned(),
+                                start: None,
+                                end: None,
+                                time: None,
+                                direction: None,
+                                limit: None,
+                            }
+                            .validate()
+                            .unwrap()
+                        )
+                        .await,
+                    Err(crate::integrations::grafana::Error::Timeout)
+                );
+                slow_task.abort();
+
+                let truncated_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let truncated_origin = url::Url::parse(&format!(
+                    "http://{}/",
+                    truncated_listener.local_addr().unwrap()
+                ))
+                .unwrap();
+                let truncated_task = tokio::spawn(async move {
+                    let (mut connection, _) = truncated_listener.accept().await.unwrap();
+                    connection
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+                        )
+                        .await
+                        .unwrap();
+                });
+                let truncated = GrafanaClient::for_test(
+                    truncated_origin,
+                    std::time::Duration::from_secs(1),
+                );
+                assert_eq!(
+                    truncated
+                        .execute(
+                            &crate::integrations::grafana::actions::LogqlInput {
+                                query: "SensitiveTruncatedBodyQuery".to_owned(),
+                                start: None,
+                                end: None,
+                                time: None,
+                                direction: None,
+                                limit: None,
+                            }
+                            .validate()
+                            .unwrap()
+                        )
+                        .await,
+                    Err(crate::integrations::grafana::Error::UpstreamUnavailable)
+                );
+                truncated_task.await.unwrap();
+
+                let oversized_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let oversized_origin = url::Url::parse(&format!(
+                    "http://{}/",
+                    oversized_listener.local_addr().unwrap()
+                ))
+                .unwrap();
+                let oversized_task = tokio::spawn(async move {
+                    let (mut connection, _) = oversized_listener.accept().await.unwrap();
+                    connection
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 4194305\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                });
+                let oversized = GrafanaClient::for_test(
+                    oversized_origin,
+                    std::time::Duration::from_secs(1),
+                );
+                assert_eq!(
+                    oversized
+                        .execute(
+                            &crate::integrations::grafana::actions::LogqlInput {
+                                query: "SensitiveOversizedBodyQuery".to_owned(),
+                                start: None,
+                                end: None,
+                                time: None,
+                                direction: None,
+                                limit: None,
+                            }
+                            .validate()
+                            .unwrap()
+                        )
+                        .await,
+                    Err(crate::integrations::grafana::Error::InvalidResponse)
+                );
+                oversized_task.await.unwrap();
+
+                let propagated = propagated.lock().unwrap().clone();
                 grafana_task.abort();
                 mcp_task.abort();
-            });
+                propagated
+            })
         });
 
         provider.force_flush().unwrap();
         let spans = exporter.0.lock().unwrap().clone();
         let targets = targets.lock().unwrap().clone();
-        (spans, targets)
+        TelemetryCapture {
+            spans,
+            targets,
+            propagated,
+        }
     }
 
     #[test]
-    fn host_filters_export_kuri_request_as_grafana_parent() {
+    fn host_filters_export_grafana_http_hierarchy_and_safe_propagation() {
         const CHILD_MARKER: &str = "HOMELAB_MCP_TELEMETRY_TEST_CHILD";
         if std::env::var_os(CHILD_MARKER).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "mcp::tests::host_filters_export_kuri_request_as_grafana_parent",
+                    "mcp::tests::host_filters_export_grafana_http_hierarchy_and_safe_propagation",
                     "--nocapture",
                 ])
                 .env(CHILD_MARKER, "1")
@@ -536,33 +780,202 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let (spans, targets) = capture_authorized_call(&runtime);
+        let TelemetryCapture {
+            spans,
+            targets,
+            propagated,
+        } = capture_authorized_call(&runtime);
         let exported = spans
             .iter()
             .map(|span| (span.name.as_ref(), span.instrumentation_scope.name()))
             .collect::<Vec<_>>();
-        let server = spans
+        let server_spans = spans
             .iter()
-            .find(|span| span.name == "mcp.server.request")
-            .unwrap_or_else(|| panic!("missing Kuri server span; exported {exported:?}"));
-        let grafana = spans
+            .filter(|span| span.name == "mcp.server.request")
+            .collect::<Vec<_>>();
+        let grafana_spans = spans
             .iter()
-            .find(|span| span.name == "grafana.query")
-            .unwrap();
+            .filter(|span| span.name == "grafana.query")
+            .collect::<Vec<_>>();
+        let client_spans = spans
+            .iter()
+            .filter(|span| span.name == "http.client.request")
+            .collect::<Vec<_>>();
 
         assert!(targets.contains(&("mcp.server.request", "mcp::server")));
         assert!(targets.contains(&("grafana.query", "homelab_mcp::grafana")));
-        assert_eq!(server.parent_span_id, SpanId::INVALID);
-        assert_eq!(grafana.parent_span_id, server.span_context.span_id());
+        assert!(targets.contains(&("http.client.request", "homelab_mcp::http_client")));
+        assert_eq!(server_spans.len(), 2, "exported spans: {exported:?}");
+        assert_eq!(grafana_spans.len(), 7);
+        assert_eq!(client_spans.len(), 7);
+        for server in &server_spans {
+            assert_eq!(server.parent_span_id, SpanId::INVALID);
+            let grafana_children = grafana_spans
+                .iter()
+                .filter(|grafana| {
+                    grafana.parent_span_id == server.span_context.span_id()
+                        && grafana.span_context.trace_id() == server.span_context.trace_id()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(grafana_children.len(), 1);
+            let client_children = client_spans
+                .iter()
+                .filter(|client| {
+                    client.parent_span_id == grafana_children[0].span_context.span_id()
+                        && client.span_context.trace_id()
+                            == grafana_children[0].span_context.trace_id()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(client_children.len(), 1);
+        }
+
+        let mut outcomes = Vec::new();
+        for client in &client_spans {
+            assert_eq!(client.span_kind, SpanKind::Client);
+            assert!(grafana_spans.iter().any(|grafana| {
+                client.parent_span_id == grafana.span_context.span_id()
+                    && client.span_context.trace_id() == grafana.span_context.trace_id()
+            }));
+            assert!(
+                client.attributes.iter().all(|attribute| matches!(
+                    attribute.key.as_str(),
+                    "code.file.path"
+                        | "code.module.name"
+                        | "code.line.number"
+                        | "thread.id"
+                        | "thread.name"
+                        | "target"
+                        | "http.request.method"
+                        | "http.response.status_code"
+                        | "http.outcome"
+                        | "busy_ns"
+                        | "idle_ns"
+                )),
+                "unexpected client attributes: {:?}",
+                client.attributes
+            );
+            let attributes = client
+                .attributes
+                .iter()
+                .map(|attribute| (attribute.key.as_str(), attribute.value.to_string()))
+                .collect::<std::collections::HashMap<_, _>>();
+            assert!(matches!(
+                attributes["http.outcome"].as_str(),
+                "success" | "http_error" | "transport_error" | "response_error" | "cancelled"
+            ));
+            let status = attributes.get("http.response.status_code").cloned();
+            let otel_error = match &client.status {
+                Status::Unset => false,
+                Status::Error { description } => {
+                    assert!(description.is_empty());
+                    true
+                }
+                Status::Ok => panic!("client spans must not override success status"),
+            };
+            outcomes.push((
+                attributes["http.request.method"].clone(),
+                attributes["http.outcome"].clone(),
+                status,
+                otel_error,
+            ));
+        }
+        outcomes.sort();
         assert_eq!(
-            grafana.span_context.trace_id(),
-            server.span_context.trace_id()
+            outcomes,
+            vec![
+                ("GET".to_owned(), "cancelled".to_owned(), None, true),
+                (
+                    "GET".to_owned(),
+                    "http_error".to_owned(),
+                    Some("503".to_owned()),
+                    true
+                ),
+                (
+                    "GET".to_owned(),
+                    "response_error".to_owned(),
+                    Some("200".to_owned()),
+                    true
+                ),
+                (
+                    "GET".to_owned(),
+                    "success".to_owned(),
+                    Some("200".to_owned()),
+                    false
+                ),
+                ("GET".to_owned(), "transport_error".to_owned(), None, true),
+                (
+                    "GET".to_owned(),
+                    "transport_error".to_owned(),
+                    Some("200".to_owned()),
+                    true
+                ),
+                (
+                    "POST".to_owned(),
+                    "success".to_owned(),
+                    Some("200".to_owned()),
+                    false
+                ),
+            ]
         );
+        let serialized = format!("{spans:?}");
+        for excluded in [
+            "sensitive-path",
+            "secret=query",
+            "SensitiveRawErrorQuery",
+            "SensitiveHttpErrorQuery",
+            "SensitiveTimeoutQuery",
+            "SensitiveTruncatedBodyQuery",
+            "SensitiveOversizedBodyQuery",
+            "SensitiveMatcher",
+            "SensitiveComment",
+            "grafana-secret",
+            "test-token",
+            "error.message",
+            "error.cause_chain",
+        ] {
+            assert!(!serialized.contains(excluded), "leaked {excluded}");
+        }
+        assert_eq!(
+            propagated
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect::<Vec<_>>(),
+            ["GET", "POST"]
+        );
+        for (method, traceparent) in propagated {
+            let parts = traceparent.split('-').collect::<Vec<_>>();
+            assert_eq!(parts.len(), 4, "invalid traceparent: {traceparent}");
+            assert_eq!(parts[0], "00");
+            assert_eq!(parts[1].len(), 32);
+            assert_eq!(parts[2].len(), 16);
+            assert_eq!(parts[3], "01");
+            assert!(
+                parts[1]
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+            );
+            assert!(
+                parts[2]
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+            );
+            let client = client_spans
+                .iter()
+                .find(|span| {
+                    span.span_context.span_id().to_string() == parts[2]
+                        && span.attributes.iter().any(|attribute| {
+                            attribute.key.as_str() == "http.request.method"
+                                && attribute.value.to_string() == method
+                        })
+                })
+                .unwrap();
+            assert_eq!(client.span_context.trace_id().to_string(), parts[1]);
+        }
     }
 
     #[tokio::test]
     async fn discovery_list_help_filter_and_call_follow_progressive_contract() {
-        let (handler, grafana_task) = test_handler().await;
+        let (handler, _, grafana_task) = test_handler().await;
         let (origin, mcp_task) = serve(streamable_http_router(handler)).await;
         let endpoint = format!("{origin}/mcp");
 
@@ -866,7 +1279,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_shapes_actions_filters_and_semantic_failures_keep_error_boundary() {
-        let (handler, grafana_task) = test_handler().await;
+        let (handler, _, grafana_task) = test_handler().await;
         let (origin, mcp_task) = serve(streamable_http_router(handler)).await;
         let endpoint = format!("{origin}/mcp");
 
@@ -1161,7 +1574,7 @@ mod tests {
 
     #[tokio::test]
     async fn generic_hosted_authorization_supplies_challenge_and_origin_denial() {
-        let (handler, grafana_task) = test_handler().await;
+        let (handler, _, grafana_task) = test_handler().await;
         let metadata = McpProtectedResourceMetadata::new(
             "http://127.0.0.1/mcp",
             ["https://auth.example.com/oauth"],

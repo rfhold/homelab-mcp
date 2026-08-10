@@ -3,12 +3,16 @@ use std::{sync::Arc, time::Duration};
 use chrono::{DateTime, SecondsFormat, Utc};
 use opentelemetry::trace::TraceContextExt as _;
 use reqwest::{Client, Method, Response, StatusCode, Url, redirect::Policy};
+use reqwest_middleware::ClientWithMiddleware;
 use serde_json::{Map, Value, json};
 use tokio::sync::Semaphore;
 use tracing::{Instrument as _, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
-use crate::config::Secret;
+use crate::{
+    config::Secret,
+    http_client::{ClientRequestSpanGuard, traced_client},
+};
 
 use super::{
     Error,
@@ -44,7 +48,7 @@ struct UpstreamRequest {
 pub struct GrafanaClient {
     origin: Url,
     token: Secret,
-    client: Client,
+    client: ClientWithMiddleware,
     permits: Arc<Semaphore>,
     timeout: Duration,
 }
@@ -63,7 +67,7 @@ impl GrafanaClient {
         Ok(Self {
             origin,
             token,
-            client,
+            client: traced_client(client),
             permits: Arc::new(Semaphore::new(4)),
             timeout,
         })
@@ -318,6 +322,7 @@ impl GrafanaClient {
                 if url.as_str().len() > MAX_URL_BYTES {
                     return Err(Error::InvalidArguments);
                 }
+                let mut client_span = ClientRequestSpanGuard::new(&request.method);
                 let mut builder = self
                     .client
                     .request(request.method, url)
@@ -325,13 +330,22 @@ impl GrafanaClient {
                 if let Some(body) = request.body {
                     builder = builder.json(&body);
                 }
-                let response = builder.send().await.map_err(|_| operation_failure(kind))?;
+                let response = match client_span.attach(builder).send().await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        client_span.finish_transport_error();
+                        return Err(operation_failure(kind));
+                    }
+                };
                 let status = response.status();
+                client_span.record_status(status);
                 match status {
                     StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                        client_span.finish_http_error(status);
                         return Err(Error::Unauthorized);
                     }
                     status if status.is_client_error() => {
+                        client_span.finish_http_error(status);
                         return Err(match kind {
                             OperationKind::Read => Error::QueryRejected,
                             OperationKind::Mutation if status == StatusCode::BAD_REQUEST => {
@@ -340,13 +354,19 @@ impl GrafanaClient {
                             OperationKind::Mutation => Error::MutationOutcomeUnknown,
                         });
                     }
-                    status if !status.is_success() => return Err(operation_failure(kind)),
+                    status if !status.is_success() => {
+                        client_span.finish_http_error(status);
+                        return Err(operation_failure(kind));
+                    }
                     _ => {}
                 }
-                let body = read_json(response).await.map_err(|error| match kind {
-                    OperationKind::Read => error,
-                    OperationKind::Mutation => Error::MutationOutcomeUnknown,
-                })?;
+                let body =
+                    read_json(response, &mut client_span)
+                        .await
+                        .map_err(|error| match kind {
+                            OperationKind::Read => error,
+                            OperationKind::Mutation => Error::MutationOutcomeUnknown,
+                        })?;
                 normalize(body).map_err(|error| match kind {
                     OperationKind::Read => error,
                     OperationKind::Mutation => Error::MutationOutcomeUnknown,
@@ -368,24 +388,34 @@ impl GrafanaClient {
     }
 }
 
-async fn read_json(mut response: Response) -> Result<Value, Error> {
+async fn read_json(
+    mut response: Response,
+    client_span: &mut ClientRequestSpanGuard,
+) -> Result<Value, Error> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
+        client_span.finish_response_error();
         return Err(Error::InvalidResponse);
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| Error::UpstreamUnavailable)?
-    {
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => {
+                client_span.finish_transport_error();
+                return Err(Error::UpstreamUnavailable);
+            }
+        };
         if chunk.len() > MAX_RESPONSE_BYTES - body.len() {
+            client_span.finish_response_error();
             return Err(Error::InvalidResponse);
         }
         body.extend_from_slice(&chunk);
     }
+    client_span.finish_success();
     serde_json::from_slice(&body).map_err(|_| Error::InvalidResponse)
 }
 
@@ -876,6 +906,7 @@ mod tests {
         method: String,
         path: String,
         authorization: String,
+        traceparent: String,
         parameters: HashMap<String, String>,
         parameter_pairs: Vec<(String, String)>,
         body: Value,
@@ -895,6 +926,7 @@ mod tests {
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default()
                 .to_owned(),
+            traceparent: traceparent(&headers),
             parameters,
             parameter_pairs: uri
                 .query()
@@ -919,6 +951,7 @@ mod tests {
             method: "GET".to_owned(),
             path: uri.path().to_owned(),
             authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            traceparent: traceparent(&headers),
             parameters,
             parameter_pairs: uri
                 .query()
@@ -943,6 +976,7 @@ mod tests {
             method: "POST".to_owned(),
             path: uri.path().to_owned(),
             authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            traceparent: traceparent(&headers),
             parameters: HashMap::new(),
             parameter_pairs: Vec::new(),
             body,
@@ -959,6 +993,7 @@ mod tests {
             method: "GET".to_owned(),
             path: uri.path().to_owned(),
             authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            traceparent: traceparent(&headers),
             parameters: HashMap::new(),
             parameter_pairs: Vec::new(),
             body: Value::Null,
@@ -983,6 +1018,7 @@ mod tests {
             method: "GET".to_owned(),
             path: uri.path().to_owned(),
             authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            traceparent: traceparent(&headers),
             parameters: parameter_pairs.iter().cloned().collect(),
             parameter_pairs,
             body: Value::Null,
@@ -1000,11 +1036,20 @@ mod tests {
             method: "POST".to_owned(),
             path: uri.path().to_owned(),
             authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            traceparent: traceparent(&headers),
             parameters: HashMap::new(),
             parameter_pairs: Vec::new(),
             body,
         };
         Json(json!({"silenceID":"silence-123"}))
+    }
+
+    fn traceparent(headers: &HeaderMap) -> String {
+        headers
+            .get("traceparent")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
     }
 
     fn profile_response() -> Value {
@@ -1340,6 +1385,7 @@ mod tests {
             "/api/datasources/proxy/uid/loki/loki/api/v1/query"
         );
         assert_eq!(record.authorization, "Bearer grafana-secret");
+        assert!(record.traceparent.is_empty());
         assert_eq!(record.parameters["query"], "{job=\"test\"}");
         assert_eq!(record.parameters["limit"], "12");
         assert_eq!(record.parameters["time"], "2026-08-09T12:00:00.000000000Z");
@@ -1537,6 +1583,7 @@ mod tests {
         assert_eq!(record.method, "GET");
         assert_eq!(record.path, "/api/v1/provisioning/alert-rules");
         assert_eq!(record.authorization, "Bearer grafana-secret");
+        assert!(record.traceparent.is_empty());
         assert!(record.parameter_pairs.is_empty());
         assert_eq!(output["result"].as_array().unwrap().len(), 1);
         assert_eq!(output["result"][0]["title"], "API errors");

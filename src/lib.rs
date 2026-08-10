@@ -1,5 +1,6 @@
 pub mod app;
 pub mod config;
+mod http_client;
 mod integrations;
 pub mod mcp;
 pub mod oauth;
