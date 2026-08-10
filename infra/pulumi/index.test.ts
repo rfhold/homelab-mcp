@@ -491,6 +491,9 @@ describe("standalone resource topology", () => {
       "homelab-mcp-tekton",
     );
     assert.equal((binding.inputs.metadata as any).namespace, "pipelines-as-code");
+    assert.deepEqual((binding.inputs.metadata as any).annotations, {
+      "pulumi.com/skipAwait": "true",
+    });
     assert.deepEqual(binding.inputs.roleRef, {
       apiGroup: "rbac.authorization.k8s.io",
       kind: "Role",

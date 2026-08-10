@@ -152,6 +152,7 @@ new k8s.rbac.v1.RoleBinding(
       name: "homelab-mcp",
       namespace: tektonNamespace,
       labels,
+      annotations: { "pulumi.com/skipAwait": "true" },
     },
     roleRef: {
       apiGroup: "rbac.authorization.k8s.io",
