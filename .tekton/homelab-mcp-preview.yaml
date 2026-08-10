@@ -265,7 +265,7 @@ spec:
               secret:
                 secretName: tekton-cluster-kubeconfig
           steps:
-            - name: preview-and-up
+            - name: apply-preview
               image: cr.holdenitdown.net/rfhold/general-ci:latest
               imagePullPolicy: Always
               workingDir: $(workspaces.source.path)/infra/pulumi
@@ -299,7 +299,6 @@ spec:
                 test "`bun --version`" = "1.3.5"
                 test "`pulumi version`" = "v3.253.0"
                 bun install --frozen-lockfile
-                pulumi preview --stack preview --diff --config "image=$(params.image)"
                 pulumi up --stack preview --yes --skip-preview --config "image=$(params.image)"
         params:
           - name: image

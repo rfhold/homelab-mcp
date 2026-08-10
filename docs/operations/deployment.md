@@ -81,6 +81,8 @@ The Deployment declares a dedicated ServiceAccount and an explicit one-hour proj
 
 A namespace Role in `pipelines-as-code` grants only the resource reads required for repositories, runs, tasks, pod ownership, and logs. It grants `PipelineRun` patch only for cancellation. The runtime receives no Secret read, Secret create, Secret delete, cluster role, or unrelated write permission.
 
+The CI deployment runs `pulumi up --skip-preview`. A separate authorized local preview must be reviewed before pushing an infrastructure revision because Kubernetes cannot reliably admit a new RoleBinding against a Role that exists only in server-side dry-run. Pulumi mock tests remain the executable declaration evidence for the binding's exact role and subject.
+
 Run, task, pod, and PAC Repository access is fixed to `pipelines-as-code`. The Role remains namespace-scoped, and every tool action enforces the canonical ownership checks.
 
 Local Pulumi mocks can verify declarations but cannot verify effective cluster authorization or controller behavior. Any Stash seed, preview, apply, credential creation, cluster read, dispatch, rerun, cancellation, or live verification requires exact target-specific authority.
@@ -91,7 +93,7 @@ Local Pulumi mocks can verify declarations but cannot verify effective cluster a
 
 The pipeline clones the requested revision and scans Cargo, container, Tekton, and Pulumi inputs for private key patterns. The amd64 and arm64 image builds then run in parallel.
 
-The final `general-ci:latest` step maps Grafana provider credentials, runs `pulumi preview --stack preview`, then runs `pulumi up --stack preview`.
+The final `general-ci:latest` step maps Grafana provider credentials and runs `pulumi up --stack preview --skip-preview`. It relies on the separately reviewed local preview and repository checks for pre-apply evidence.
 
 The main pipeline completed successfully for commit `4f2e192` and applied the preview stack. The current image digest is `sha256:9a9a5a9aacf508494f904a208c6c91d972ea8e568cd61f98eaa077a761c3b7fe`.
 

@@ -726,6 +726,19 @@ describe("standalone resource topology", () => {
     const source = readFileSync(join(__dirname, "index.ts"), "utf8");
     assert.doesNotMatch(source, /export const .*?(?:token|password|secret|key)/i);
   });
+
+  test("pipeline applies the separately previewed stack without an inline preview", () => {
+    const pipeline = readFileSync(
+      join(__dirname, "..", "..", ".tekton", "homelab-mcp-preview.yaml"),
+      "utf8",
+    );
+    assert.doesNotMatch(pipeline, /pulumi preview --stack preview/);
+    const apply = pipeline
+      .split("\n")
+      .find((line) => line.includes("pulumi up --stack preview"));
+    assert.ok(apply);
+    assert.match(apply, /--yes --skip-preview/);
+  });
 });
 
 function resource(type: string, name: string): ResourceRecord {
