@@ -13,7 +13,7 @@ The authenticated MCP server exposes two progressive tools:
 | `tekton_query` | `repository.list`, `workflow.list`, `run.list`, `run.get`, `run.wait`, `task.list`, `task.logs` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
 | `tekton_exec` | `workflow.dispatch`, `run.rerun`, `run.cancel` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` |
 
-Each tool provides progressive `help` actions, action-dependent `input`, and an optional jq-compatible `filter`. Filtering affects successful structured content only.
+Each tool provides progressive `help` actions, action-dependent `input`, and an optional jq-compatible `filter`. Every successful unfiltered read or mutation returns its complete normalized JSON in ordinary text content and the same value in `structuredContent`, so repository, workflow, run, and task identities and mutation acceptance details remain available for follow-up actions. A filter keeps text and successful structured content synchronized.
 
 Read actions exist only on `tekton_query`. Mutation actions exist only on `tekton_exec`.
 

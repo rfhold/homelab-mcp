@@ -163,7 +163,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result(output)),
+            Ok(output) => Ok(json_result(output)),
             Err(error) => Ok(tool_error("LogQL", error)),
         }
     }
@@ -187,7 +187,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result(output)),
+            Ok(output) => Ok(json_result(output)),
             Err(error) => Ok(tool_error("PromQL", error)),
         }
     }
@@ -211,7 +211,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result(output)),
+            Ok(output) => Ok(json_result(output)),
             Err(error) => Ok(tool_error("TraceQL", error)),
         }
     }
@@ -235,7 +235,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result(output)),
+            Ok(output) => Ok(json_result(output)),
             Err(error) => Ok(tool_error("profile", error)),
         }
     }
@@ -256,7 +256,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result(output)),
+            Ok(output) => Ok(json_result(output)),
             Err(error) => Ok(tool_error("alert rule", error)),
         }
     }
@@ -279,7 +279,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result(output)),
+            Ok(output) => Ok(json_result(output)),
             Err(error) => Ok(tool_error("alert instance", error)),
         }
     }
@@ -300,7 +300,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result(output)),
+            Ok(output) => Ok(json_result(output)),
             Err(error) => Ok(tool_error("silence", error)),
         }
     }
@@ -321,7 +321,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
-            Ok(output) => query_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tool_error("dashboard", error),
         })
     }
@@ -342,7 +342,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
-            Ok(output) => query_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tool_error("dashboard", error),
         })
     }
@@ -447,7 +447,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("repository", error),
         })
     }
@@ -468,7 +468,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("workflow", error),
         })
     }
@@ -489,7 +489,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("run", error),
         })
     }
@@ -510,7 +510,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("run", error),
         })
     }
@@ -531,7 +531,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("run", error),
         })
     }
@@ -552,7 +552,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("task", error),
         })
     }
@@ -573,7 +573,7 @@ impl HomelabMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("task log", error),
         })
     }
@@ -636,7 +636,7 @@ impl HomelabMcp {
             () = cancellation => return tekton_tool_error("workflow", TektonError::MutationOutcomeUnknown),
         };
         match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("workflow", error),
         }
     }
@@ -651,7 +651,7 @@ impl HomelabMcp {
             () = cancellation => return tekton_tool_error("run", TektonError::MutationOutcomeUnknown),
         };
         match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("run", error),
         }
     }
@@ -666,20 +666,15 @@ impl HomelabMcp {
             () = cancellation => return tekton_tool_error("run", TektonError::MutationOutcomeUnknown),
         };
         match result {
-            Ok(output) => tekton_result(output),
+            Ok(output) => json_result(output),
             Err(error) => tekton_tool_error("run", error),
         }
     }
 }
 
-fn query_result(output: serde_json::Value) -> McpToolResult {
-    let mode = output["mode"].as_str().unwrap_or("query");
-    let result_type = output["result_type"].as_str().unwrap_or("unknown");
-    let count = output["result"].as_array().map_or(1, Vec::len);
-    McpToolResult::new(json!({
-        "content": [{"type":"text","text":format!("{mode} {result_type} result with {count} item(s).")}],
-        "structuredContent": output
-    }))
+fn json_result(output: serde_json::Value) -> McpToolResult {
+    mcp::progressive::tool_result(output, None)
+        .expect("unfiltered JSON output must produce a tool result")
 }
 
 fn silence_result(output: serde_json::Value) -> McpToolResult {
@@ -724,14 +719,6 @@ fn render_result(
 
 fn tool_error(query_name: &str, error: GrafanaError) -> McpToolResult {
     error.into_tool_error(query_name).into_mcp_result()
-}
-
-fn tekton_result(output: serde_json::Value) -> McpToolResult {
-    let result_type = output["result_type"].as_str().unwrap_or("mutation");
-    McpToolResult::new(json!({
-        "content": [{"type":"text", "text":format!("Tekton {result_type} request completed.")}],
-        "structuredContent": output,
-    }))
 }
 
 fn tekton_tool_error(subject: &str, error: TektonError) -> McpToolResult {
@@ -895,6 +882,26 @@ mod tests {
                 .unwrap_or_default()
                 .to_owned(),
         ));
+    }
+
+    #[test]
+    fn unfiltered_grafana_and_tekton_text_matches_structured_json() {
+        for output in [
+            json!({
+                "mode":"list", "result_type":"dashboards",
+                "result":[{"uid":"dash-1","title":"Overview"}]
+            }),
+            json!({
+                "status":"accepted", "run_id":"pipelines-as-code/run-1",
+                "repository":"rfhold/repo", "workflow":"workflow/abc"
+            }),
+        ] {
+            let result = json_result(output).raw;
+            let text = result["content"][0]["text"].as_str().unwrap();
+            let parsed: Value = serde_json::from_str(text).unwrap();
+
+            assert_eq!(parsed, result["structuredContent"]);
+        }
     }
 
     fn request(method: &str, id: &str, params: Value) -> Value {

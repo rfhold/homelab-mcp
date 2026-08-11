@@ -18,7 +18,7 @@ One authenticated MCP server exposes three Grafana progressive tools:
 
 Both generated top-level schemas accept `action`, action-dependent `input`, and an optional jq-compatible `filter`. Each tool also generates `help`, which takes no `input` and reports that tool's namespaces. Calling `help.<namespace>` reports the namespace's actions and input schemas. Unknown fields, tools, actions, invalid schemas, and invalid filters produce JSON-RPC errors.
 
-For a schema-valid action that returns a successful semantic `McpToolResult`, `filter` applies to `structuredContent`. The exact filtered JSON value becomes `structuredContent` directly, including arrays, scalars, and null, without a `{ "result": ... }` wrapper. Text content is rewritten to the compact serialized filtered JSON so visible text and structured output agree; non-text content blocks, `_meta`, and extensions remain unchanged. Generated help and other legacy JSON actions retain `{ "result": <filtered-value> }` wrapping. Calls without a filter preserve the action's original summary content, and `isError: true` results preserve their complete original envelope without applying the filter.
+For a schema-valid action that returns a successful semantic `McpToolResult`, `filter` applies to `structuredContent`. The exact filtered JSON value becomes `structuredContent` directly, including arrays, scalars, and null, without a `{ "result": ... }` wrapper. Text content is rewritten to the compact serialized filtered JSON so visible text and structured output agree; non-text content blocks, `_meta`, and extensions remain unchanged. Generated help and other legacy JSON actions retain `{ "result": <filtered-value> }` wrapping. Without a filter, every `grafana_query` success uses the complete normalized JSON as text and the same object as `structuredContent`. `grafana_render` retains its specialized text-plus-image response, and `silence.create` retains its concise acknowledgment containing the created silence ID. `isError: true` results preserve their complete original envelope without applying the filter.
 
 ## Authorization and Destination
 
@@ -43,7 +43,7 @@ The client releases its permit after success, failure, timeout, or cancellation.
 
 ## Read Results and Errors
 
-Every unfiltered `grafana_query` success returns one short text item and object-shaped `structuredContent`. Each focused action specification owns its normalized result contract. Reads never expose Grafana headers, credentials, datasource configuration, raw response wrappers, or unapproved upstream models.
+Every unfiltered `grafana_query` success returns one text item containing the complete normalized JSON and the same object-shaped value in `structuredContent`. Each focused action specification owns its normalized result contract. Reads never expose Grafana headers, credentials, datasource configuration, raw response wrappers, or unapproved upstream models.
 
 Alert-rule and alert-instance label and annotation maps apply a conservative URL-field exclusion policy. After trimming surrounding whitespace, an entry is omitted when its case-insensitive key ends in `url`, or its value starts with `/` (including `//`), starts with an absolute URI scheme of the form `[A-Za-z][A-Za-z0-9+.-]*:`, or contains a non-empty Markdown link target of the form `](...)`. This deterministic policy applies equally to labels and annotations; ordinary text such as `API is failing` remains. It does not attempt to recognize every hostname or every possible URL representation.
 

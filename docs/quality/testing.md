@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository runtime has 116 passing Rust tests under Rust 1.96: 114 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, and cleanup control.
+The repository runtime has 117 passing Rust tests under Rust 1.96: 115 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
@@ -105,7 +105,7 @@ Tests must cover the [Grafana tool specifications](../grafana-query/README.md), 
 - Authorization-header-only token use and disabled redirects;
 - normalized `streams`, `matrix`, `vector`, and `scalar` results;
 - deterministic aggregate stream-entry truncation to the validated line limit;
-- optional normalized statistics and short unfiltered summaries;
+- optional normalized statistics and synchronized complete unfiltered JSON text and structured content;
 - direct successful semantic filter output, synchronized compact text, and legacy `{ "result": ... }` wrapping for generated help and other JSON actions;
 - every stable semantic error code and retryable value; and
 - JSON-RPC errors for malformed protocol, tool shape, action, and filter requests.
@@ -162,7 +162,8 @@ Tests must cover the [Tekton tool specifications](../tekton/README.md), includin
 - dispatch validation, fixed PAC POST `/incoming`, caller-control rejection, and 2xx acceptance semantics;
 - safe rerun replay of the prior branch and parameters;
 - active owned-run checks and a `spec.status=Cancelled`-only patch;
-- no automatic retries and non-retryable `mutation_outcome_unknown` after ambiguous sends; and
+- no automatic retries and non-retryable `mutation_outcome_unknown` after ambiguous sends;
+- complete unfiltered normalized JSON in text content synchronized with `structuredContent`, including identities and mutation acceptance details needed by follow-up actions; and
 - exclusion of secrets, raw objects, internal routes, and upstream bodies from MCP, logs, traces, metrics, and errors.
 
 Pulumi mock tests must cover separate env-backed Stashes, environment seed names, application Secret projection, the dedicated ServiceAccount, explicit token projection, namespace Role rules, and absence of Secret or cluster-wide permissions.
