@@ -15,6 +15,20 @@ use serde_json::json;
 
 use crate::{
     config::OAuthConfig,
+    integrations::ceph::{
+        Error as CephError,
+        actions::{
+            ClusterListInput as CephClusterListInput, DeviceGetInput as CephDeviceGetInput,
+            DeviceListInput as CephDeviceListInput, ExecCommand as CephExecCommand,
+            FlagsGetInput as CephFlagsGetInput, MetricsSummaryInput as CephMetricsSummaryInput,
+            OsdDestroyInput as CephOsdDestroyInput, OsdGetInput as CephOsdGetInput,
+            OsdListInput as CephOsdListInput, OsdMarkInput as CephOsdMarkInput,
+            OsdPurgeInput as CephOsdPurgeInput, OsdReweightInput as CephOsdReweightInput,
+            OsdSafeToDestroyInput as CephOsdSafeToDestroyInput, OsdScrubInput as CephOsdScrubInput,
+            QueryCommand as CephQueryCommand, StatusGetInput as CephStatusGetInput,
+            TaskListInput as CephTaskListInput, ValidationError as CephValidationError,
+        },
+    },
     integrations::grafana::{
         Error as GrafanaError, RenderedImage,
         actions::{
@@ -43,6 +57,9 @@ use crate::{
     services::Services,
 };
 
+// Progressive schemas reject unsupported actions before handler dispatch.
+const _: CephError = CephError::UnsupportedAction;
+
 #[cfg(test)]
 const QUERY_TOOL_NAME: &str = "grafana_query";
 #[cfg(test)]
@@ -57,6 +74,10 @@ const TEKTON_EXEC_TOOL_NAME: &str = "tekton_exec";
 const KUBERNETES_QUERY_TOOL_NAME: &str = "kubernetes_query";
 #[cfg(test)]
 const KUBERNETES_EXEC_TOOL_NAME: &str = "kubernetes_exec";
+#[cfg(test)]
+const CEPH_QUERY_TOOL_NAME: &str = "ceph_query";
+#[cfg(test)]
+const CEPH_EXEC_TOOL_NAME: &str = "ceph_exec";
 
 #[derive(Clone)]
 pub struct HomelabMcp {
@@ -175,6 +196,34 @@ pub fn router(
             "idempotentHint": false,
             "openWorldHint": true
         })
+    ),
+    tool(
+        name = "ceph_query",
+        description = "Execute bounded, read-only queries against configured Ceph clusters.",
+        annotations = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+        }),
+        namespace(name = "cluster", description = "Inspect the configured Ceph cluster catalog."),
+        namespace(name = "status", description = "Inspect native Ceph cluster health."),
+        namespace(name = "metrics", description = "Inspect current Ceph Dashboard metrics."),
+        namespace(name = "osd", description = "Inspect Ceph OSD state and safety."),
+        namespace(name = "device", description = "Inspect devices attached to Ceph OSDs."),
+        namespace(name = "flags", description = "Inspect curated Ceph cluster flags."),
+        namespace(name = "task", description = "Inspect bounded Ceph Dashboard tasks.")
+    ),
+    tool(
+        name = "ceph_exec",
+        description = "Perform curated operationally consequential Ceph mutations.",
+        annotations = json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+        }),
+        namespace(name = "osd", description = "Mutate exact Ceph OSD state.")
     )
 )]
 impl HomelabMcp {
@@ -904,6 +953,216 @@ impl HomelabMcp {
             Err(error) => kubernetes_tool_error(subject, error),
         }
     }
+
+    /// List the configured Ceph cluster catalog without contacting a Dashboard.
+    #[action(tool = "ceph_query", name = "cluster.list")]
+    async fn ceph_clusters(
+        &self,
+        input: CephClusterListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "cluster", context.cancelled())
+            .await
+    }
+
+    /// Get bounded normalized native health for one configured Ceph cluster.
+    #[action(tool = "ceph_query", name = "status.get")]
+    async fn ceph_status(
+        &self,
+        input: CephStatusGetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "status", context.cancelled())
+            .await
+    }
+
+    /// Get a bounded current metrics snapshot for one configured Ceph cluster.
+    #[action(tool = "ceph_query", name = "metrics.summary")]
+    async fn ceph_metrics(
+        &self,
+        input: CephMetricsSummaryInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "metrics", context.cancelled())
+            .await
+    }
+
+    /// List bounded normalized OSD summaries for one configured Ceph cluster.
+    #[action(tool = "ceph_query", name = "osd.list")]
+    async fn ceph_osds(
+        &self,
+        input: CephOsdListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "OSD", context.cancelled())
+            .await
+    }
+
+    /// Get one exact normalized Ceph OSD.
+    #[action(tool = "ceph_query", name = "osd.get")]
+    async fn ceph_osd(
+        &self,
+        input: CephOsdGetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "OSD", context.cancelled())
+            .await
+    }
+
+    /// Ask Ceph whether one exact OSD is currently safe to destroy.
+    #[action(tool = "ceph_query", name = "osd.safe-to-destroy")]
+    async fn ceph_osd_safe_to_destroy(
+        &self,
+        input: CephOsdSafeToDestroyInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "OSD", context.cancelled())
+            .await
+    }
+
+    /// List bounded normalized devices attached to one exact Ceph OSD.
+    #[action(tool = "ceph_query", name = "device.list")]
+    async fn ceph_devices(
+        &self,
+        input: CephDeviceListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "device", context.cancelled())
+            .await
+    }
+
+    /// Get one exact normalized device attached to one exact Ceph OSD.
+    #[action(tool = "ceph_query", name = "device.get")]
+    async fn ceph_device(
+        &self,
+        input: CephDeviceGetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "device", context.cancelled())
+            .await
+    }
+
+    /// Get the current state of curated Ceph cluster flags.
+    #[action(tool = "ceph_query", name = "flags.get")]
+    async fn ceph_flags(
+        &self,
+        input: CephFlagsGetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "flags", context.cancelled())
+            .await
+    }
+
+    /// List bounded current and recent Ceph Dashboard tasks.
+    #[action(tool = "ceph_query", name = "task.list")]
+    async fn ceph_tasks(
+        &self,
+        input: CephTaskListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_ceph_query(input.validate(), "task", context.cancelled())
+            .await
+    }
+
+    /// Mark one exact Ceph OSD in, out, or down.
+    #[action(tool = "ceph_exec", name = "osd.mark")]
+    async fn ceph_mark_osd(
+        &self,
+        input: CephOsdMarkInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
+            .await)
+    }
+
+    /// Reweight one exact Ceph OSD to a finite value from zero through one.
+    #[action(tool = "ceph_exec", name = "osd.reweight")]
+    async fn ceph_reweight_osd(
+        &self,
+        input: CephOsdReweightInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
+            .await)
+    }
+
+    /// Request a normal or deep scrub of one exact Ceph OSD.
+    #[action(tool = "ceph_exec", name = "osd.scrub")]
+    async fn ceph_scrub_osd(
+        &self,
+        input: CephOsdScrubInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
+            .await)
+    }
+
+    /// Destroy one explicitly confirmed OSD only after a fresh safety check.
+    #[action(tool = "ceph_exec", name = "osd.destroy")]
+    async fn ceph_destroy_osd(
+        &self,
+        input: CephOsdDestroyInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
+            .await)
+    }
+
+    /// Purge one explicitly confirmed OSD only after a fresh safety check.
+    #[action(tool = "ceph_exec", name = "osd.purge")]
+    async fn ceph_purge_osd(
+        &self,
+        input: CephOsdPurgeInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
+            .await)
+    }
+
+    async fn dispatch_ceph_query(
+        &self,
+        command: Result<CephQueryCommand, CephValidationError>,
+        subject: &str,
+        cancellation: impl Future<Output = ()>,
+    ) -> ServerResult<McpToolResult> {
+        let command = match command {
+            Ok(command) => command,
+            Err(_) => return Ok(ceph_tool_error(subject, CephError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.ceph.query(&command) => result,
+            () = cancellation => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => json_result(output),
+            Err(error) => ceph_tool_error(subject, error),
+        })
+    }
+
+    async fn dispatch_ceph_exec(
+        &self,
+        command: Result<CephExecCommand, CephValidationError>,
+        subject: &str,
+        cancellation: impl Future<Output = ()>,
+    ) -> McpToolResult {
+        let command = match command {
+            Ok(command) => command,
+            Err(_) => return ceph_tool_error(subject, CephError::InvalidArguments),
+        };
+        let result = tokio::select! {
+            result = self.services.ceph.execute(&command) => result,
+            () = cancellation => return ceph_tool_error(subject, CephError::MutationOutcomeUnknown),
+        };
+        match result {
+            Ok(output) => json_result(output),
+            Err(error) => ceph_tool_error(subject, error),
+        }
+    }
 }
 
 fn json_result(output: serde_json::Value) -> McpToolResult {
@@ -960,6 +1219,10 @@ fn tekton_tool_error(subject: &str, error: TektonError) -> McpToolResult {
 }
 
 fn kubernetes_tool_error(subject: &str, error: KubernetesError) -> McpToolResult {
+    error.into_tool_error(subject).into_mcp_result()
+}
+
+fn ceph_tool_error(subject: &str, error: CephError) -> McpToolResult {
     error.into_tool_error(subject).into_mcp_result()
 }
 
@@ -1742,7 +2005,7 @@ mod tests {
 
         let (_, listed) = post_mcp(&endpoint, request("tools/list", "list", json!({}))).await;
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 9);
         let query_tool = tools
             .iter()
             .find(|tool| tool["name"] == QUERY_TOOL_NAME)
@@ -1771,6 +2034,76 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == KUBERNETES_EXEC_TOOL_NAME)
             .unwrap();
+        let ceph_query_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == CEPH_QUERY_TOOL_NAME)
+            .unwrap();
+        let ceph_exec_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == CEPH_EXEC_TOOL_NAME)
+            .unwrap();
+        assert_eq!(ceph_query_tool["annotations"], query_tool["annotations"]);
+        assert_eq!(
+            ceph_exec_tool["annotations"],
+            tekton_exec_tool["annotations"]
+        );
+        let ceph_query_actions = ceph_query_tool["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        for action in [
+            "help",
+            "help.cluster",
+            "help.status",
+            "help.metrics",
+            "help.osd",
+            "help.device",
+            "help.flags",
+            "help.task",
+            "cluster.list",
+            "status.get",
+            "metrics.summary",
+            "osd.list",
+            "osd.get",
+            "osd.safe-to-destroy",
+            "device.list",
+            "device.get",
+            "flags.get",
+            "task.list",
+        ] {
+            assert!(
+                ceph_query_actions.contains(&json!(action)),
+                "missing {action}"
+            );
+        }
+        let ceph_exec_actions = ceph_exec_tool["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        for action in [
+            "help",
+            "help.osd",
+            "osd.mark",
+            "osd.reweight",
+            "osd.scrub",
+            "osd.destroy",
+            "osd.purge",
+        ] {
+            assert!(
+                ceph_exec_actions.contains(&json!(action)),
+                "missing {action}"
+            );
+        }
+        for removed in ["help.flags", "flags.set"] {
+            assert!(!ceph_exec_actions.contains(&json!(removed)));
+        }
+        for legacy in [
+            "cluster_list",
+            "status_get",
+            "osd_safe_to_destroy",
+            "flags_set",
+        ] {
+            assert!(!ceph_query_actions.contains(&json!(legacy)));
+            assert!(!ceph_exec_actions.contains(&json!(legacy)));
+        }
         assert_eq!(
             kubernetes_query_tool["annotations"],
             query_tool["annotations"]
@@ -1870,6 +2203,135 @@ mod tests {
         assert_eq!(
             clusters["result"]["structuredContent"]["result"]["clusters"][0]["name"],
             "test"
+        );
+        let (_, ceph_help) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "ceph-help",
+                json!({
+                    "name":CEPH_QUERY_TOOL_NAME,
+                    "arguments":{"action":"help","filter":".namespaces"}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            ceph_help["result"]["structuredContent"]["result"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|namespace| namespace["namespace"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "cluster", "status", "metrics", "osd", "device", "flags", "task"
+            ]
+        );
+        let mut ceph_help_actions = Vec::new();
+        for namespace in [
+            "cluster", "status", "metrics", "osd", "device", "flags", "task",
+        ] {
+            let (_, help) = post_mcp(
+                &endpoint,
+                request(
+                    "tools/call",
+                    "ceph-namespace-help",
+                    json!({
+                        "name":CEPH_QUERY_TOOL_NAME,
+                        "arguments":{"action":format!("help.{namespace}"),"filter":".actions"}
+                    }),
+                ),
+            )
+            .await;
+            ceph_help_actions.extend(
+                help["result"]["structuredContent"]["result"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .cloned(),
+            );
+        }
+        assert_eq!(
+            ceph_help_actions
+                .iter()
+                .map(|action| action["action"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "cluster.list",
+                "status.get",
+                "metrics.summary",
+                "osd.list",
+                "osd.get",
+                "osd.safe-to-destroy",
+                "device.list",
+                "device.get",
+                "flags.get",
+                "task.list"
+            ]
+        );
+        assert!(
+            ceph_help_actions
+                .iter()
+                .all(|action| action["input_schema"]["additionalProperties"] == false)
+        );
+        let (_, ceph_osd_help) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "ceph-osd-help",
+                json!({
+                    "name":CEPH_EXEC_TOOL_NAME,
+                    "arguments":{"action":"help.osd","filter":".actions"}
+                }),
+            ),
+        )
+        .await;
+        let ceph_osd_actions = ceph_osd_help["result"]["structuredContent"]["result"]
+            .as_array()
+            .unwrap();
+        assert_eq!(ceph_osd_actions.len(), 5);
+        for action in ceph_osd_actions {
+            assert_eq!(action["input_schema"]["additionalProperties"], false);
+        }
+        let destroy_schema = &ceph_osd_actions
+            .iter()
+            .find(|action| action["action"] == "osd.destroy")
+            .unwrap()["input_schema"];
+        assert_eq!(
+            destroy_schema["required"],
+            json!(["cluster", "osd_id", "confirmation"])
+        );
+        let (_, ceph_clusters) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "ceph-clusters",
+                json!({
+                    "name":CEPH_QUERY_TOOL_NAME,
+                    "arguments":{"action":"cluster.list","input":{}}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            ceph_clusters["result"]["structuredContent"],
+            json!({"result":[{"cluster":"test-cluster"}],"truncated":false})
+        );
+        let (_, filtered_ceph_clusters) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "filtered-ceph-clusters",
+                json!({
+                    "name":CEPH_QUERY_TOOL_NAME,
+                    "arguments":{"action":"cluster.list","input":{},"filter":".result"}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            filtered_ceph_clusters["result"]["structuredContent"],
+            json!([{"cluster":"test-cluster"}])
         );
         assert_eq!(
             tekton_query_tool["annotations"],
@@ -2405,6 +2867,7 @@ mod tests {
                     std::time::Duration::from_secs(1),
                 ),
                 kubernetes: crate::integrations::kubernetes::KubernetesCatalog::inert_for_test(),
+                ceph: crate::integrations::ceph::CephCatalog::disabled_for_test(),
             }),
         });
         let (mcp_origin, mcp_task) = serve(streamable_http_router(handler)).await;
@@ -2526,6 +2989,22 @@ mod tests {
                 KUBERNETES_QUERY_TOOL_NAME,
                 json!({"action":"cluster_list","input":{"extra":true}}),
             ),
+            (
+                CEPH_QUERY_TOOL_NAME,
+                json!({"action":"osd.mark","input":{"cluster":"test-cluster","osd_id":1,"state":"out"}}),
+            ),
+            (
+                CEPH_EXEC_TOOL_NAME,
+                json!({"action":"status.get","input":{"cluster":"test-cluster"}}),
+            ),
+            (
+                CEPH_EXEC_TOOL_NAME,
+                json!({"action":"flags.set","input":{"cluster":"test-cluster","flag":"noout","state":"set"}}),
+            ),
+            (
+                CEPH_QUERY_TOOL_NAME,
+                json!({"action":"cluster.list","input":{"extra":true}}),
+            ),
             (QUERY_TOOL_NAME, json!({"action":"help","extra":true})),
             (QUERY_TOOL_NAME, json!({"action":"help","filter":".["})),
         ] {
@@ -2627,6 +3106,29 @@ mod tests {
                 "retryable":false
             })
         );
+
+        let (_, ceph_semantic) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "ceph-semantic",
+                json!({
+                    "name":CEPH_QUERY_TOOL_NAME,
+                    "arguments":{"action":"status.get","input":{"cluster":"Bad.Name"}}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(ceph_semantic["result"]["isError"], true);
+        assert_eq!(
+            ceph_semantic["result"]["structuredContent"]["error"],
+            json!({
+                "code":"invalid_arguments",
+                "message":"The Ceph status arguments are invalid.",
+                "retryable":false
+            })
+        );
+        assert!(!ceph_semantic.to_string().contains("dashboard-password"));
 
         let (_, unknown_tool) = post_mcp(
             &endpoint,

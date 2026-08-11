@@ -2,13 +2,13 @@
 
 ## Status
 
-The repository runtime has 157 passing Rust tests under Rust 1.96: 155 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, Kubernetes actions, and cleanup control.
+The repository runtime has 181 passing Rust tests under Rust 1.96: 179 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana, Tekton, Kubernetes, Ceph Dashboard, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
 Rust 1.95 cannot run the suite because the manifest and Kuri crates require Rust 1.96.
 
-Pulumi has 20 passing mock tests for the declared runtime and deployment contract. The current container built and deployed successfully to preview; the Kubernetes worktree revision has not been deployed.
+Pulumi has 21 passing mock tests for the declared runtime and deployment contract. The current container built and deployed successfully to preview; the Kubernetes and Ceph worktree revisions have not been deployed.
 
 The preview workflow completed successfully and applied commit `798dd92`.
 
@@ -46,11 +46,12 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Generic Kuri `mcp` | 111 standard all-feature tests pass; both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly. |
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
-| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, seven-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
+| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, nine-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
 | Grafana actions | Datasource queries, dashboard inventory and PNG rendering, alerting and recording-rule reads, silence creation, bounds, normalization, fixed routes, redirects, semantic errors, timeout, capacity, and permit release against mock HTTP servers. |
 | Kubernetes actions | Exact typed action schemas, all 36 resource kinds, namespace scope, fixed API paths and mutations, normalization, limits, safe errors, process supervision, and uncertain mutation outcomes. |
-| Pulumi policy | Immutable images, HTTPS origins, wrapping-key versions, strict normalized Kubernetes cluster configuration and ports, Editor service-account declaration, and stack configuration safety. |
-| Pulumi topology | Namespace, backups, CNPG, Authentik, Grafana, Kubernetes identities and exact RBAC, Secrets, workload hardening, per-cluster egress, Service, and route. |
+| Ceph Dashboard actions | Ten query and five OSD exec schemas, fixed Squid routes, normalization, bounds, safe-to-destroy checks, destructive confirmations, synchronous completion, safe HTTP 202 task identities, and uncertain mutation outcomes. |
+| Pulumi policy | Immutable images, HTTPS origins, wrapping-key versions, strict normalized Kubernetes and Ceph cluster configuration, Editor service-account declaration, and stack configuration safety. |
+| Pulumi topology | Namespace, backups, CNPG, Authentik, Grafana, Kubernetes identities and exact RBAC, Ceph credential Stashes, Secrets, workload hardening, egress, Service, and route. |
 | Current container runtime | Multi-architecture image delivery succeeded; the preview pod is ready with zero restarts. |
 | Current preview pipeline | Seven tasks passed, Pulumi applied preview, health/readiness return 200, OAuth metadata is live, and unauthenticated `/mcp` returns the required Bearer challenge. |
 
@@ -211,6 +212,32 @@ RBAC declaration tests verify fixed cluster-wide reads, exact curated writes, ex
 Preview evidence requires exact target-specific approval. It must verify identity, effective RBAC, API reachability, catalog behavior, representative reads, denied exclusions, server dry-run, controlled accepted mutations, and uncertain-outcome recovery.
 
 Current preview evidence does not cover `kubernetes_query`, `kubernetes_exec`, the expanded OAuth scope set, runtime kubeconfigs, effective Kubernetes RBAC, or any Kubernetes action. Production remains unapplied and outside current verification.
+
+## Ceph Dashboard Contract Coverage
+
+The [Ceph Dashboard specifications](../ceph/README.md) define locally implemented behavior. Coordinator evidence records successful `cargo fmt --check`, `cargo check`, `cargo clippy -- -D warnings`, and sequential `cargo test` with 179 library tests and two binary tests. It also records successful Pulumi `bun run build`, `bun test index.test.ts` with 21 tests, and `git diff --check`.
+
+Local runtime tests cover:
+
+- progressive help, typed schemas, jq-compatible filters, action separation, and exact MCP annotations for all ten query and five exec actions;
+- proof that the global OAuth boundary grants both Ceph tools to every authenticated MCP principal and has no per-tool enforcement;
+- exact `pantheon` and `romulus` selection with fixed HTTPS origins and dedicated credentials that callers cannot choose or observe;
+- rejection of arbitrary commands, routes, paths, methods, headers, bodies, force, retries, OSD `lost`, OSD `up`, and every deferred action;
+- bounded concurrency, deadlines, response reads, normalized allowlists, stable ordering, explicit list truncation, safe errors, cancellation, and secret-free output and telemetry;
+- current-only `metrics.summary` behavior through the Dashboard API, with no Prometheus or historical query surface;
+- normalized cluster status, OSD, safe-to-destroy, device, allowlisted flag, and reviewed OSD task behavior;
+- `osd.mark` limited to `in`, `out`, and `down`, and `osd.reweight` limited to finite values from 0 through 1;
+- `osd.scrub` limited to normal and deep, with no advertised cluster flag mutation;
+- a fresh safe-to-destroy check and exact `<action> osd.<id> on <cluster>` confirmation before destroy or purge dispatch;
+- no force path, distinct destroy and purge semantics, completed synchronous results, and safe task identities for HTTP 202;
+- one mutation attempt, explicit safe rejection, non-retryable `mutation_outcome_unknown` after ambiguous dispatch, and read-before-retry recovery; and
+- proof that Rook custom-resource reads remain coarse controller-state views while Ceph owns native operational state.
+
+Pulumi mock and policy tests cover two preview cluster entries, strict HTTPS origins, separate username and password Stashes per cluster, output-only Secret projection, credential-to-origin mapping, existing TCP 443 egress, unchanged inbound routes, no Ceph monitor exposure, no sibling route changes, and disabled production declarations.
+
+Evidence gates remain independent. The targeted preview apply seeded four Stashes from shared administrator credentials and updated two provider state records; it did not update a Kubernetes resource. Record future dedicated Dashboard account creation separately for each cluster. Record a full preview apply separately from authenticated live reads. Authorize and record every individual representative live mutation with its cluster, target, requested state, completion or task identity, post-mutation observation, and uncertain-outcome recovery where exercised. Destroy and purge evidence also requires a fresh safe-to-destroy result and the exact confirmation string.
+
+No Dashboard account creation, full preview apply, authenticated Ceph read, live Ceph mutation, preview rollout, production Ceph resource, or production apply occurred. Production configuration explicitly disables Ceph through an empty catalog. No Ceph live check is authorized by this document.
 
 ## Preview Evidence
 

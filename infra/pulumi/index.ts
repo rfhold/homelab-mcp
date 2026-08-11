@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { OAuthApplication } from "./authentik";
 import {
   requireImmutableImage,
+  validateCephClusters,
   validateHttpsOrigin,
   validateKubernetesClusters,
   validateWrappingKeyVersions,
@@ -46,6 +47,9 @@ const backupRetention = config.require("backupRetention");
 const backupSchedule = config.require("backupSchedule");
 const kubernetesClusters = validateKubernetesClusters(
   config.requireObject<unknown>("kubernetesClusters"),
+);
+const cephClusters = validateCephClusters(
+  config.requireObject<unknown>("cephClusters"),
 );
 const accessTokenTtl = config.require("mcpOAuthAccessTokenTtl");
 const refreshTokenTtl = config.require("mcpOAuthRefreshTokenTtl");
@@ -92,6 +96,32 @@ const forgejoToken = new pulumi.Stash("homelab-mcp-forgejo-token", {
 });
 const pacIncomingSecret = new pulumi.Stash("homelab-mcp-pac-incoming-secret", {
   input: pulumi.secret(optionalEnv("PAC_INCOMING_SECRET")),
+});
+const cephCredentials = cephClusters.map((cluster) => {
+  const environmentPrefix = cluster.name.toUpperCase().replace(/-/g, "_");
+  const username = new pulumi.Stash(
+    `homelab-mcp-ceph-${cluster.name}-username`,
+    {
+      input: pulumi.secret(
+        optionalEnv(`CEPH_DASHBOARD_${environmentPrefix}_USERNAME`),
+      ),
+    },
+  );
+  const password = new pulumi.Stash(
+    `homelab-mcp-ceph-${cluster.name}-password`,
+    {
+      input: pulumi.secret(
+        optionalEnv(`CEPH_DASHBOARD_${environmentPrefix}_PASSWORD`),
+      ),
+    },
+  );
+  return {
+    cluster,
+    username,
+    password,
+    usernameKey: `HOMELAB_MCP_CEPH_${environmentPrefix}_USERNAME`,
+    passwordKey: `HOMELAB_MCP_CEPH_${environmentPrefix}_PASSWORD`,
+  };
 });
 
 const labels = {
@@ -755,6 +785,25 @@ const appSecret = new k8s.core.v1.Secret(
           cache_dir: `/tmp/kubectl/${cluster.name}`,
         })),
       ),
+      HOMELAB_MCP_CEPH_CLUSTERS: JSON.stringify(
+        cephCredentials.map(
+          ({ cluster, usernameKey, passwordKey }) => ({
+            name: cluster.name,
+            origin: cluster.origin,
+            expected_major_release: cluster.expectedMajorRelease,
+            username_env: usernameKey,
+            password_env: passwordKey,
+          }),
+        ),
+      ),
+      ...Object.fromEntries(
+        cephCredentials.flatMap(
+          ({ username, password, usernameKey, passwordKey }) => [
+            [usernameKey, username.output],
+            [passwordKey, password.output],
+          ],
+        ),
+      ),
       HOMELAB_MCP_DEPLOYMENT_ENVIRONMENT: deploymentEnvironment,
       HOMELAB_MCP_SERVICE_NAMESPACE: "homelab",
       HOMELAB_MCP_PYROSCOPE_URL: "https://telemetry.holdenitdown.net:4040",
@@ -771,6 +820,10 @@ const appSecret = new k8s.core.v1.Secret(
       grafanaToken,
       forgejoToken,
       pacIncomingSecret,
+      ...cephCredentials.flatMap(({ username, password }) => [
+        username,
+        password,
+      ]),
       runtimeKubeconfigSecret,
     ],
     provider: pantheonProvider,

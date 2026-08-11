@@ -21,6 +21,7 @@ config:
       context: romulus
       server: https://romulus.holdenitdown.net:6443
       apiServerEndpointCidrs: [172.16.4.0/24]
+  homelab-mcp:cephClusters: []
   homelab-mcp:mcpOAuthAccessTokenTtl: "300"
   homelab-mcp:mcpOAuthRefreshTokenTtl: "86400"
   homelab-mcp:mcpOAuthRefreshFamilyTtl: "2592000"

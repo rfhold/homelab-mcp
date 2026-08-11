@@ -109,6 +109,16 @@ The reviewed runtime image includes `kubectl`, and server code pins all command 
 
 Before any preview apply, an authorized operator must review the exact catalog, ServiceAccounts, ClusterRoles, bindings, mounts, and egress destinations. Live reads, server dry-runs, real mutations, and credential operations require separate target-specific authority.
 
+## Ceph Dashboard Access
+
+The worktree implements the Ceph Dashboard runtime and preview-only Pulumi declarations. Local Rust and Pulumi checks pass. An authorized targeted preview apply seeded four Stashes from shared Dashboard administrator credentials. It updated two provider state records but did not update the application Secret, Deployment, or another Kubernetes resource. No Dashboard account creation, authenticated Ceph read, live Ceph mutation, or preview rollout has occurred.
+
+The [Ceph deployment and access contract](../ceph/spec/deployment-access.md) owns the preview declarations, dedicated per-cluster Dashboard users, Pulumi Stash credential delivery, fixed existing HTTPS destinations, production exclusion, and independent approval gates. The [Ceph tool specifications](../ceph/README.md) own action behavior and mutation safety.
+
+No new inbound service or OAuth route is required. Existing authenticated Ceph Dashboard TLS routes serve the fixed outbound integration destinations. The feature requires no Ceph monitor exposure and no sibling homelab route changes.
+
+Dedicated Dashboard account creation, a full preview Pulumi apply, authenticated live reads, and every individual representative live mutation remain separate gates. Production Ceph declarations remain disabled and unapplied.
+
 ## Preview Pipeline
 
 `.tekton/homelab-mcp-preview.yaml` targets `main` push and incoming events. It defines one preview path and no release path.

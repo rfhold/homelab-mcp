@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::{
     config::Config,
     integrations::{
+        ceph::{CephCatalog, CephClient},
         grafana::GrafanaClient,
         kubernetes::{KubernetesCatalog, KubernetesConfig},
         tekton::TektonClient,
@@ -17,6 +18,7 @@ pub struct Services {
     pub(crate) grafana: GrafanaClient,
     pub(crate) tekton: TektonClient,
     pub(crate) kubernetes: KubernetesCatalog,
+    pub(crate) ceph: CephCatalog,
 }
 
 impl Services {
@@ -30,6 +32,10 @@ impl Services {
             && let Some(password) = database_url.password()
         {
             redactions.push(password.to_owned());
+        }
+        for cluster in &config.integrations.ceph.clusters {
+            redactions.push(cluster.username.expose().to_owned());
+            redactions.push(cluster.password.expose().to_owned());
         }
         let keyring = fs::read(&config.oauth.wrapping_keys_file)
             .map_err(|_| "failed to read OAuth wrapping keyring for log redaction".to_owned())?;
@@ -65,6 +71,22 @@ impl Services {
                     })
                     .collect(),
             )?,
+            ceph: CephCatalog::new(
+                config
+                    .integrations
+                    .ceph
+                    .clusters
+                    .iter()
+                    .map(|cluster| {
+                        CephClient::new(
+                            cluster.origin.clone(),
+                            cluster.username.clone(),
+                            cluster.password.clone(),
+                        )
+                        .map(|client| (cluster.name.clone(), client))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )?,
         })
     }
 
@@ -74,6 +96,7 @@ impl Services {
             grafana,
             tekton: TektonClient::disabled_for_test(),
             kubernetes: KubernetesCatalog::inert_for_test(),
+            ceph: CephCatalog::disabled_for_test(),
         }
     }
 }

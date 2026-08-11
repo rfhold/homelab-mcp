@@ -5,6 +5,7 @@ import { after, before, describe, test } from "node:test";
 import * as pulumi from "@pulumi/pulumi";
 import {
   requireImmutableImage,
+  validateCephClusters,
   validateHttpsOrigin,
   validateKubernetesClusters,
   validateWrappingKeyVersions,
@@ -24,8 +25,14 @@ const previousGrafanaUrl = process.env.GRAFANA_URL;
 const previousGrafanaAuth = process.env.GRAFANA_AUTH;
 const previousForgejoToken = process.env.FORGEJO_HOLDENITDOWN_TOKEN;
 const previousPacIncomingSecret = process.env.PAC_INCOMING_SECRET;
+const previousCephRomulusUsername = process.env.CEPH_DASHBOARD_ROMULUS_USERNAME;
+const previousCephRomulusPassword = process.env.CEPH_DASHBOARD_ROMULUS_PASSWORD;
+const previousCephPantheonUsername = process.env.CEPH_DASHBOARD_PANTHEON_USERNAME;
+const previousCephPantheonPassword = process.env.CEPH_DASHBOARD_PANTHEON_PASSWORD;
 const forgejoTokenFixture = "test-forgejo-token";
 const pacIncomingSecretFixture = "test-pac-incoming-secret";
+const cephUsernameFixture = "test-ceph-user";
+const cephPasswordFixture = "test-ceph-password";
 let program: typeof import("./index");
 
 before(async () => {
@@ -56,6 +63,18 @@ before(async () => {
         apiServerEndpointCidrs: ["172.16.4.0/24"],
       },
     ]),
+    "homelab-mcp:cephClusters": JSON.stringify([
+      {
+        name: "romulus",
+        origin: "https://ceph.romulus.example.test",
+        expectedMajorRelease: 19,
+      },
+      {
+        name: "pantheon",
+        origin: "https://ceph.pantheon.example.test",
+        expectedMajorRelease: 19,
+      },
+    ]),
     "homelab-mcp:backupRetention": "7d",
     "homelab-mcp:backupSchedule": "0 30 1 * * *",
     "homelab-mcp:mcpOAuthAccessTokenTtl": "300",
@@ -71,6 +90,10 @@ before(async () => {
   process.env.GRAFANA_AUTH = "bootstrap:test-password";
   process.env.FORGEJO_HOLDENITDOWN_TOKEN = forgejoTokenFixture;
   process.env.PAC_INCOMING_SECRET = pacIncomingSecretFixture;
+  process.env.CEPH_DASHBOARD_ROMULUS_USERNAME = cephUsernameFixture;
+  process.env.CEPH_DASHBOARD_ROMULUS_PASSWORD = cephPasswordFixture;
+  process.env.CEPH_DASHBOARD_PANTHEON_USERNAME = cephUsernameFixture;
+  process.env.CEPH_DASHBOARD_PANTHEON_PASSWORD = cephPasswordFixture;
 
   pulumi.runtime.setMocks(
     {
@@ -150,6 +173,10 @@ after(() => {
   restoreEnv("GRAFANA_AUTH", previousGrafanaAuth);
   restoreEnv("FORGEJO_HOLDENITDOWN_TOKEN", previousForgejoToken);
   restoreEnv("PAC_INCOMING_SECRET", previousPacIncomingSecret);
+  restoreEnv("CEPH_DASHBOARD_ROMULUS_USERNAME", previousCephRomulusUsername);
+  restoreEnv("CEPH_DASHBOARD_ROMULUS_PASSWORD", previousCephRomulusPassword);
+  restoreEnv("CEPH_DASHBOARD_PANTHEON_USERNAME", previousCephPantheonUsername);
+  restoreEnv("CEPH_DASHBOARD_PANTHEON_PASSWORD", previousCephPantheonPassword);
 });
 
 describe("configuration policy", () => {
@@ -245,6 +272,40 @@ describe("configuration policy", () => {
     );
   });
 
+  test("validates a bounded credential-free Ceph Dashboard catalog", () => {
+    const valid = {
+      name: "romulus",
+      origin: "https://ceph.romulus.example.test/",
+      expectedMajorRelease: 19,
+    };
+    assert.deepEqual(validateCephClusters([valid]), [
+      { ...valid, origin: "https://ceph.romulus.example.test" },
+    ]);
+    assert.deepEqual(validateCephClusters([]), []);
+    assert.throws(() => validateCephClusters(null));
+    assert.throws(() => validateCephClusters(Array(33).fill(valid)));
+    assert.throws(() => validateCephClusters([valid, valid]));
+    assert.throws(() =>
+      validateCephClusters([{ ...valid, origin: "http://ceph.example.test" }]),
+    );
+    assert.throws(() =>
+      validateCephClusters([
+        { ...valid, origin: "https://user:password@ceph.example.test" },
+      ]),
+    );
+    assert.throws(() =>
+      validateCephClusters([{ ...valid, expectedMajorRelease: 18 }]),
+    );
+    assert.throws(() => validateCephClusters([{ ...valid, name: "Unsafe_Name" }]));
+    for (const extra of [
+      { username: "embedded" },
+      { password: "embedded" },
+      { token: "embedded" },
+    ]) {
+      assert.throws(() => validateCephClusters([{ ...valid, ...extra }]));
+    }
+  });
+
   test("defines preview and production targets without images or secrets", () => {
     const preview = stackFile("preview");
     const production = stackFile("prod");
@@ -260,6 +321,25 @@ describe("configuration policy", () => {
     );
     assert.match(preview, /^\s*homelab-mcp:protectData: (?:"false"|false)$/m);
     assert.match(production, /^\s*homelab-mcp:protectData: (?:"true"|true)$/m);
+    assert.match(production, /^\s*homelab-mcp:cephClusters: \[\]$/m);
+    assert.doesNotMatch(production, /https:\/\/ceph\./);
+    assert.match(preview, /^\s*homelab-mcp:cephClusters:$/m);
+    const cephCatalog = preview.slice(
+      preview.indexOf("  homelab-mcp:cephClusters:"),
+      preview.indexOf("  homelab-mcp:mcpOAuthAccessTokenTtl:"),
+    );
+    assert.deepEqual(
+      [...cephCatalog.matchAll(/^\s*- name: ([a-z0-9-]+)$/gm)].map(
+        (match) => match[1],
+      ),
+      ["romulus", "pantheon"],
+    );
+    assert.match(cephCatalog, /https:\/\/ceph\.romulus\.holdenitdown\.net/);
+    assert.match(cephCatalog, /https:\/\/ceph\.pantheon\.holdenitdown\.net/);
+    assert.equal(
+      (cephCatalog.match(/^\s*expectedMajorRelease: 19$/gm) ?? []).length,
+      2,
+    );
     for (const stack of [preview, production]) {
       assert.match(stack, /^\s*kubernetes:context: pantheon$/m);
       assert.doesNotMatch(stack, /^\s*homelab-mcp:image:/m);
@@ -424,6 +504,26 @@ describe("standalone resource topology", () => {
         cache_dir: "/tmp/kubectl/romulus",
       },
     ]);
+    assert.deepEqual(JSON.parse(app.HOMELAB_MCP_CEPH_CLUSTERS as string), [
+      {
+        name: "romulus",
+        origin: "https://ceph.romulus.example.test",
+        expected_major_release: 19,
+        username_env: "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+        password_env: "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+      },
+      {
+        name: "pantheon",
+        origin: "https://ceph.pantheon.example.test",
+        expected_major_release: 19,
+        username_env: "HOMELAB_MCP_CEPH_PANTHEON_USERNAME",
+        password_env: "HOMELAB_MCP_CEPH_PANTHEON_PASSWORD",
+      },
+    ]);
+    assert.equal(app.HOMELAB_MCP_CEPH_ROMULUS_USERNAME, cephUsernameFixture);
+    assert.equal(app.HOMELAB_MCP_CEPH_ROMULUS_PASSWORD, cephPasswordFixture);
+    assert.equal(app.HOMELAB_MCP_CEPH_PANTHEON_USERNAME, cephUsernameFixture);
+    assert.equal(app.HOMELAB_MCP_CEPH_PANTHEON_PASSWORD, cephPasswordFixture);
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_DCR, "true");
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_CIMD, "true");
     assert.equal(
@@ -475,7 +575,7 @@ describe("standalone resource topology", () => {
     )) {
       assert.doesNotMatch(
         JSON.stringify(candidate.inputs),
-        /HOMELAB_MCP_(?:DATABASE_URL|OIDC_CLIENT_SECRET|GRAFANA_TOKEN|FORGEJO_TOKEN|PAC_INCOMING_SECRET)/,
+        /HOMELAB_MCP_(?:DATABASE_URL|OIDC_CLIENT_SECRET|GRAFANA_TOKEN|FORGEJO_TOKEN|PAC_INCOMING_SECRET|CEPH_[A-Z_]+_(?:USERNAME|PASSWORD))/,
       );
       assert.doesNotMatch(JSON.stringify(candidate.inputs), /test-grafana-token/);
       assert.doesNotMatch(JSON.stringify(candidate.inputs), /test-forgejo-token/);
@@ -483,6 +583,7 @@ describe("standalone resource topology", () => {
         JSON.stringify(candidate.inputs),
         /test-pac-incoming-secret/,
       );
+      assert.doesNotMatch(JSON.stringify(candidate.inputs), /test-ceph-(?:user|password)/);
     }
   });
 
@@ -496,6 +597,21 @@ describe("standalone resource topology", () => {
     assert.ok(isSecret(pac.inputs.input));
     assert.equal(unwrapSecrets(forgejo.inputs.input), forgejoTokenFixture);
     assert.equal(unwrapSecrets(pac.inputs.input), pacIncomingSecretFixture);
+
+    for (const cluster of ["romulus", "pantheon"]) {
+      const username = resource(
+        "pulumi:index:Stash",
+        `homelab-mcp-ceph-${cluster}-username`,
+      );
+      const password = resource(
+        "pulumi:index:Stash",
+        `homelab-mcp-ceph-${cluster}-password`,
+      );
+      assert.ok(isSecret(username.inputs.input));
+      assert.ok(isSecret(password.inputs.input));
+      assert.equal(unwrapSecrets(username.inputs.input), cephUsernameFixture);
+      assert.equal(unwrapSecrets(password.inputs.input), cephPasswordFixture);
+    }
 
     const appSecret = resource(
       "kubernetes:core/v1:Secret",
@@ -511,6 +627,10 @@ describe("standalone resource topology", () => {
       app.HOMELAB_MCP_PAC_INCOMING_SECRET,
       pacIncomingSecretFixture,
     );
+    assert.equal(app.HOMELAB_MCP_CEPH_ROMULUS_USERNAME, cephUsernameFixture);
+    assert.equal(app.HOMELAB_MCP_CEPH_ROMULUS_PASSWORD, cephPasswordFixture);
+    assert.equal(app.HOMELAB_MCP_CEPH_PANTHEON_USERNAME, cephUsernameFixture);
+    assert.equal(app.HOMELAB_MCP_CEPH_PANTHEON_PASSWORD, cephPasswordFixture);
   });
 
   test("uses an explicit bounded service-account credential projection", () => {

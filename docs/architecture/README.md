@@ -11,3 +11,4 @@ Preview runs commit `798dd92`. Basic runtime and discovery boundaries are verifi
 | [Observability](observability.md) | Signal paths, bounded telemetry attributes, lifecycle, and data safety. |
 | [Tekton tools](../tekton/README.md) | Planned integration behavior and evidence boundaries. |
 | [Kubernetes tools](../kubernetes/README.md) | Locally implemented multi-cluster tool, authority, and safety contracts. |
+| [Ceph Dashboard tools](../ceph/README.md) | Locally implemented native Ceph tool, authority, and safety contracts. |

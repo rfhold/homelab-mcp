@@ -10,3 +10,4 @@ These documents define the locally implemented contract for bounded Kubernetes a
 | [Deployment and RBAC](spec/deployment-rbac.md) | Cluster catalog configuration, runtime credentials, exact RBAC, and bootstrap separation. |
 | [Service deployment](../operations/deployment.md#kubernetes-access) | Repository deployment status, credential delivery boundaries, and approval gates. |
 | [Testing](../quality/testing.md#kubernetes-contract-coverage) | Required local, declaration, preview, and live evidence. |
+| [Native Ceph operations](../ceph/README.md) | Approved Dashboard-owned native Ceph state and operations that remain outside coarse Rook custom-resource reads. |

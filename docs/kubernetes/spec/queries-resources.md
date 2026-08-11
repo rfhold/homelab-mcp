@@ -40,6 +40,12 @@ The public typed names will disambiguate collisions. CloudNativePG Cluster will 
 
 The approved API versions and resource paths will remain fixed in `ResourceKind::mapping` under `src/integrations/kubernetes/actions.rs`. Capability discovery will report unsupported APIs without expanding the catalog.
 
+## Rook and Native Ceph State
+
+Reads of Rook `CephCluster`, `CephFilesystem`, `CephBlockPool`, and `CephObjectStore` resources remain coarse Kubernetes controller-state views. They report only approved custom-resource status and conditions. They do not report authoritative native OSD state, devices, safe-to-destroy decisions, cluster flags, current Dashboard metrics, or Dashboard tasks.
+
+The [Ceph Dashboard tools](../../ceph/README.md) own native Ceph operational state and every approved native mutation. Kubernetes resource reads do not expand Ceph authority and cannot be used as a substitute for the Ceph destroy or purge safety checks.
+
 ## Normalized Results
 
 Every resource result will contain an approved subset of identity, API version, namespace, name, creation time, status, details, and conditions. `src/integrations/kubernetes/normalize.rs` with `Resource` and `ResourceList` will own the output model.

@@ -14,6 +14,9 @@ use url::Url;
 const PREFIX: &str = "HOMELAB_MCP_";
 const REQUIRED_OAUTH_SCOPES: [&str; 3] = ["mcp:use", "kubernetes:read", "kubernetes:write"];
 const MAX_KUBERNETES_CLUSTERS_JSON_BYTES: usize = 64 * 1024;
+const MAX_CEPH_CLUSTERS_JSON_BYTES: usize = 64 * 1024;
+const MAX_CEPH_CLUSTERS: usize = 32;
+const CEPH_MAJOR_RELEASE: u8 = 19;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TelemetryConfig {
@@ -82,6 +85,31 @@ pub struct IntegrationsConfig {
     pub grafana: GrafanaConfig,
     pub tekton: TektonConfig,
     pub kubernetes: KubernetesIntegrationConfig,
+    pub ceph: CephIntegrationConfig,
+}
+
+#[derive(Clone)]
+pub struct CephIntegrationConfig {
+    pub clusters: Vec<CephClusterConfig>,
+}
+
+#[derive(Clone)]
+pub struct CephClusterConfig {
+    pub name: String,
+    pub origin: Url,
+    pub expected_major_release: u8,
+    pub username: Secret,
+    pub password: Secret,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCephClusterConfig {
+    name: String,
+    origin: String,
+    expected_major_release: u8,
+    username_env: String,
+    password_env: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,6 +173,10 @@ struct KeyringKey {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
+        let ceph_clusters = optional("CEPH_CLUSTERS");
+        let ceph = CephIntegrationConfig {
+            clusters: parse_ceph_clusters(ceph_clusters.as_deref(), |name| env::var(name).ok())?,
+        };
         let config = Self {
             database: DatabaseConfig {
                 url: required("DATABASE_URL")?,
@@ -190,6 +222,7 @@ impl Config {
                     kubectl_path: required("KUBECTL_PATH")?,
                     clusters: parse_kubernetes_clusters(&required("KUBERNETES_CLUSTERS")?)?,
                 },
+                ceph,
             },
         };
         config.validate()?;
@@ -395,6 +428,71 @@ fn validate_kubernetes_config(config: &KubernetesIntegrationConfig) -> Result<()
     Ok(())
 }
 
+fn parse_ceph_clusters(
+    value: Option<&str>,
+    credential: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<CephClusterConfig>, String> {
+    let value = value.unwrap_or("[]");
+    if value.len() > MAX_CEPH_CLUSTERS_JSON_BYTES {
+        return Err("invalid HOMELAB_MCP_CEPH_CLUSTERS".to_owned());
+    }
+    let raw: Vec<RawCephClusterConfig> =
+        serde_json::from_str(value).map_err(|_| "invalid HOMELAB_MCP_CEPH_CLUSTERS".to_owned())?;
+    if raw.len() > MAX_CEPH_CLUSTERS {
+        return Err("invalid HOMELAB_MCP_CEPH_CLUSTERS".to_owned());
+    }
+
+    let mut names = HashSet::new();
+    raw.into_iter()
+        .map(|cluster| {
+            let environment = cluster.name.to_ascii_uppercase().replace('-', "_");
+            let username_env = format!("{PREFIX}CEPH_{environment}_USERNAME");
+            let password_env = format!("{PREFIX}CEPH_{environment}_PASSWORD");
+            if !valid_ceph_cluster_name(&cluster.name)
+                || !names.insert(cluster.name.clone())
+                || cluster.expected_major_release != CEPH_MAJOR_RELEASE
+                || cluster.username_env != username_env
+                || cluster.password_env != password_env
+            {
+                return Err("invalid HOMELAB_MCP_CEPH_CLUSTERS".to_owned());
+            }
+            let origin = secure_origin("CEPH_CLUSTERS", &cluster.origin)
+                .map_err(|_| "invalid HOMELAB_MCP_CEPH_CLUSTERS".to_owned())?;
+            let username = credential(&username_env)
+                .filter(|value| !value.trim().is_empty())
+                .map(Secret)
+                .ok_or_else(|| format!("missing {username_env}"))?;
+            let password = credential(&password_env)
+                .filter(|value| !value.trim().is_empty())
+                .map(Secret)
+                .ok_or_else(|| format!("missing {password_env}"))?;
+            Ok(CephClusterConfig {
+                name: cluster.name,
+                origin,
+                expected_major_release: cluster.expected_major_release,
+                username,
+                password,
+            })
+        })
+        .collect()
+}
+
+fn valid_ceph_cluster_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+}
+
 fn safe_absolute_path(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 4096
@@ -574,6 +672,9 @@ mod tests {
                         cache_dir: "/inert/cache".to_owned(),
                     }],
                 },
+                ceph: CephIntegrationConfig {
+                    clusters: Vec::new(),
+                },
             },
         };
 
@@ -637,6 +738,206 @@ mod tests {
         }
         assert!(
             parse_kubernetes_clusters(&" ".repeat(MAX_KUBERNETES_CLUSTERS_JSON_BYTES + 1)).is_err()
+        );
+    }
+
+    fn ceph_json(
+        name: &str,
+        origin: &str,
+        release: u8,
+        username_env: &str,
+        password_env: &str,
+    ) -> String {
+        serde_json::json!([{
+            "name":name,
+            "origin":origin,
+            "expected_major_release":release,
+            "username_env":username_env,
+            "password_env":password_env,
+        }])
+        .to_string()
+    }
+
+    fn ceph_credentials(name: &str) -> Option<String> {
+        match name {
+            "HOMELAB_MCP_CEPH_ROMULUS_USERNAME" => Some("dashboard-user".to_owned()),
+            "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD" => Some("dashboard-password".to_owned()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn ceph_configuration_defaults_to_disabled_and_accepts_a_dynamic_catalog() {
+        assert!(parse_ceph_clusters(None, |_| None).unwrap().is_empty());
+        assert!(
+            parse_ceph_clusters(Some("[]"), |_| None)
+                .unwrap()
+                .is_empty()
+        );
+        let json = ceph_json(
+            "romulus",
+            "https://ceph.romulus.example:8443/",
+            19,
+            "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+            "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+        );
+        let clusters = parse_ceph_clusters(Some(&json), ceph_credentials).unwrap();
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].name, "romulus");
+        assert_eq!(
+            clusters[0].origin.as_str(),
+            "https://ceph.romulus.example:8443/"
+        );
+        assert_eq!(clusters[0].expected_major_release, 19);
+        assert_eq!(clusters[0].username.expose(), "dashboard-user");
+        assert_eq!(clusters[0].password.expose(), "dashboard-password");
+    }
+
+    #[test]
+    fn ceph_configuration_rejects_unknown_fields_origins_releases_names_and_env_references() {
+        let valid = ceph_json(
+            "romulus",
+            "https://ceph.romulus.example/",
+            19,
+            "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+            "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+        );
+        let mut cases = vec![
+            valid.replace("}]", ",\"extra\":true}]"),
+            ceph_json(
+                "romulus",
+                "http://ceph.example/",
+                19,
+                "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+                "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+            ),
+            ceph_json(
+                "romulus",
+                "https://user:secret@ceph.example/",
+                19,
+                "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+                "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+            ),
+            ceph_json(
+                "romulus",
+                "https://ceph.example/api",
+                19,
+                "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+                "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+            ),
+            ceph_json(
+                "romulus",
+                "https://ceph.example/?token=secret",
+                19,
+                "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+                "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+            ),
+            ceph_json(
+                "romulus",
+                "https://ceph.example/#secret",
+                19,
+                "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+                "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+            ),
+            ceph_json(
+                "romulus",
+                "https://ceph.example/",
+                18,
+                "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+                "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+            ),
+            ceph_json(
+                "Bad.Name",
+                "https://ceph.example/",
+                19,
+                "HOMELAB_MCP_CEPH_BAD_NAME_USERNAME",
+                "HOMELAB_MCP_CEPH_BAD_NAME_PASSWORD",
+            ),
+            ceph_json(
+                "romulus",
+                "https://ceph.example/",
+                19,
+                "OTHER_USERNAME",
+                "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+            ),
+            ceph_json(
+                "romulus",
+                "https://ceph.example/",
+                19,
+                "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+                "OTHER_PASSWORD",
+            ),
+        ];
+        cases.push(ceph_json(
+            &"a".repeat(64),
+            "https://ceph.example/",
+            19,
+            "HOMELAB_MCP_CEPH_A_USERNAME",
+            "HOMELAB_MCP_CEPH_A_PASSWORD",
+        ));
+        for json in cases {
+            let error = parse_ceph_clusters(Some(&json), ceph_credentials)
+                .err()
+                .unwrap();
+            assert_eq!(
+                error, "invalid HOMELAB_MCP_CEPH_CLUSTERS",
+                "accepted {json}"
+            );
+            assert!(!error.contains("secret"));
+        }
+    }
+
+    #[test]
+    fn ceph_configuration_rejects_duplicates_credentials_and_bounds_without_leaks() {
+        let cluster = serde_json::json!({
+            "name":"romulus",
+            "origin":"https://ceph.example/",
+            "expected_major_release":19,
+            "username_env":"HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+            "password_env":"HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+        });
+        let duplicate = serde_json::to_string(&vec![cluster.clone(), cluster]).unwrap();
+        assert!(parse_ceph_clusters(Some(&duplicate), ceph_credentials).is_err());
+
+        let missing = ceph_json(
+            "romulus",
+            "https://ceph.example/",
+            19,
+            "HOMELAB_MCP_CEPH_ROMULUS_USERNAME",
+            "HOMELAB_MCP_CEPH_ROMULUS_PASSWORD",
+        );
+        let error = parse_ceph_clusters(Some(&missing), |_| None).err().unwrap();
+        assert_eq!(error, "missing HOMELAB_MCP_CEPH_ROMULUS_USERNAME");
+        let error = parse_ceph_clusters(Some(&missing), |name| {
+            (name.ends_with("USERNAME")).then(|| "sensitive-username".to_owned())
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error, "missing HOMELAB_MCP_CEPH_ROMULUS_PASSWORD");
+        assert!(!error.contains("sensitive-username"));
+
+        let oversized = (0..=MAX_CEPH_CLUSTERS)
+            .map(|index| {
+                serde_json::json!({
+                    "name":format!("cluster-{index}"),
+                    "origin":"https://ceph.example/",
+                    "expected_major_release":19,
+                    "username_env":format!("HOMELAB_MCP_CEPH_CLUSTER_{index}_USERNAME"),
+                    "password_env":format!("HOMELAB_MCP_CEPH_CLUSTER_{index}_PASSWORD"),
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            parse_ceph_clusters(Some(&serde_json::to_string(&oversized).unwrap()), |_| {
+                Some("credential".to_owned())
+            })
+            .is_err()
+        );
+        assert!(
+            parse_ceph_clusters(Some(&" ".repeat(MAX_CEPH_CLUSTERS_JSON_BYTES + 1)), |_| {
+                None
+            })
+            .is_err()
         );
     }
 }
