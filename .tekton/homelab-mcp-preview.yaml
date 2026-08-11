@@ -251,8 +251,27 @@ spec:
           - name: revision
             value: $(params.revision)
 
-      - name: deploy-preview
+      - name: verify-kubectl
         runAfter: [resolve-and-verify-image]
+        taskSpec:
+          params:
+            - name: image
+              type: string
+          steps:
+            - name: verify
+              image: $(params.image)
+              command: [/bin/sh, -c]
+              args:
+                - |
+                  set -eu
+                  version="`/usr/local/bin/kubectl version --client --output=json`"
+                  printf '%s' "$version" | tr -d '[:space:]' | grep -Fq '"gitVersion":"v1.33.5"'
+        params:
+          - name: image
+            value: $(tasks.resolve-and-verify-image.results.image)
+
+      - name: deploy-preview
+        runAfter: [verify-kubectl]
         retries: 1
         taskSpec:
           params:

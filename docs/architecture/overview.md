@@ -10,6 +10,8 @@ Preview runs the authenticated runtime from commit `4f2e192`. Health, readiness,
 
 `homelab-mcp` exposes bounded homelab integrations through MCP. Grafana tools provide normalized reads, validated PNG rendering, and silence creation. Tekton tools add PAC-authorized repository, workflow, run, task, log, and mutation access in the current worktree.
 
+The worktree adds typed multi-cluster reads and curated exact-object mutations through fixed `kubectl` command construction. Local implementation and tests exist; deployment, live-cluster, and effective-RBAC evidence remain pending.
+
 ## Service Boundary
 
 ### Runtime
@@ -28,14 +30,16 @@ The current worktree service:
 
 - uses Kuri's generic private `mcp` crate at a reviewed immutable Git revision;
 - serves MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
-- uses `#[mcp::progressive_server]` to generate read-only query and operationally consequential exec tools for Grafana and Tekton;
-- exposes nine Grafana query actions, two Grafana render actions, bounded silence creation, seven Tekton read actions, and three Tekton mutations;
+- uses `#[mcp::progressive_server]` to generate read-only query and operationally consequential exec tools for Grafana, Tekton, and Kubernetes;
+- exposes nine Grafana query actions, two Grafana render actions, bounded silence creation, seven Tekton reads, three Tekton mutations, four Kubernetes reads, and five Kubernetes mutations;
 - queries Grafana's HTTP API through fixed Loki, Mimir, Tempo, and Pyroscope datasource UIDs;
 - reads Grafana dashboard inventory, renders dashboard and panel PNGs, and uses fixed alerting API routes;
 - enforces local OAuth access tokens before MCP request handling; and
 - persists generic OAuth and OIDC state in PostgreSQL schema `mcp`.
 
 The [Grafana tool specifications](../grafana-query/README.md) and [Tekton tool specifications](../tekton/README.md) own implemented tool behavior. The [access document](access-authentication.md) owns authentication and authorization details.
+
+The [Kubernetes tool specifications](../kubernetes/README.md) own implemented Kubernetes behavior, bounds, resource scope, and mutation safety.
 
 ## Component Status
 
@@ -49,6 +53,7 @@ The [Grafana tool specifications](../grafana-query/README.md) and [Tekton tool s
 | Generic OIDC integration | Deployed, flow unverified | Use MCP-owned one-shot OIDC transactions and hosted continuation with Authentik. |
 | Grafana integration | Worktree implemented; deployment pending | Own fixed-destination datasource, dashboard, rendering, and alerting requests, validation, normalization, safe errors, and bounded telemetry. Rendering has local/mock evidence only. |
 | Tekton integration | Worktree implemented; deployment pending | Own PAC repository authority, fixed Forgejo and PAC access, Kubernetes run and task access, normalized results, and bounded mutations. |
+| Kubernetes integration | Worktree implemented; deployment pending | Own the configured cluster catalog, typed reads, normalized results, fixed mutations, process bounds, and safe errors. |
 | PostgreSQL use | Deployed to preview | Store generic OAuth state and encrypted signing material through migrations V1-V3, with one-shot OIDC attempts added by V4. |
 | Wrapping-key use | Deployed to preview | Load the mounted keyring and protect persisted OAuth signing keys. |
 
@@ -58,7 +63,7 @@ The [Grafana tool specifications](../grafana-query/README.md) and [Tekton tool s
 2. The service redirects browser authentication to Authentik.
 3. The service completes browser authentication and issues its own access token.
 4. The client sends the local access token to `/mcp`.
-5. The service validates the token and required `mcp:use` scope.
+5. The service validates the token and required `mcp:use kubernetes:read kubernetes:write` scope set in the current worktree.
 6. The service validates the selected query or exec action arguments.
 7. The service contacts only the action's fixed Grafana, Forgejo, PAC, or Kubernetes route with the integration-specific credential.
 8. The action returns a semantic `McpToolResult`.
@@ -67,8 +72,8 @@ The [Grafana tool specifications](../grafana-query/README.md) and [Tekton tool s
 
 - Authentik authenticates a browser user. It does not issue tokens accepted by `/mcp`.
 - The local OAuth issuer authorizes MCP access.
-- The single `mcp:use` scope authorizes every query, render, and silence-creation action; there is no narrower image or mutation scope.
-- The same scope authorizes every Tekton read and mutation. Every current MCP principal can dispatch, rerun, and cancel.
+- The current worktree requires global scopes `mcp:use kubernetes:read kubernetes:write` for all `/mcp` actions, including Grafana and Tekton actions. The scopes do not enforce permissions per action.
+- Dedicated reduced Kubernetes ServiceAccounts enforce upstream authority independently from OAuth.
 - Grafana receives only server-originated requests with the service-account token.
 - Tekton access uses fixed Forgejo, PAC controller, and Kubernetes destinations. Callers do not control credentials or upstream routes.
 - Loki remains behind Grafana and has no direct service integration.

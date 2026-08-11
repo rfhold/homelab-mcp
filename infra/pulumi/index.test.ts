@@ -6,6 +6,7 @@ import * as pulumi from "@pulumi/pulumi";
 import {
   requireImmutableImage,
   validateHttpsOrigin,
+  validateKubernetesClusters,
   validateWrappingKeyVersions,
 } from "./policy";
 
@@ -13,6 +14,7 @@ interface ResourceRecord {
   type: string;
   name: string;
   inputs: Record<string, unknown>;
+  provider?: string;
 }
 
 const resources: ResourceRecord[] = [];
@@ -40,7 +42,20 @@ before(async () => {
     "homelab-mcp:databaseStorageSize": "2Gi",
     "homelab-mcp:backupStorageClass": "test-bucket",
     "homelab-mcp:backupEndpoint": "https://s3.example.test",
-    "homelab-mcp:kubernetesApiEndpointCidr": "172.16.3.0/24",
+    "homelab-mcp:kubernetesClusters": JSON.stringify([
+      {
+        name: "pantheon",
+        context: "pantheon",
+        server: "https://pantheon.example.test:6443",
+        apiServerEndpointCidrs: ["172.16.3.0/24"],
+      },
+      {
+        name: "romulus",
+        context: "romulus",
+        server: "https://romulus.example.test",
+        apiServerEndpointCidrs: ["172.16.4.0/24"],
+      },
+    ]),
     "homelab-mcp:backupRetention": "7d",
     "homelab-mcp:backupSchedule": "0 30 1 * * *",
     "homelab-mcp:mcpOAuthAccessTokenTtl": "300",
@@ -64,6 +79,7 @@ before(async () => {
           type: args.type,
           name: args.name,
           inputs: args.inputs,
+          provider: args.provider,
         });
         const outputs: Record<string, unknown> = { ...args.inputs };
         if (args.type === "random:index/randomBytes:RandomBytes") {
@@ -96,6 +112,12 @@ before(async () => {
           outputs.data = {
             username: Buffer.from("app").toString("base64"),
             password: Buffer.from("password").toString("base64"),
+          };
+        }
+        if (args.name.startsWith("homelab-mcp-kubernetes-runtime-token-read-")) {
+          outputs.data = {
+            token: Buffer.from("synthetic-runtime-token").toString("base64"),
+            "ca.crt": Buffer.from("synthetic-cluster-ca").toString("base64"),
           };
         }
         return { id: `${args.name}-id`, state: outputs };
@@ -151,6 +173,78 @@ describe("configuration policy", () => {
     assert.throws(() => validateWrappingKeyVersions(["v1"], "v2"));
   });
 
+  test("validates a bounded, unique, reviewed Kubernetes cluster catalog", () => {
+    const valid = [
+      {
+        name: "pantheon",
+        context: "pantheon",
+        server: "https://pantheon.example.test:6443",
+        apiServerEndpointCidrs: ["172.16.3.0/24"],
+      },
+    ];
+    assert.deepEqual(validateKubernetesClusters(valid), [
+      { ...valid[0], apiServerPort: 6443 },
+    ]);
+    assert.equal(
+      validateKubernetesClusters([
+        { ...valid[0], server: "https://cluster.example.test/" },
+      ])[0].apiServerPort,
+      443,
+    );
+    assert.throws(() => validateKubernetesClusters(null));
+    assert.throws(() => validateKubernetesClusters({}));
+    assert.throws(() => validateKubernetesClusters("not-an-array"));
+    assert.throws(() => validateKubernetesClusters(pulumi.unknown));
+    assert.throws(() => validateKubernetesClusters([]));
+    assert.throws(() => validateKubernetesClusters(Array(33).fill(valid[0])));
+    assert.throws(() => validateKubernetesClusters([...valid, valid[0]]));
+    assert.throws(() =>
+      validateKubernetesClusters([{ ...valid[0], name: "Unsafe_Name" }]),
+    );
+    assert.throws(() =>
+      validateKubernetesClusters([{ ...valid[0], context: "" }]),
+    );
+    assert.throws(() =>
+      validateKubernetesClusters([
+        ...valid,
+        { ...valid[0], name: "romulus" },
+      ]),
+    );
+    assert.throws(() =>
+      validateKubernetesClusters([{ ...valid[0], server: "http://cluster.test" }]),
+    );
+    assert.throws(() =>
+      validateKubernetesClusters([{ ...valid[0], server: "https://cluster.test:0" }]),
+    );
+    assert.throws(() => validateKubernetesClusters([{ ...valid[0], name: 7 }]));
+    assert.throws(() =>
+      validateKubernetesClusters([
+        {
+          name: "pantheon",
+          context: "pantheon",
+          server: "https://pantheon.example.test:6443",
+        },
+      ]),
+    );
+    for (const extra of [
+      { token: "credential" },
+      { certificateAuthorityData: "credential" },
+      { username: "credential", password: "credential" },
+    ]) {
+      assert.throws(() => validateKubernetesClusters([{ ...valid[0], ...extra }]));
+    }
+    assert.throws(() =>
+      validateKubernetesClusters([
+        { ...valid[0], apiServerEndpointCidrs: [] },
+      ]),
+    );
+    assert.throws(() =>
+      validateKubernetesClusters([
+        { ...valid[0], apiServerEndpointCidrs: ["0.0.0.0/0x"] },
+      ]),
+    );
+  });
+
   test("defines preview and production targets without images or secrets", () => {
     const preview = stackFile("preview");
     const production = stackFile("prod");
@@ -177,6 +271,13 @@ describe("configuration policy", () => {
         stack,
         /^\s*homelab-mcp:mcpOAuthWrappingKeyVersions: \[v1\]$/m,
       );
+      assert.match(stack, /^\s*- name: pantheon$/m);
+      assert.match(stack, /^\s*- name: romulus$/m);
+      assert.match(stack, /https:\/\/pantheon\.holdenitdown\.net:6443/);
+      assert.match(stack, /https:\/\/romulus\.holdenitdown\.net:6443/);
+      assert.match(stack, /172\.16\.3\.0\/24/);
+      assert.match(stack, /172\.16\.4\.0\/24/);
+      assert.doesNotMatch(stack, /kubernetesApiEndpointCidr:/);
     }
   });
 });
@@ -304,7 +405,25 @@ describe("standalone resource topology", () => {
     assert.equal(app.HOMELAB_MCP_OIDC_SCOPES, "openid profile email");
     assert.equal(app.HOMELAB_MCP_OAUTH_ISSUER, "https://homelab-mcp.example.test/oauth");
     assert.equal(app.HOMELAB_MCP_OAUTH_RESOURCE, "https://homelab-mcp.example.test/mcp");
-    assert.equal(app.HOMELAB_MCP_OAUTH_REQUIRED_SCOPE, "mcp:use");
+    assert.equal(
+      app.HOMELAB_MCP_OAUTH_REQUIRED_SCOPES,
+      "mcp:use kubernetes:read kubernetes:write",
+    );
+    assert.equal(app.HOMELAB_MCP_KUBECTL_PATH, "/usr/local/bin/kubectl");
+    assert.deepEqual(JSON.parse(app.HOMELAB_MCP_KUBERNETES_CLUSTERS as string), [
+      {
+        name: "pantheon",
+        kubeconfig: "/var/run/secrets/homelab-mcp/kubernetes/kubeconfig",
+        context: "pantheon",
+        cache_dir: "/tmp/kubectl/pantheon",
+      },
+      {
+        name: "romulus",
+        kubeconfig: "/var/run/secrets/homelab-mcp/kubernetes/kubeconfig",
+        context: "romulus",
+        cache_dir: "/tmp/kubectl/romulus",
+      },
+    ]);
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_DCR, "true");
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_CIMD, "true");
     assert.equal(
@@ -508,10 +627,6 @@ describe("standalone resource topology", () => {
       },
     ]);
 
-    assert.equal(
-      resources.some((candidate) => candidate.type.includes(":ClusterRole")),
-      false,
-    );
     const rules = role.inputs.rules as Array<{ resources: string[]; verbs: string[] }>;
     assert.equal(rules.some((rule) => rule.resources.includes("secrets")), false);
     assert.equal(
@@ -520,6 +635,135 @@ describe("standalone resource topology", () => {
       ),
       false,
     );
+  });
+
+  test("creates provider-bound runtime identities and exact Kubernetes RBAC per cluster", () => {
+    const providers = resources.filter(
+      (candidate) => candidate.type === "pulumi:providers:kubernetes",
+    );
+    assert.deepEqual(
+      providers.map((provider) => provider.inputs.context).sort(),
+      ["pantheon", "romulus"],
+    );
+    for (const candidate of resources.filter((entry) =>
+      entry.type.startsWith("kubernetes:"),
+    )) {
+      assert.match(
+        candidate.provider ?? "",
+        /homelab-mcp-(?:pantheon|romulus)/,
+      );
+    }
+
+    for (const cluster of ["pantheon", "romulus"]) {
+      const account = resource(
+        "kubernetes:core/v1:ServiceAccount",
+        `homelab-mcp-kubernetes-runtime-${cluster}`,
+      );
+      assert.equal(account.inputs.automountServiceAccountToken, false);
+      assert.equal(
+        (account.inputs.metadata as any).name,
+        "homelab-mcp-test-kubernetes-runtime",
+      );
+      const binding = resource(
+        "kubernetes:rbac.authorization.k8s.io/v1:ClusterRoleBinding",
+        `homelab-mcp-kubernetes-runtime-${cluster}`,
+      );
+      assert.equal(binding.inputs.roleRef && (binding.inputs.roleRef as any).name,
+        "homelab-mcp-test-kubernetes-runtime");
+      assert.equal((binding.inputs.subjects as any[])[0].name,
+        "homelab-mcp-test-kubernetes-runtime");
+      const token = resource(
+        "kubernetes:core/v1:Secret",
+        `homelab-mcp-kubernetes-runtime-token-${cluster}`,
+      );
+      assert.equal(token.inputs.type, "kubernetes.io/service-account-token");
+      assert.deepEqual((token.inputs.metadata as any).annotations, {
+        "kubernetes.io/service-account.name":
+          "homelab-mcp-test-kubernetes-runtime",
+        "pulumi.com/waitFor": "jsonpath={.data.token}",
+      });
+    }
+
+    const expectedRules = [
+      { nonResourceURLs: ["/api", "/apis", "/version", "/api/v1", "/apis/apps/v1", "/apis/autoscaling/v2", "/apis/batch/v1", "/apis/ceph.rook.io/v1", "/apis/cert-manager.io/v1", "/apis/discovery.k8s.io/v1", "/apis/events.k8s.io/v1", "/apis/gateway.networking.k8s.io/v1", "/apis/kafka.strimzi.io/v1beta2", "/apis/metrics.k8s.io/v1beta1", "/apis/networking.k8s.io/v1", "/apis/policy/v1", "/apis/postgresql.cnpg.io/v1", "/apis/storage.k8s.io/v1", "/apis/velero.io/v1"], verbs: ["get"] },
+      { apiGroups: [""], resources: ["namespaces", "nodes", "pods", "services", "persistentvolumeclaims"], verbs: ["get", "list"] },
+      { apiGroups: ["events.k8s.io"], resources: ["events"], verbs: ["get", "list"] },
+      { apiGroups: ["apps"], resources: ["deployments", "statefulsets", "daemonsets", "replicasets"], verbs: ["get", "list"] },
+      { apiGroups: ["batch"], resources: ["jobs", "cronjobs"], verbs: ["get", "list"] },
+      { apiGroups: ["metrics.k8s.io"], resources: ["pods", "nodes"], verbs: ["get", "list"] },
+      { apiGroups: ["discovery.k8s.io"], resources: ["endpointslices"], verbs: ["get", "list"] },
+      { apiGroups: ["networking.k8s.io"], resources: ["ingresses", "networkpolicies"], verbs: ["get", "list"] },
+      { apiGroups: ["gateway.networking.k8s.io"], resources: ["gatewayclasses", "gateways", "httproutes"], verbs: ["get", "list"] },
+      { apiGroups: ["autoscaling"], resources: ["horizontalpodautoscalers"], verbs: ["get", "list"] },
+      { apiGroups: ["policy"], resources: ["poddisruptionbudgets"], verbs: ["get", "list"] },
+      { apiGroups: ["storage.k8s.io"], resources: ["storageclasses"], verbs: ["get", "list"] },
+      { apiGroups: ["cert-manager.io"], resources: ["certificates", "clusterissuers"], verbs: ["get", "list"] },
+      { apiGroups: ["postgresql.cnpg.io"], resources: ["clusters"], verbs: ["get", "list"] },
+      { apiGroups: ["kafka.strimzi.io"], resources: ["kafkas", "kafkanodepools", "kafkatopics"], verbs: ["get", "list"] },
+      { apiGroups: ["ceph.rook.io"], resources: ["cephclusters", "cephfilesystems", "cephblockpools", "cephobjectstores"], verbs: ["get", "list"] },
+      { apiGroups: ["velero.io"], resources: ["backups", "schedules", "backupstoragelocations"], verbs: ["get", "list"] },
+      { apiGroups: ["apps"], resources: ["deployments", "statefulsets", "daemonsets"], verbs: ["patch"] },
+      { apiGroups: ["apps"], resources: ["deployments/scale", "statefulsets/scale"], verbs: ["get", "patch"] },
+      { apiGroups: ["batch"], resources: ["cronjobs"], verbs: ["patch"] },
+      { apiGroups: ["batch"], resources: ["jobs"], verbs: ["create"] },
+      { apiGroups: [""], resources: ["pods"], verbs: ["delete"] },
+    ];
+    for (const cluster of ["pantheon", "romulus"]) {
+      const role = resource(
+        "kubernetes:rbac.authorization.k8s.io/v1:ClusterRole",
+        `homelab-mcp-kubernetes-runtime-${cluster}`,
+      );
+      assert.deepEqual(role.inputs.rules, expectedRules);
+      const serialized = JSON.stringify(role.inputs.rules);
+      assert.doesNotMatch(serialized, /(?:"\*"|secrets|configmaps|pods\/log|exec|attach)/);
+      assert.doesNotMatch(serialized, /token/);
+    }
+  });
+
+  test("assembles a secret-tainted reduced runtime kubeconfig and mount", () => {
+    const kubeconfigSecret = resource(
+      "kubernetes:core/v1:Secret",
+      "homelab-mcp-kubernetes-runtime-kubeconfig",
+    );
+    assert.ok(isSecret(kubeconfigSecret.inputs.stringData));
+    const stringData = unwrapSecrets(kubeconfigSecret.inputs.stringData) as Record<string, string>;
+    const kubeconfig = JSON.parse(stringData.kubeconfig);
+    assert.equal(kubeconfig.clusters.length, 2);
+    assert.equal(kubeconfig.users.length, 2);
+    assert.deepEqual(
+      kubeconfig.clusters.map((entry: any) => [entry.name, entry.cluster.server]),
+      [
+        ["pantheon", "https://pantheon.example.test:6443"],
+        ["romulus", "https://romulus.example.test"],
+      ],
+    );
+    assert.equal(kubeconfig["current-context"], "pantheon");
+    assert.equal(kubeconfig.clusters[0].cluster["certificate-authority"], undefined);
+    assert.equal(kubeconfig.users[0].user["client-certificate-data"], undefined);
+
+    const deployment = resource(
+      "kubernetes:apps/v1:Deployment",
+      "homelab-mcp",
+    );
+    const pod = (unwrapSecrets(deployment.inputs.spec) as any).template.spec;
+    assert.deepEqual(
+      pod.containers[0].volumeMounts.find(
+        (mount: any) => mount.name === "kubernetes-runtime-kubeconfig",
+      ),
+      {
+        name: "kubernetes-runtime-kubeconfig",
+        mountPath: "/var/run/secrets/homelab-mcp/kubernetes",
+        readOnly: true,
+      },
+    );
+    assert.deepEqual(
+      pod.volumes.find(
+        (volume: any) => volume.name === "kubernetes-runtime-kubeconfig",
+      ).secret.items,
+      [{ key: "kubeconfig", path: "kubeconfig", mode: 0o440 }],
+    );
+    assert.equal(pod.securityContext.fsGroup, 65532);
+    assert.ok(pod.volumes.some((volume: any) => volume.name === "tmp"));
   });
 
   test("creates a versioned 32-byte keyring with checksum rollout", () => {
@@ -578,7 +822,7 @@ describe("standalone resource topology", () => {
         (deployment.inputs.metadata as any).annotations[
           "secret.reloader.stakater.com/reload"
         ],
-      "homelab-mcp-app,homelab-mcp-oauth-wrapping-keys",
+      "homelab-mcp-app,homelab-mcp-oauth-wrapping-keys,homelab-mcp-kubernetes-runtime-kubeconfig",
     );
     const pod = spec.template.spec;
     assert.deepEqual(spec.template.metadata.annotations, {
@@ -657,6 +901,10 @@ describe("standalone resource topology", () => {
       {
         to: [{ ipBlock: { cidr: "172.16.3.0/24" } }],
         ports: [{ port: 6443, protocol: "TCP" }],
+      },
+      {
+        to: [{ ipBlock: { cidr: "172.16.4.0/24" } }],
+        ports: [{ port: 443, protocol: "TCP" }],
       },
       {
         to: [
@@ -743,6 +991,37 @@ describe("standalone resource topology", () => {
       .find((line) => line.includes("pulumi up --stack preview"));
     assert.ok(apply);
     assert.match(apply, /--yes --skip-preview/);
+    assert.match(
+      pipeline,
+      /\/usr\/local\/bin\/kubectl version --client --output=json/,
+    );
+    assert.match(pipeline, /"gitVersion":"v1\.33\.5"/);
+  });
+
+  test("pins and verifies the multi-architecture kubectl image input", () => {
+    const dockerfile = readFileSync(
+      join(__dirname, "..", "..", "Dockerfile"),
+      "utf8",
+    );
+    assert.match(dockerfile, /ARG KUBECTL_VERSION=v1\.33\.5/);
+    assert.match(
+      dockerfile,
+      /6a12d6c39e4a611a3687ee24d8c733961bb4bae1ae975f5204400c0a6930c6fc/,
+    );
+    assert.match(
+      dockerfile,
+      /6db7c5d846c3b3ddfd39f3137a93fe96af3938860eefdbf2429805ee1656e381/,
+    );
+    assert.match(
+      dockerfile,
+      /https:\/\/dl\.k8s\.io\/release\/\$\{KUBECTL_VERSION\}\/bin\/linux\/\$\{TARGETARCH\}\/kubectl/,
+    );
+    assert.match(dockerfile, /sha256sum --check --strict/);
+    assert.match(
+      dockerfile,
+      /COPY --from=kubectl \/usr\/local\/bin\/kubectl \/usr\/local\/bin\/kubectl/,
+    );
+    assert.doesNotMatch(dockerfile, /(?:stable\.txt|latest|apt-get install[^\n]*kubectl)/);
   });
 });
 

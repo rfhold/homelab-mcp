@@ -9,6 +9,7 @@ import { OAuthApplication } from "./authentik";
 import {
   requireImmutableImage,
   validateHttpsOrigin,
+  validateKubernetesClusters,
   validateWrappingKeyVersions,
 } from "./policy";
 
@@ -43,7 +44,9 @@ const backupEndpoint = validateHttpsOrigin(
 );
 const backupRetention = config.require("backupRetention");
 const backupSchedule = config.require("backupSchedule");
-const kubernetesApiEndpointCidr = config.require("kubernetesApiEndpointCidr");
+const kubernetesClusters = validateKubernetesClusters(
+  config.requireObject<unknown>("kubernetesClusters"),
+);
 const accessTokenTtl = config.require("mcpOAuthAccessTokenTtl");
 const refreshTokenTtl = config.require("mcpOAuthRefreshTokenTtl");
 const refreshFamilyTtl = config.require("mcpOAuthRefreshFamilyTtl");
@@ -60,6 +63,24 @@ const activeWrappingKeyVersion = config.require(
   "mcpOAuthActiveWrappingKeyVersion",
 );
 validateWrappingKeyVersions(wrappingKeyVersions, activeWrappingKeyVersion);
+
+const kubernetesProviders = new Map(
+  kubernetesClusters.map((cluster) => [
+    cluster.name,
+    new k8s.Provider(`homelab-mcp-${cluster.name}`, {
+      context: cluster.context,
+    }),
+  ]),
+);
+const pantheonCluster = kubernetesClusters.find(
+  (cluster) => cluster.name === "pantheon" && cluster.context === "pantheon",
+);
+if (!pantheonCluster) {
+  throw new Error(
+    "kubernetesClusters must include the Pantheon hosting cluster and context",
+  );
+}
+const pantheonProvider = kubernetesProviders.get("pantheon")!;
 
 const grafanaUrl = validateHttpsOrigin(requireEnv("GRAFANA_URL"), "GRAFANA_URL");
 const grafanaProvider = new grafana.Provider("homelab-mcp-grafana", {
@@ -94,9 +115,11 @@ const wrappingKeyFile = `${wrappingKeyMountPath}/keyring.json`;
 const postgresTrustMountPath = "/var/run/secrets/homelab-mcp/postgres";
 const postgresCaFile = `${postgresTrustMountPath}/ca.crt`;
 
-const namespace = new k8s.core.v1.Namespace("homelab-mcp-namespace", {
-  metadata: { name: namespaceName, labels },
-});
+const namespace = new k8s.core.v1.Namespace(
+  "homelab-mcp-namespace",
+  { metadata: { name: namespaceName, labels } },
+  { provider: pantheonProvider },
+);
 
 const appServiceAccount = new k8s.core.v1.ServiceAccount(
   "homelab-mcp",
@@ -108,43 +131,47 @@ const appServiceAccount = new k8s.core.v1.ServiceAccount(
     },
     automountServiceAccountToken: false,
   },
-  { dependsOn: [namespace] },
+  { dependsOn: [namespace], provider: pantheonProvider },
 );
 
-const tektonRole = new k8s.rbac.v1.Role("homelab-mcp-tekton", {
-  metadata: {
-    name: "homelab-mcp",
-    namespace: tektonNamespace,
-    labels,
+const tektonRole = new k8s.rbac.v1.Role(
+  "homelab-mcp-tekton",
+  {
+    metadata: {
+      name: "homelab-mcp",
+      namespace: tektonNamespace,
+      labels,
+    },
+    rules: [
+      {
+        apiGroups: ["tekton.dev"],
+        resources: ["pipelineruns"],
+        verbs: ["get", "list", "patch"],
+      },
+      {
+        apiGroups: ["tekton.dev"],
+        resources: ["taskruns"],
+        verbs: ["get", "list"],
+      },
+      {
+        apiGroups: ["pipelinesascode.tekton.dev"],
+        resources: ["repositories"],
+        verbs: ["get", "list"],
+      },
+      {
+        apiGroups: [""],
+        resources: ["pods"],
+        verbs: ["get"],
+      },
+      {
+        apiGroups: [""],
+        resources: ["pods/log"],
+        verbs: ["get"],
+      },
+    ],
   },
-  rules: [
-    {
-      apiGroups: ["tekton.dev"],
-      resources: ["pipelineruns"],
-      verbs: ["get", "list", "patch"],
-    },
-    {
-      apiGroups: ["tekton.dev"],
-      resources: ["taskruns"],
-      verbs: ["get", "list"],
-    },
-    {
-      apiGroups: ["pipelinesascode.tekton.dev"],
-      resources: ["repositories"],
-      verbs: ["get", "list"],
-    },
-    {
-      apiGroups: [""],
-      resources: ["pods"],
-      verbs: ["get"],
-    },
-    {
-      apiGroups: [""],
-      resources: ["pods/log"],
-      verbs: ["get"],
-    },
-  ],
-});
+  { provider: pantheonProvider },
+);
 
 new k8s.rbac.v1.RoleBinding(
   "homelab-mcp-tekton",
@@ -168,7 +195,280 @@ new k8s.rbac.v1.RoleBinding(
       },
     ],
   },
-  { dependsOn: [appServiceAccount, tektonRole] },
+  {
+    dependsOn: [appServiceAccount, tektonRole],
+    provider: pantheonProvider,
+  },
+);
+
+const kubernetesReadRules: k8s.types.input.rbac.v1.PolicyRule[] = [
+  {
+    nonResourceURLs: [
+      "/api",
+      "/apis",
+      "/version",
+      "/api/v1",
+      "/apis/apps/v1",
+      "/apis/autoscaling/v2",
+      "/apis/batch/v1",
+      "/apis/ceph.rook.io/v1",
+      "/apis/cert-manager.io/v1",
+      "/apis/discovery.k8s.io/v1",
+      "/apis/events.k8s.io/v1",
+      "/apis/gateway.networking.k8s.io/v1",
+      "/apis/kafka.strimzi.io/v1beta2",
+      "/apis/metrics.k8s.io/v1beta1",
+      "/apis/networking.k8s.io/v1",
+      "/apis/policy/v1",
+      "/apis/postgresql.cnpg.io/v1",
+      "/apis/storage.k8s.io/v1",
+      "/apis/velero.io/v1",
+    ],
+    verbs: ["get"],
+  },
+  {
+    apiGroups: [""],
+    resources: [
+      "namespaces",
+      "nodes",
+      "pods",
+      "services",
+      "persistentvolumeclaims",
+    ],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["events.k8s.io"],
+    resources: ["events"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["apps"],
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["batch"],
+    resources: ["jobs", "cronjobs"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["metrics.k8s.io"],
+    resources: ["pods", "nodes"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["discovery.k8s.io"],
+    resources: ["endpointslices"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["networking.k8s.io"],
+    resources: ["ingresses", "networkpolicies"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["gateway.networking.k8s.io"],
+    resources: ["gatewayclasses", "gateways", "httproutes"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["autoscaling"],
+    resources: ["horizontalpodautoscalers"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["policy"],
+    resources: ["poddisruptionbudgets"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["storage.k8s.io"],
+    resources: ["storageclasses"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["cert-manager.io"],
+    resources: ["certificates", "clusterissuers"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["postgresql.cnpg.io"],
+    resources: ["clusters"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["kafka.strimzi.io"],
+    resources: ["kafkas", "kafkanodepools", "kafkatopics"],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["ceph.rook.io"],
+    resources: [
+      "cephclusters",
+      "cephfilesystems",
+      "cephblockpools",
+      "cephobjectstores",
+    ],
+    verbs: ["get", "list"],
+  },
+  {
+    apiGroups: ["velero.io"],
+    resources: ["backups", "schedules", "backupstoragelocations"],
+    verbs: ["get", "list"],
+  },
+];
+const kubernetesWriteRules: k8s.types.input.rbac.v1.PolicyRule[] = [
+  {
+    apiGroups: ["apps"],
+    resources: ["deployments", "statefulsets", "daemonsets"],
+    verbs: ["patch"],
+  },
+  {
+    apiGroups: ["apps"],
+    resources: ["deployments/scale", "statefulsets/scale"],
+    verbs: ["get", "patch"],
+  },
+  {
+    apiGroups: ["batch"],
+    resources: ["cronjobs"],
+    verbs: ["patch"],
+  },
+  { apiGroups: ["batch"], resources: ["jobs"], verbs: ["create"] },
+  { apiGroups: [""], resources: ["pods"], verbs: ["delete"] },
+];
+
+const runtimeIdentities = kubernetesClusters.map((cluster) => {
+  const provider = kubernetesProviders.get(cluster.name)!;
+  const targetNamespace =
+    cluster.name === "pantheon"
+      ? namespace
+      : new k8s.core.v1.Namespace(
+          `homelab-mcp-runtime-namespace-${cluster.name}`,
+          { metadata: { name: namespaceName, labels } },
+          { provider },
+        );
+  const identityName = `${slug}-kubernetes-runtime`;
+  const account = new k8s.core.v1.ServiceAccount(
+    `homelab-mcp-kubernetes-runtime-${cluster.name}`,
+    {
+      metadata: {
+        name: identityName,
+        namespace: targetNamespace.metadata.name,
+        labels,
+      },
+      automountServiceAccountToken: false,
+    },
+    { dependsOn: [targetNamespace], provider },
+  );
+  const role = new k8s.rbac.v1.ClusterRole(
+    `homelab-mcp-kubernetes-runtime-${cluster.name}`,
+    {
+      metadata: { name: identityName, labels },
+      rules: [...kubernetesReadRules, ...kubernetesWriteRules],
+    },
+    { provider },
+  );
+  new k8s.rbac.v1.ClusterRoleBinding(
+    `homelab-mcp-kubernetes-runtime-${cluster.name}`,
+    {
+      metadata: { name: identityName, labels },
+      roleRef: {
+        apiGroup: "rbac.authorization.k8s.io",
+        kind: "ClusterRole",
+        name: role.metadata.name,
+      },
+      subjects: [
+        {
+          kind: "ServiceAccount",
+          name: account.metadata.name,
+          namespace: targetNamespace.metadata.name,
+        },
+      ],
+    },
+    { dependsOn: [account, role], provider },
+  );
+  const tokenSecret = new k8s.core.v1.Secret(
+    `homelab-mcp-kubernetes-runtime-token-${cluster.name}`,
+    {
+      metadata: {
+        name: `${identityName}-token`,
+        namespace: targetNamespace.metadata.name,
+        labels,
+        annotations: {
+          "kubernetes.io/service-account.name": identityName,
+          "pulumi.com/waitFor": "jsonpath={.data.token}",
+        },
+      },
+      type: "kubernetes.io/service-account-token",
+    },
+    { dependsOn: [account], provider },
+  );
+  const issuedToken = k8s.core.v1.Secret.get(
+    `homelab-mcp-kubernetes-runtime-token-read-${cluster.name}`,
+    pulumi.interpolate`${targetNamespace.metadata.name}/${tokenSecret.metadata.name}`,
+    { dependsOn: [tokenSecret], provider },
+  );
+  const credentials = pulumi.secret(
+    issuedToken.data.apply((data) => {
+      const token = data?.token;
+      const ca = data?.["ca.crt"];
+      if (!token || !ca) {
+        throw new Error(`runtime token for ${cluster.name} is not populated`);
+      }
+      return {
+        token: Buffer.from(token, "base64").toString("utf8"),
+        certificateAuthorityData: ca,
+      };
+    }),
+  );
+  return { cluster, credentials, tokenSecret };
+});
+
+const kubernetesKubeconfigPath =
+  "/var/run/secrets/homelab-mcp/kubernetes/kubeconfig";
+const runtimeKubeconfig = pulumi.secret(
+  pulumi
+    .all(runtimeIdentities.map((identity) => identity.credentials))
+    .apply((credentials) =>
+      JSON.stringify({
+        apiVersion: "v1",
+        kind: "Config",
+        clusters: kubernetesClusters.map((cluster, index) => ({
+          name: cluster.context,
+          cluster: {
+            server: cluster.server,
+            "certificate-authority-data":
+              credentials[index].certificateAuthorityData,
+          },
+        })),
+        users: kubernetesClusters.map((cluster, index) => ({
+          name: cluster.context,
+          user: { token: credentials[index].token },
+        })),
+        contexts: kubernetesClusters.map((cluster) => ({
+          name: cluster.context,
+          context: { cluster: cluster.context, user: cluster.context },
+        })),
+        "current-context": pantheonCluster.context,
+      }),
+    ),
+);
+const runtimeKubeconfigSecret = new k8s.core.v1.Secret(
+  "homelab-mcp-kubernetes-runtime-kubeconfig",
+  {
+    metadata: {
+      name: "homelab-mcp-kubernetes-runtime-kubeconfig",
+      namespace: namespace.metadata.name,
+      labels,
+    },
+    type: "Opaque",
+    stringData: { kubeconfig: runtimeKubeconfig },
+  },
+  {
+    dependsOn: runtimeIdentities.map((identity) => identity.tokenSecret),
+    provider: pantheonProvider,
+  },
 );
 
 const backupBucket = new k8s.apiextensions.CustomResource(
@@ -186,7 +486,11 @@ const backupBucket = new k8s.apiextensions.CustomResource(
       generateBucketName: `${slug}-backups`,
     },
   },
-  { dependsOn: [namespace], protect: protectData },
+  {
+    dependsOn: [namespace],
+    protect: protectData,
+    provider: pantheonProvider,
+  },
 );
 const backupConfig = pulumi
   .all([namespace.metadata.name, backupBucket.id])
@@ -194,6 +498,7 @@ const backupConfig = pulumi
     k8s.core.v1.ConfigMap.get(
       "homelab-mcp-backups-generated-config",
       `${resolvedNamespace}/homelab-mcp-backups`,
+      { provider: pantheonProvider },
     ),
   );
 
@@ -238,7 +543,11 @@ const databaseCluster = new k8s.apiextensions.CustomResource(
       },
     },
   },
-  { dependsOn: [backupBucket], protect: protectData },
+  {
+    dependsOn: [backupBucket],
+    protect: protectData,
+    provider: pantheonProvider,
+  },
 );
 
 new k8s.apiextensions.CustomResource(
@@ -259,7 +568,7 @@ new k8s.apiextensions.CustomResource(
       method: "barmanObjectStore",
     },
   },
-  { dependsOn: [databaseCluster] },
+  { dependsOn: [databaseCluster], provider: pantheonProvider },
 );
 
 const database = new k8s.apiextensions.CustomResource(
@@ -278,7 +587,7 @@ const database = new k8s.apiextensions.CustomResource(
       cluster: { name: "homelab-mcp-postgres" },
     },
   },
-  { dependsOn: [databaseCluster] },
+  { dependsOn: [databaseCluster], provider: pantheonProvider },
 );
 
 const signingPrivateKey = new tls.PrivateKey("homelab-mcp-oidc-signing-key", {
@@ -342,6 +651,7 @@ const cnpgAppSecret = pulumi
     k8s.core.v1.Secret.get(
       "homelab-mcp-postgres-generated-app",
       `${resolvedNamespace}/homelab-mcp-postgres-app`,
+      { provider: pantheonProvider },
     ),
   );
 const decodeDatabaseSecret = (key: string) =>
@@ -392,6 +702,7 @@ const wrappingKeySecret = new k8s.core.v1.Secret(
     type: "Opaque",
     stringData: { "keyring.json": wrappingKeyring },
   },
+  { provider: pantheonProvider },
 );
 
 const appSecret = new k8s.core.v1.Secret(
@@ -412,7 +723,8 @@ const appSecret = new k8s.core.v1.Secret(
       HOMELAB_MCP_OIDC_SCOPES: "openid profile email",
       HOMELAB_MCP_OAUTH_ISSUER: mcpIssuer,
       HOMELAB_MCP_OAUTH_RESOURCE: mcpResource,
-      HOMELAB_MCP_OAUTH_REQUIRED_SCOPE: "mcp:use",
+      HOMELAB_MCP_OAUTH_REQUIRED_SCOPES:
+        "mcp:use kubernetes:read kubernetes:write",
       HOMELAB_MCP_OAUTH_ACCESS_TOKEN_TTL: accessTokenTtl,
       HOMELAB_MCP_OAUTH_REFRESH_TOKEN_TTL: refreshTokenTtl,
       HOMELAB_MCP_OAUTH_REFRESH_FAMILY_TTL: refreshFamilyTtl,
@@ -434,6 +746,15 @@ const appSecret = new k8s.core.v1.Secret(
       HOMELAB_MCP_TEKTON_NAMESPACE: tektonNamespace,
       HOMELAB_MCP_PAC_URL: pacUrl,
       HOMELAB_MCP_PAC_INCOMING_SECRET: pacIncomingSecret.output,
+      HOMELAB_MCP_KUBECTL_PATH: "/usr/local/bin/kubectl",
+      HOMELAB_MCP_KUBERNETES_CLUSTERS: JSON.stringify(
+        kubernetesClusters.map((cluster) => ({
+          name: cluster.name,
+          kubeconfig: kubernetesKubeconfigPath,
+          context: cluster.context,
+          cache_dir: `/tmp/kubectl/${cluster.name}`,
+        })),
+      ),
       HOMELAB_MCP_DEPLOYMENT_ENVIRONMENT: deploymentEnvironment,
       HOMELAB_MCP_SERVICE_NAMESPACE: "homelab",
       HOMELAB_MCP_PYROSCOPE_URL: "https://telemetry.holdenitdown.net:4040",
@@ -450,7 +771,9 @@ const appSecret = new k8s.core.v1.Secret(
       grafanaToken,
       forgejoToken,
       pacIncomingSecret,
+      runtimeKubeconfigSecret,
     ],
+    provider: pantheonProvider,
   },
 );
 
@@ -463,7 +786,7 @@ new k8s.apps.v1.Deployment(
       labels: workloadLabels,
       annotations: {
         "secret.reloader.stakater.com/reload":
-          "homelab-mcp-app,homelab-mcp-oauth-wrapping-keys",
+          "homelab-mcp-app,homelab-mcp-oauth-wrapping-keys,homelab-mcp-kubernetes-runtime-kubeconfig",
       },
     },
     spec: {
@@ -555,6 +878,11 @@ new k8s.apps.v1.Deployment(
                   readOnly: true,
                 },
                 {
+                  name: "kubernetes-runtime-kubeconfig",
+                  mountPath: "/var/run/secrets/homelab-mcp/kubernetes",
+                  readOnly: true,
+                },
+                {
                   name: "kube-api-access",
                   mountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
                   readOnly: true,
@@ -580,6 +908,16 @@ new k8s.apps.v1.Deployment(
                 secretName: "homelab-mcp-postgres-ca",
                 defaultMode: 0o444,
                 items: [{ key: "ca.crt", path: "ca.crt", mode: 0o444 }],
+              },
+            },
+            {
+              name: "kubernetes-runtime-kubeconfig",
+              secret: {
+                secretName: runtimeKubeconfigSecret.metadata.name,
+                defaultMode: 0o440,
+                items: [
+                  { key: "kubeconfig", path: "kubeconfig", mode: 0o440 },
+                ],
               },
             },
             {
@@ -620,132 +958,154 @@ new k8s.apps.v1.Deployment(
       },
     },
   },
-  { dependsOn: [appSecret, wrappingKeySecret, appServiceAccount] },
+  {
+    dependsOn: [
+      appSecret,
+      wrappingKeySecret,
+      runtimeKubeconfigSecret,
+      appServiceAccount,
+    ],
+    provider: pantheonProvider,
+  },
 );
 
-new k8s.networking.v1.NetworkPolicy("homelab-mcp-egress", {
-  metadata: {
-    name: "homelab-mcp-egress",
-    namespace: namespace.metadata.name,
-    labels,
-  },
-  spec: {
-    podSelector: { matchLabels: workloadLabels },
-    policyTypes: ["Egress"],
-    egress: [
-      {
-        to: [
-          {
-            namespaceSelector: {
-              matchLabels: { "kubernetes.io/metadata.name": "kube-system" },
-            },
-          },
-        ],
-        ports: [
-          { port: 53, protocol: "UDP" },
-          { port: 53, protocol: "TCP" },
-        ],
-      },
-      {
-        ports: [
-          { port: 443, protocol: "TCP" },
-          { port: 4040, protocol: "TCP" },
-          { port: 4318, protocol: "TCP" },
-        ],
-      },
-      {
-        to: [{ ipBlock: { cidr: kubernetesApiEndpointCidr } }],
-        ports: [{ port: 6443, protocol: "TCP" }],
-      },
-      {
-        to: [
-          {
-            namespaceSelector: {
-              matchLabels: { "kubernetes.io/metadata.name": "ingress" },
-            },
-            podSelector: {
-              matchLabels: {
-                "app.kubernetes.io/name": "traefik",
-                "app.kubernetes.io/instance":
-                  "cluster-ingress-ingress-chart-ingress",
+new k8s.networking.v1.NetworkPolicy(
+  "homelab-mcp-egress",
+  {
+    metadata: {
+      name: "homelab-mcp-egress",
+      namespace: namespace.metadata.name,
+      labels,
+    },
+    spec: {
+      podSelector: { matchLabels: workloadLabels },
+      policyTypes: ["Egress"],
+      egress: [
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { "kubernetes.io/metadata.name": "kube-system" },
               },
             },
-          },
-        ],
-        ports: [{ port: 8443, protocol: "TCP" }],
-      },
-      {
-        to: [
-          {
-            podSelector: {
-              matchLabels: { "cnpg.io/cluster": "homelab-mcp-postgres" },
-            },
-          },
-        ],
-        ports: [{ port: 5432, protocol: "TCP" }],
-      },
-      {
-        to: [
-          {
-            namespaceSelector: {
-              matchLabels: {
-                "kubernetes.io/metadata.name": tektonNamespace,
+          ],
+          ports: [
+            { port: 53, protocol: "UDP" },
+            { port: 53, protocol: "TCP" },
+          ],
+        },
+        {
+          ports: [
+            { port: 443, protocol: "TCP" },
+            { port: 4040, protocol: "TCP" },
+            { port: 4318, protocol: "TCP" },
+          ],
+        },
+        ...kubernetesClusters.flatMap((cluster) =>
+          cluster.apiServerEndpointCidrs.map((cidr) => ({
+            to: [{ ipBlock: { cidr } }],
+            ports: [{ port: cluster.apiServerPort, protocol: "TCP" as const }],
+          })),
+        ),
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: { "kubernetes.io/metadata.name": "ingress" },
+              },
+              podSelector: {
+                matchLabels: {
+                  "app.kubernetes.io/name": "traefik",
+                  "app.kubernetes.io/instance":
+                    "cluster-ingress-ingress-chart-ingress",
+                },
               },
             },
-          },
-        ],
-        ports: [{ port: 8080, protocol: "TCP" }],
-      },
-    ],
+          ],
+          ports: [{ port: 8443, protocol: "TCP" }],
+        },
+        {
+          to: [
+            {
+              podSelector: {
+                matchLabels: { "cnpg.io/cluster": "homelab-mcp-postgres" },
+              },
+            },
+          ],
+          ports: [{ port: 5432, protocol: "TCP" }],
+        },
+        {
+          to: [
+            {
+              namespaceSelector: {
+                matchLabels: {
+                  "kubernetes.io/metadata.name": tektonNamespace,
+                },
+              },
+            },
+          ],
+          ports: [{ port: 8080, protocol: "TCP" }],
+        },
+      ],
+    },
   },
-});
+  { provider: pantheonProvider },
+);
 
-const service = new k8s.core.v1.Service("homelab-mcp", {
-  metadata: {
-    name: "homelab-mcp",
-    namespace: namespace.metadata.name,
-    labels,
+const service = new k8s.core.v1.Service(
+  "homelab-mcp",
+  {
+    metadata: {
+      name: "homelab-mcp",
+      namespace: namespace.metadata.name,
+      labels,
+    },
+    spec: {
+      type: "ClusterIP",
+      selector: workloadLabels,
+      ports: [
+        {
+          name: "http",
+          port: 14333,
+          targetPort: "http",
+        },
+      ],
+    },
   },
-  spec: {
-    type: "ClusterIP",
-    selector: workloadLabels,
-    ports: [
-      {
-        name: "http",
-        port: 14333,
-        targetPort: "http",
-      },
-    ],
-  },
-});
+  { provider: pantheonProvider },
+);
 
-new k8s.apiextensions.CustomResource("homelab-mcp-route", {
-  apiVersion: "gateway.networking.k8s.io/v1",
-  kind: "HTTPRoute",
-  metadata: {
-    name: "homelab-mcp",
-    namespace: namespace.metadata.name,
-    labels,
+new k8s.apiextensions.CustomResource(
+  "homelab-mcp-route",
+  {
+    apiVersion: "gateway.networking.k8s.io/v1",
+    kind: "HTTPRoute",
+    metadata: {
+      name: "homelab-mcp",
+      namespace: namespace.metadata.name,
+      labels,
+    },
+    spec: {
+      parentRefs: [
+        {
+          group: "gateway.networking.k8s.io",
+          kind: "Gateway",
+          name: "default-gateway",
+          namespace: "ingress",
+        },
+      ],
+      hostnames: [hostname],
+      rules: [
+        {
+          matches: [{ path: { type: "PathPrefix", value: "/" } }],
+          backendRefs: [{ name: service.metadata.name, port: 14333 }],
+          timeouts: { request: "0s" },
+        },
+      ],
+    },
   },
-  spec: {
-    parentRefs: [
-      {
-        group: "gateway.networking.k8s.io",
-        kind: "Gateway",
-        name: "default-gateway",
-        namespace: "ingress",
-      },
-    ],
-    hostnames: [hostname],
-    rules: [
-      {
-        matches: [{ path: { type: "PathPrefix", value: "/" } }],
-        backendRefs: [{ name: service.metadata.name, port: 14333 }],
-        timeouts: { request: "0s" },
-      },
-    ],
-  },
-});
+  { provider: pantheonProvider },
+);
 
 export const namespaceNameOutput = namespace.metadata.name;
 export const publicUrlOutput = publicUrl;

@@ -23,6 +23,15 @@ use crate::{
             PromqlInput, RenderDashboardInput, RenderPanelInput, TraceqlInput,
         },
     },
+    integrations::kubernetes::{
+        Error as KubernetesError,
+        actions::{
+            CapabilityListInput, ClusterListInput, CronjobSuspendInput, CronjobTriggerInput,
+            ExecCommand as KubernetesExecCommand, PodDeleteInput,
+            QueryCommand as KubernetesQueryCommand, ResourceGetInput, ResourceListInput,
+            ValidationError as KubernetesValidationError, WorkloadRestartInput, WorkloadScaleInput,
+        },
+    },
     integrations::tekton::{
         Error as TektonError,
         actions::{
@@ -44,6 +53,10 @@ const RENDER_TOOL_NAME: &str = "grafana_render";
 const TEKTON_QUERY_TOOL_NAME: &str = "tekton_query";
 #[cfg(test)]
 const TEKTON_EXEC_TOOL_NAME: &str = "tekton_exec";
+#[cfg(test)]
+const KUBERNETES_QUERY_TOOL_NAME: &str = "kubernetes_query";
+#[cfg(test)]
+const KUBERNETES_EXEC_TOOL_NAME: &str = "kubernetes_exec";
 
 #[derive(Clone)]
 pub struct HomelabMcp {
@@ -56,17 +69,17 @@ pub fn router(
     oauth: &OAuthAuthorizationServer,
 ) -> Result<Router, String> {
     let handler = Arc::new(HomelabMcp { services });
-    let required_scope = config.required_scope.clone();
+    let required_scopes = config.required_scopes.clone();
     let metadata =
         McpProtectedResourceMetadata::new(config.resource.clone(), [config.issuer.clone()])
-            .with_scopes([required_scope.clone()])
+            .with_scopes(required_scopes.clone())
             .with_resource_name("Homelab MCP");
     let hosted = oauth.clone();
     let authorization = StreamableHttpAuthorization::hosted(metadata, move |token, context| {
         hosted.authorize_token(token, context)
     })
     .map_err(|_| "invalid MCP authorization configuration".to_owned())?
-    .with_required_scopes([required_scope]);
+    .with_required_scopes(required_scopes);
     let options = StreamableHttpOptions::default()
         .without_root_protected_resource_metadata()
         .with_authorization(authorization);
@@ -141,6 +154,26 @@ pub fn router(
         }),
         namespace(name = "workflow", description = "Dispatch incoming-enabled workflows."),
         namespace(name = "run", description = "Rerun or cancel Tekton PipelineRuns.")
+    ),
+    tool(
+        name = "kubernetes_query",
+        description = "Execute bounded, read-only queries against configured Kubernetes clusters.",
+        annotations = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+        })
+    ),
+    tool(
+        name = "kubernetes_exec",
+        description = "Perform curated exact-object Kubernetes mutations.",
+        annotations = json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+        })
     )
 )]
 impl HomelabMcp {
@@ -670,6 +703,164 @@ impl HomelabMcp {
             Err(error) => tekton_tool_error("run", error),
         }
     }
+
+    /// List the configured Kubernetes cluster catalog without contacting a cluster.
+    #[action(tool = "kubernetes_query", name = "cluster_list")]
+    async fn kubernetes_clusters(
+        &self,
+        input: ClusterListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_kubernetes_query(input.validate(), "cluster", context.cancelled())
+            .await
+    }
+
+    /// Report support for approved resource kinds on one configured cluster.
+    #[action(tool = "kubernetes_query", name = "capability_list")]
+    async fn kubernetes_capabilities(
+        &self,
+        input: CapabilityListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_kubernetes_query(input.validate(), "capability", context.cancelled())
+            .await
+    }
+
+    /// List a bounded set of normalized resources of one approved kind.
+    #[action(tool = "kubernetes_query", name = "resource_list")]
+    async fn kubernetes_resources(
+        &self,
+        input: ResourceListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_kubernetes_query(input.validate(), "resource", context.cancelled())
+            .await
+    }
+
+    /// Get one exact normalized resource of an approved kind.
+    #[action(tool = "kubernetes_query", name = "resource_get")]
+    async fn kubernetes_resource(
+        &self,
+        input: ResourceGetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        self.dispatch_kubernetes_query(input.validate(), "resource", context.cancelled())
+            .await
+    }
+
+    /// Restart one exact Deployment, StatefulSet, or DaemonSet.
+    #[action(tool = "kubernetes_exec", name = "workload_restart")]
+    async fn kubernetes_workload_restart(
+        &self,
+        input: WorkloadRestartInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_kubernetes_exec(input.validate(), "workload", context.cancelled())
+            .await)
+    }
+
+    /// Scale one exact Deployment or StatefulSet to a bounded replica count.
+    #[action(tool = "kubernetes_exec", name = "workload_scale")]
+    async fn kubernetes_workload_scale(
+        &self,
+        input: WorkloadScaleInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_kubernetes_exec(input.validate(), "workload", context.cancelled())
+            .await)
+    }
+
+    /// Suspend or resume one exact CronJob.
+    #[action(tool = "kubernetes_exec", name = "cronjob_suspend")]
+    async fn kubernetes_cronjob_suspend(
+        &self,
+        input: CronjobSuspendInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_kubernetes_exec(input.validate(), "CronJob", context.cancelled())
+            .await)
+    }
+
+    /// Create one Job from one exact CronJob using a server-generated name.
+    #[action(tool = "kubernetes_exec", name = "cronjob_trigger")]
+    async fn kubernetes_cronjob_trigger(
+        &self,
+        input: CronjobTriggerInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_kubernetes_exec(input.validate(), "CronJob", context.cancelled())
+            .await)
+    }
+
+    /// Request ordinary deletion of one exact Pod.
+    #[action(tool = "kubernetes_exec", name = "pod_delete")]
+    async fn kubernetes_pod_delete(
+        &self,
+        input: PodDeleteInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(self
+            .dispatch_kubernetes_exec(input.validate(), "Pod", context.cancelled())
+            .await)
+    }
+
+    async fn dispatch_kubernetes_query(
+        &self,
+        command: Result<KubernetesQueryCommand, KubernetesValidationError>,
+        subject: &str,
+        cancellation: impl Future<Output = ()> + Send,
+    ) -> ServerResult<McpToolResult> {
+        let command = match command {
+            Ok(command) => command,
+            Err(_) => {
+                return Ok(kubernetes_tool_error(
+                    subject,
+                    KubernetesError::InvalidArguments,
+                ));
+            }
+        };
+        match self
+            .services
+            .kubernetes
+            .dispatch_cancelled(&command, cancellation)
+            .await
+        {
+            Ok(output) => Ok(json_result(
+                serde_json::to_value(output).expect("Kubernetes query result must serialize"),
+            )),
+            Err(KubernetesError::RequestCancelled) => {
+                Err(ServerError::internal("request cancelled"))
+            }
+            Err(error) => Ok(kubernetes_tool_error(subject, error)),
+        }
+    }
+
+    async fn dispatch_kubernetes_exec(
+        &self,
+        command: Result<KubernetesExecCommand, KubernetesValidationError>,
+        subject: &str,
+        cancellation: impl Future<Output = ()> + Send,
+    ) -> McpToolResult {
+        let command = match command {
+            Ok(command) => command,
+            Err(_) => return kubernetes_tool_error(subject, KubernetesError::InvalidArguments),
+        };
+        match self
+            .services
+            .kubernetes
+            .execute_cancelled(&command, cancellation)
+            .await
+        {
+            Ok(output) => json_result(
+                serde_json::to_value(output).expect("Kubernetes mutation result must serialize"),
+            ),
+            Err(error) => kubernetes_tool_error(subject, error),
+        }
+    }
 }
 
 fn json_result(output: serde_json::Value) -> McpToolResult {
@@ -722,6 +913,10 @@ fn tool_error(query_name: &str, error: GrafanaError) -> McpToolResult {
 }
 
 fn tekton_tool_error(subject: &str, error: TektonError) -> McpToolResult {
+    error.into_tool_error(subject).into_mcp_result()
+}
+
+fn kubernetes_tool_error(subject: &str, error: KubernetesError) -> McpToolResult {
     error.into_tool_error(subject).into_mcp_result()
 }
 
@@ -1497,7 +1692,7 @@ mod tests {
 
         let (_, listed) = post_mcp(&endpoint, request("tools/list", "list", json!({}))).await;
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 7);
         let query_tool = tools
             .iter()
             .find(|tool| tool["name"] == QUERY_TOOL_NAME)
@@ -1518,6 +1713,114 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == TEKTON_EXEC_TOOL_NAME)
             .unwrap();
+        let kubernetes_query_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == KUBERNETES_QUERY_TOOL_NAME)
+            .unwrap();
+        let kubernetes_exec_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == KUBERNETES_EXEC_TOOL_NAME)
+            .unwrap();
+        assert_eq!(
+            kubernetes_query_tool["annotations"],
+            query_tool["annotations"]
+        );
+        assert_eq!(
+            kubernetes_exec_tool["annotations"],
+            tekton_exec_tool["annotations"]
+        );
+        assert_eq!(
+            kubernetes_query_tool["inputSchema"]["properties"]["action"]["enum"],
+            json!([
+                "help",
+                "cluster_list",
+                "capability_list",
+                "resource_list",
+                "resource_get"
+            ])
+        );
+        assert_eq!(
+            kubernetes_exec_tool["inputSchema"]["properties"]["action"]["enum"],
+            json!([
+                "help",
+                "workload_restart",
+                "workload_scale",
+                "cronjob_suspend",
+                "cronjob_trigger",
+                "pod_delete"
+            ])
+        );
+        let (_, kubernetes_help) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "kubernetes-help",
+                json!({
+                    "name":KUBERNETES_QUERY_TOOL_NAME,
+                    "arguments":{"action":"help","filter":".actions"}
+                }),
+            ),
+        )
+        .await;
+        let kubernetes_actions = kubernetes_help["result"]["structuredContent"]["result"]
+            .as_array()
+            .unwrap();
+        assert_eq!(kubernetes_actions.len(), 4);
+        for action in kubernetes_actions {
+            if matches!(
+                action["action"].as_str(),
+                Some("resource_list" | "resource_get")
+            ) {
+                assert!(
+                    action["input_schema"]["anyOf"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|branch| branch["additionalProperties"] == false)
+                );
+            } else {
+                assert_eq!(action["input_schema"]["additionalProperties"], false);
+            }
+        }
+        let resource_list_schema = &kubernetes_actions
+            .iter()
+            .find(|action| action["action"] == "resource_list")
+            .unwrap()["input_schema"];
+        let resource_list_branches = resource_list_schema["anyOf"].as_array().unwrap();
+        assert!(
+            resource_list_branches
+                .iter()
+                .all(|branch| branch["properties"].get("labels").is_some()
+                    && branch["properties"].get("name").is_none())
+        );
+        assert!(
+            resource_list_branches[0]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("namespace"))
+        );
+        assert!(
+            resource_list_branches[1]["properties"]
+                .get("namespace")
+                .is_none()
+        );
+        let (_, clusters) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "kubernetes-clusters",
+                json!({
+                    "name":KUBERNETES_QUERY_TOOL_NAME,
+                    "arguments":{"action":"cluster_list","input":{}}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(clusters["result"]["structuredContent"]["type"], "clusters");
+        assert_eq!(
+            clusters["result"]["structuredContent"]["result"]["clusters"][0]["name"],
+            "test"
+        );
         assert_eq!(
             tekton_query_tool["annotations"],
             json!({
@@ -2029,6 +2332,7 @@ mod tests {
                     origin,
                     std::time::Duration::from_secs(1),
                 ),
+                kubernetes: crate::integrations::kubernetes::KubernetesCatalog::inert_for_test(),
             }),
         });
         let (mcp_origin, mcp_task) = serve(streamable_http_router(handler)).await;
@@ -2111,6 +2415,18 @@ mod tests {
                     }
                 }),
             ),
+            (
+                KUBERNETES_QUERY_TOOL_NAME,
+                json!({"action":"pod_delete","input":{"cluster":"test","namespace":"ns","name":"pod"}}),
+            ),
+            (
+                KUBERNETES_EXEC_TOOL_NAME,
+                json!({"action":"resource_get","input":{"cluster":"test","kind":"pod","namespace":"ns","name":"pod"}}),
+            ),
+            (
+                KUBERNETES_QUERY_TOOL_NAME,
+                json!({"action":"cluster_list","input":{"extra":true}}),
+            ),
             (QUERY_TOOL_NAME, json!({"action":"help","extra":true})),
             (QUERY_TOOL_NAME, json!({"action":"help","filter":".["})),
         ] {
@@ -2161,6 +2477,34 @@ mod tests {
         assert_eq!(
             mutation_semantic["result"]["structuredContent"]["error"],
             json!({"code":"invalid_arguments","message":"The silence arguments are invalid.","retryable":false})
+        );
+
+        let (_, kubernetes_semantic) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "kubernetes-semantic",
+                json!({
+                    "name":KUBERNETES_EXEC_TOOL_NAME,
+                    "arguments":{
+                        "action":"workload_scale",
+                        "input":{
+                            "cluster":"test", "kind":"deployment", "namespace":"ns",
+                            "name":"app", "replicas":1001
+                        }
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(kubernetes_semantic["result"]["isError"], true);
+        assert_eq!(
+            kubernetes_semantic["result"]["structuredContent"]["error"],
+            json!({
+                "code":"invalid_arguments",
+                "message":"The Kubernetes workload arguments are invalid.",
+                "retryable":false
+            })
         );
 
         let (_, unknown_tool) = post_mcp(
@@ -2418,18 +2762,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_hosted_authorization_supplies_challenge_and_origin_denial() {
+    async fn hosted_authorization_advertises_all_required_scopes_and_denies_bad_origins() {
         let (handler, _, grafana_task) = test_handler().await;
         let metadata = McpProtectedResourceMetadata::new(
             "http://127.0.0.1/mcp",
             ["https://auth.example.com/oauth"],
         )
-        .with_scopes(["homelab:use"]);
+        .with_scopes(["mcp:use", "kubernetes:read", "kubernetes:write"]);
         let authorization = StreamableHttpAuthorization::hosted(metadata, |_, _| {
             Box::pin(async { McpHostedTokenValidation::Unavailable })
         })
         .unwrap()
-        .with_required_scopes(["homelab:use"]);
+        .with_required_scopes(["mcp:use", "kubernetes:read", "kubernetes:write"]);
         let router = streamable_http_router_with_options(
             handler,
             StreamableHttpOptions::default().with_authorization(authorization),
@@ -2451,7 +2795,12 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
         let challenge = missing.headers()["www-authenticate"].to_str().unwrap();
         assert!(challenge.starts_with("Bearer "));
-        assert!(challenge.contains("homelab:use"));
+        for scope in ["mcp:use", "kubernetes:read", "kubernetes:write"] {
+            assert!(
+                challenge.contains(scope),
+                "challenge omitted {scope}: {challenge}"
+            );
+        }
 
         let unavailable = client
             .post(&endpoint)

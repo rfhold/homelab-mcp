@@ -3,4 +3,23 @@ runtime:
   name: nodejs
   options:
     packagemanager: bun
-description: Standalone homelab-mcp deployment on Pantheon
+description: Pantheon-hosted homelab-mcp deployment with bounded multi-cluster Kubernetes access
+config:
+  kubernetesClusters:
+    description: Reviewed runtime cluster catalog with contexts, HTTPS API servers, and endpoint CIDRs
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        context:
+          type: string
+        server:
+          type: string
+        apiServerEndpointCidrs:
+          type: array
+          items:
+            type: string
+      required: [name, context, server, apiServerEndpointCidrs]

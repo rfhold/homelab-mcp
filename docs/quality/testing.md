@@ -2,13 +2,13 @@
 
 ## Status
 
-The repository runtime has 117 passing Rust tests under Rust 1.96: 115 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, and cleanup control.
+The repository runtime has 150 passing Rust tests under Rust 1.96: 148 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, Kubernetes actions, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
 Rust 1.95 cannot run the suite because the manifest and Kuri crates require Rust 1.96.
 
-Pulumi has 12 passing mock tests for the declared runtime and deployment contract. The current container built and deployed successfully to preview.
+Pulumi has 20 passing mock tests for the declared runtime and deployment contract. The current container built and deployed successfully to preview; the Kubernetes worktree revision has not been deployed.
 
 PipelineRun `homelab-mcp-preview-tfd8k` completed all seven tasks and applied commit `4f2e192` to preview.
 
@@ -46,10 +46,11 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Generic Kuri `mcp` | 111 standard all-feature tests pass; both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly. |
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
-| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, five-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
+| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, seven-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
 | Grafana actions | Datasource queries, dashboard inventory and PNG rendering, alerting reads and silence creation, bounds, normalization, fixed routes, redirects, semantic errors, timeout, capacity, and permit release against mock HTTP servers. |
-| Pulumi policy | Immutable images, HTTPS origins, wrapping-key versions, Editor service-account declaration, and stack configuration safety. |
-| Pulumi topology | Namespace, backups, CNPG, Authentik, Grafana, Secrets, workload hardening, network, Service, and route. |
+| Kubernetes actions | Exact typed action schemas, all 36 resource kinds, namespace scope, fixed API paths and mutations, normalization, limits, safe errors, process supervision, and uncertain mutation outcomes. |
+| Pulumi policy | Immutable images, HTTPS origins, wrapping-key versions, strict normalized Kubernetes cluster configuration and ports, Editor service-account declaration, and stack configuration safety. |
+| Pulumi topology | Namespace, backups, CNPG, Authentik, Grafana, Kubernetes identities and exact RBAC, Secrets, workload hardening, per-cluster egress, Service, and route. |
 | Current container runtime | Multi-architecture image delivery succeeded; the preview pod is ready with zero restarts. |
 | Current preview pipeline | Seven tasks passed, Pulumi applied preview, health/readiness return 200, OAuth metadata is live, and unauthenticated `/mcp` returns the required Bearer challenge. |
 
@@ -60,7 +61,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | PostgreSQL integration | Apply the real embedded migrations and exercise expiry, atomic single use, replay prevention, refresh rotation, and encrypted signing-key persistence against a disposable database. |
 | Hosted OAuth integration | Run complete authorization-code and refresh paths, including local token issuance and validation, beyond local consent, challenge, and mocked generic components. |
 | Live Authentik integration | Exercise OIDC discovery, browser login, callback validation, and transaction completion against the configured provider. |
-| Kuri-client integration | Exercise DCR, CIMD, native loopback authorization, token refresh, exact resource binding, and calls to both MCP tools. |
+| Kuri-client integration | Exercise DCR, CIMD, native loopback authorization, token refresh, exact resource binding, and calls to all advertised MCP tools. |
 | Live Grafana integration | Exercise controlled datasource and dashboard reads, rendering, alerting reads, and silence creation without exposing credentials. Verify the renderer prerequisites and intended Editor operations. |
 | Container runtime | Basic deployed startup is verified; complete the full browser OAuth and Grafana path in the deployed container. |
 | Preview end-to-end | Prove browser login, local token issuance and refresh, authenticated `/mcp`, and controlled Grafana datasource and alerting reads and silence creation on preview. |
@@ -68,6 +69,8 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 The Rust suite supplies local and mock evidence. Deployed evidence additionally covers startup, readiness, metadata, and challenge behavior, but not browser OAuth, authenticated MCP, live alert APIs, or Editor permission operation. No deployment or live operation occurred for the alerting revision.
 
 The Tekton feature has worktree implementation, Rust unit and MCP discovery tests, and passing Pulumi declaration tests. It has no deployment or live evidence. Existing preview evidence does not cover `tekton_query`, `tekton_exec`, Forgejo, PAC, effective Kubernetes RBAC, or task logs.
+
+The Kubernetes feature has worktree implementation, Rust unit and MCP schema tests, and passing Pulumi policy and topology tests. Existing preview evidence does not cover its OAuth scope set, runtime kubeconfigs, cluster API reachability, effective RBAC, reads, dry-runs, or mutations.
 
 Preview end-to-end checks require explicit target authority. Production checks and production deployment remain excluded.
 
@@ -169,6 +172,39 @@ Tests must cover the [Tekton tool specifications](../tekton/README.md), includin
 Pulumi mock tests must cover separate env-backed Stashes, environment seed names, application Secret projection, the dedicated ServiceAccount, explicit token projection, namespace Role rules, and absence of Secret or cluster-wide permissions.
 
 Live preview evidence requires separate approval for each target and action. It must verify effective RBAC, PAC repository mapping, Forgejo reads, bounded logs, dispatch acceptance, rerun behavior, cancellation requests, and uncertain mutation recovery.
+
+## Kubernetes Contract Coverage
+
+The [Kubernetes tool specifications](../kubernetes/README.md) define locally implemented behavior. Rust and Pulumi tests cover the runtime and declarations. Deployment, browser, live-cluster, and effective-RBAC evidence remain pending.
+
+Tests must cover:
+
+- progressive help, typed action schemas, optional jq-compatible filters, action separation, and exact MCP annotations;
+- the global `mcp:use kubernetes:read kubernetes:write` requirement for `/mcp`, automatic Kuri requests, and current-grant reauthorization;
+- proof that OAuth scopes do not enforce per-action access;
+- a unique one-through-32 cluster catalog, exact cluster selection, and initial Pantheon and Romulus entries;
+- rejection of caller-controlled executables, kubeconfigs, contexts, API servers, arguments, verbs, resources, API paths, selectors, and output templates;
+- `cluster_list`, `capability_list`, `resource_list`, and `resource_get` validation and normalized output, including schema-visible namespace requirements and disjoint kind subsets;
+- every approved built-in and fixed platform resource kind, API mapping, namespaced rule, and unsupported capability result;
+- exact label maps with at most eight entries and rejection of arbitrary selector syntax;
+- five-page, 500-inspected, and 100-returned list ceilings with separate source, result, and aggregate truncation fields;
+- conditions capped at 20, Event messages capped at 1,024 UTF-8 bytes each, and Event text capped at 32 KiB per result;
+- normalized allowlists with no raw objects, Secrets, ConfigMaps, arbitrary labels, arbitrary annotations, or arbitrary custom resources;
+- two concurrent `kubectl` processes, an outer deadline of at most 30 seconds, 4 MiB stdout, 32 KiB stderr, cancellation, child termination, and permit release;
+- safe semantic errors with no command, path, credential, API origin, stdout, stderr, or raw-object disclosure, including unknown outcomes for every non-success mutation process result after spawn;
+- exact-object restart for Deployment, StatefulSet, and DaemonSet only;
+- exact-object scale for Deployment and StatefulSet only, with replicas from 0 through 1,000;
+- exact CronJob suspend or resume state, server-named CronJob trigger, and ordinary exact Pod deletion;
+- server dry-run where supported, one process attempt, no retry, safe rejection, and non-retryable `mutation_outcome_unknown` after launch ambiguity; and
+- every exclusion in the [shared contract](../kubernetes/spec/common.md#exclusions).
+
+Deployment tests verify dedicated runtime kubeconfigs, strict normalized cluster configuration, per-server NetworkPolicy ports, and one combined exact-RBAC ServiceAccount per target cluster. They prove that the Tekton provider kubeconfig never reaches the runtime.
+
+RBAC declaration tests verify fixed cluster-wide reads, exact curated writes, exact get-only discovery routes, and no application wildcard permissions. Standard Kubernetes may independently grant broader authenticated discovery through `system:discovery`; live effective-RBAC checks must account for inherited defaults. Representative denials must cover Secrets, ConfigMaps, arbitrary CRDs, pod logs, exec, attach, proxy, port forwarding, node writes, force deletion, and general mutation.
+
+Preview evidence requires exact target-specific approval. It must verify identity, effective RBAC, API reachability, catalog behavior, representative reads, denied exclusions, server dry-run, controlled accepted mutations, and uncertain-outcome recovery.
+
+Current preview evidence does not cover `kubernetes_query`, `kubernetes_exec`, the expanded OAuth scope set, runtime kubeconfigs, effective Kubernetes RBAC, or any Kubernetes action. Production remains unapplied and outside current verification.
 
 ## Preview Evidence
 

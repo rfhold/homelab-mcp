@@ -1,17 +1,22 @@
-use std::fs;
+use std::{fs, path::PathBuf};
 
 use reqwest::Url;
 use serde_json::Value;
 
 use crate::{
     config::Config,
-    integrations::{grafana::GrafanaClient, tekton::TektonClient},
+    integrations::{
+        grafana::GrafanaClient,
+        kubernetes::{KubernetesCatalog, KubernetesConfig},
+        tekton::TektonClient,
+    },
 };
 
 #[derive(Clone)]
 pub struct Services {
     pub(crate) grafana: GrafanaClient,
     pub(crate) tekton: TektonClient,
+    pub(crate) kubernetes: KubernetesCatalog,
 }
 
 impl Services {
@@ -43,6 +48,23 @@ impl Services {
                 config.integrations.grafana.token.clone(),
             )?,
             tekton: TektonClient::production(&config.integrations.tekton, redactions)?,
+            kubernetes: KubernetesCatalog::new(
+                config
+                    .integrations
+                    .kubernetes
+                    .clusters
+                    .iter()
+                    .map(|cluster| {
+                        KubernetesConfig::new(
+                            PathBuf::from(&config.integrations.kubernetes.kubectl_path),
+                            PathBuf::from(&cluster.kubeconfig),
+                            PathBuf::from(&cluster.cache_dir),
+                            cluster.context.clone(),
+                            cluster.name.clone(),
+                        )
+                    })
+                    .collect(),
+            )?,
         })
     }
 
@@ -51,6 +73,7 @@ impl Services {
         Self {
             grafana,
             tekton: TektonClient::disabled_for_test(),
+            kubernetes: KubernetesCatalog::inert_for_test(),
         }
     }
 }

@@ -1,4 +1,10 @@
-use std::{env, fs, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    env, fs,
+    path::{Component, Path},
+    sync::Arc,
+    time::Duration,
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use mcp::VersionedOAuthWrappingKeyring;
@@ -6,6 +12,8 @@ use serde::Deserialize;
 use url::Url;
 
 const PREFIX: &str = "HOMELAB_MCP_";
+const REQUIRED_OAUTH_SCOPES: [&str; 3] = ["mcp:use", "kubernetes:read", "kubernetes:write"];
+const MAX_KUBERNETES_CLUSTERS_JSON_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TelemetryConfig {
@@ -57,7 +65,7 @@ pub struct OidcConfig {
 pub struct OAuthConfig {
     pub issuer: String,
     pub resource: String,
-    pub required_scope: String,
+    pub required_scopes: Vec<String>,
     pub access_token_ttl: Duration,
     pub refresh_token_ttl: Duration,
     pub refresh_family_ttl: Duration,
@@ -73,6 +81,22 @@ pub struct OAuthConfig {
 pub struct IntegrationsConfig {
     pub grafana: GrafanaConfig,
     pub tekton: TektonConfig,
+    pub kubernetes: KubernetesIntegrationConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KubernetesIntegrationConfig {
+    pub kubectl_path: String,
+    pub clusters: Vec<KubernetesClusterConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesClusterConfig {
+    pub name: String,
+    pub kubeconfig: String,
+    pub context: String,
+    pub cache_dir: String,
 }
 
 #[derive(Clone)]
@@ -139,7 +163,7 @@ impl Config {
             oauth: OAuthConfig {
                 issuer: required("OAUTH_ISSUER")?,
                 resource: required("OAUTH_RESOURCE")?,
-                required_scope: required("OAUTH_REQUIRED_SCOPE")?,
+                required_scopes: parse_required_scopes(&required("OAUTH_REQUIRED_SCOPES")?)?,
                 access_token_ttl: seconds("OAUTH_ACCESS_TOKEN_TTL")?,
                 refresh_token_ttl: seconds("OAUTH_REFRESH_TOKEN_TTL")?,
                 refresh_family_ttl: seconds("OAUTH_REFRESH_FAMILY_TTL")?,
@@ -161,6 +185,10 @@ impl Config {
                     namespace: required("TEKTON_NAMESPACE")?,
                     pac_origin: internal_http_origin("PAC_URL", &required("PAC_URL")?)?,
                     pac_incoming_secret: secret("PAC_INCOMING_SECRET")?,
+                },
+                kubernetes: KubernetesIntegrationConfig {
+                    kubectl_path: required("KUBECTL_PATH")?,
+                    clusters: parse_kubernetes_clusters(&required("KUBERNETES_CLUSTERS")?)?,
                 },
             },
         };
@@ -189,7 +217,7 @@ impl Config {
         if ["openid", "profile", "email"]
             .iter()
             .any(|required| !self.oidc.scopes.iter().any(|scope| scope == required))
-            || self.oauth.required_scope != "mcp:use"
+            || self.oauth.required_scopes != REQUIRED_OAUTH_SCOPES.map(str::to_owned)
             || self.oauth.access_token_ttl.is_zero()
             || self.oauth.refresh_token_ttl.is_zero()
             || self.oauth.refresh_family_ttl < self.oauth.refresh_token_ttl
@@ -204,6 +232,7 @@ impl Config {
         {
             return Err("Tekton integration configuration is invalid".to_owned());
         }
+        validate_kubernetes_config(&self.integrations.kubernetes)?;
         Ok(())
     }
 }
@@ -317,6 +346,75 @@ fn secure_origins(name: &str) -> Result<Vec<Url>, String> {
                 .collect()
         })
         .unwrap_or_else(|| Ok(Vec::new()))
+}
+
+fn parse_required_scopes(value: &str) -> Result<Vec<String>, String> {
+    let scopes = value
+        .split_ascii_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let unique = scopes.iter().collect::<HashSet<_>>();
+    if scopes != REQUIRED_OAUTH_SCOPES.map(str::to_owned) || unique.len() != scopes.len() {
+        return Err("OAuth policy configuration is invalid".to_owned());
+    }
+    Ok(scopes)
+}
+
+fn parse_kubernetes_clusters(value: &str) -> Result<Vec<KubernetesClusterConfig>, String> {
+    if value.len() > MAX_KUBERNETES_CLUSTERS_JSON_BYTES {
+        return Err("invalid HOMELAB_MCP_KUBERNETES_CLUSTERS".to_owned());
+    }
+    let clusters = serde_json::from_str(value)
+        .map_err(|_| "invalid HOMELAB_MCP_KUBERNETES_CLUSTERS".to_owned())?;
+    let config = KubernetesIntegrationConfig {
+        kubectl_path: "/inert/kubectl".to_owned(),
+        clusters,
+    };
+    validate_kubernetes_config(&config)?;
+    Ok(config.clusters)
+}
+
+fn validate_kubernetes_config(config: &KubernetesIntegrationConfig) -> Result<(), String> {
+    if !safe_absolute_path(&config.kubectl_path)
+        || config.clusters.is_empty()
+        || config.clusters.len() > 32
+    {
+        return Err("Kubernetes integration configuration is invalid".to_owned());
+    }
+    let mut names = HashSet::new();
+    for cluster in &config.clusters {
+        if !valid_kubernetes_identifier(&cluster.name, false)
+            || !valid_kubernetes_identifier(&cluster.context, true)
+            || !safe_absolute_path(&cluster.kubeconfig)
+            || !safe_absolute_path(&cluster.cache_dir)
+            || !names.insert(&cluster.name)
+        {
+            return Err("Kubernetes integration configuration is invalid".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn safe_absolute_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4096
+        && !value.chars().any(char::is_control)
+        && Path::new(value).is_absolute()
+        && !Path::new(value)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+}
+
+fn valid_kubernetes_identifier(value: &str, context: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && !value.starts_with('-')
+        && !value.chars().any(|c| c.is_control() || c.is_whitespace())
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '-' | '.' | '_')
+                || context && matches!(c, ':' | '/')
+        })
 }
 
 #[cfg(test)]
@@ -444,7 +542,7 @@ mod tests {
             oauth: OAuthConfig {
                 issuer: "https://mcp.example/oauth".to_owned(),
                 resource: "https://mcp.example/mcp".to_owned(),
-                required_scope: "other:scope".to_owned(),
+                required_scopes: vec!["other:scope".to_owned()],
                 access_token_ttl: Duration::from_secs(60),
                 refresh_token_ttl: Duration::from_secs(60),
                 refresh_family_ttl: Duration::from_secs(120),
@@ -467,6 +565,15 @@ mod tests {
                     pac_origin: Url::parse("http://pipelines-as-code-controller.pipelines-as-code.svc.cluster.local:8080/").unwrap(),
                     pac_incoming_secret: Secret("pac-secret".to_owned()),
                 },
+                kubernetes: KubernetesIntegrationConfig {
+                    kubectl_path: "/inert/kubectl".to_owned(),
+                    clusters: vec![KubernetesClusterConfig {
+                        name: "test".to_owned(),
+                        kubeconfig: "/inert/kubeconfig".to_owned(),
+                        context: "test-context".to_owned(),
+                        cache_dir: "/inert/cache".to_owned(),
+                    }],
+                },
             },
         };
 
@@ -474,7 +581,7 @@ mod tests {
             config.validate().unwrap_err(),
             "OAuth policy configuration is invalid"
         );
-        config.oauth.required_scope = "mcp:use".to_owned();
+        config.oauth.required_scopes = REQUIRED_OAUTH_SCOPES.map(str::to_owned).to_vec();
         assert!(config.validate().is_ok());
         for required in ["openid", "profile", "email"] {
             let mut missing_scope = config.clone();
@@ -484,5 +591,52 @@ mod tests {
                 "OAuth policy configuration is invalid"
             );
         }
+    }
+
+    #[test]
+    fn required_oauth_scopes_are_exact_ordered_and_unique() {
+        let canonical = "mcp:use kubernetes:read kubernetes:write";
+        assert_eq!(
+            parse_required_scopes(canonical).unwrap(),
+            REQUIRED_OAUTH_SCOPES.map(str::to_owned)
+        );
+        for invalid in [
+            "",
+            "mcp:use",
+            "kubernetes:read mcp:use kubernetes:write",
+            "mcp:use kubernetes:read kubernetes:read",
+            "mcp:use kubernetes:read admin",
+        ] {
+            assert!(
+                parse_required_scopes(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kubernetes_cluster_json_is_bounded_exact_and_path_only() {
+        let valid = r#"[{"name":"pantheon","kubeconfig":"/run/kubernetes/pantheon","context":"mcp/pantheon","cache_dir":"/var/cache/kubectl/pantheon"}]"#;
+        assert_eq!(
+            parse_kubernetes_clusters(valid).unwrap()[0].name,
+            "pantheon"
+        );
+        for invalid in [
+            "[]",
+            "not-json",
+            r#"[{"name":"pantheon","kubeconfig":"relative","context":"ctx","cache_dir":"/cache"}]"#,
+            r#"[{"name":"-bad","kubeconfig":"/k","context":"ctx","cache_dir":"/cache"}]"#,
+            r#"[{"name":"pantheon","kubeconfig":"/k","context":"bad context","cache_dir":"/cache"}]"#,
+            r#"[{"name":"pantheon","kubeconfig":"/k","context":"ctx","cache_dir":"/cache","token":"secret"}]"#,
+            r#"[{"name":"same","kubeconfig":"/a","context":"a","cache_dir":"/a"},{"name":"same","kubeconfig":"/b","context":"b","cache_dir":"/b"}]"#,
+        ] {
+            assert!(
+                parse_kubernetes_clusters(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+        assert!(
+            parse_kubernetes_clusters(&" ".repeat(MAX_KUBERNETES_CLUSTERS_JSON_BYTES + 1)).is_err()
+        );
     }
 }

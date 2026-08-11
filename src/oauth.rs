@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use axum::response::IntoResponse as _;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -80,7 +80,7 @@ pub async fn initialize(
         oauth.issuer.clone(),
         vec![OAuthResource {
             resource: oauth.resource.clone(),
-            scopes: vec![oauth.required_scope.clone()],
+            scopes: oauth.required_scopes.clone(),
         }],
     );
     policy.authorization_code_lifetime = oauth.code_ttl;
@@ -94,7 +94,7 @@ pub async fn initialize(
 
     let consent = Arc::new(AutoApproveConsent {
         resource: oauth.resource.clone(),
-        scope: oauth.required_scope.clone(),
+        scopes: oauth.required_scopes.clone(),
     });
     let mut server = OAuthAuthorizationServer::new(
         policy,
@@ -236,14 +236,16 @@ impl McpOAuthEntropy for SystemEntropy {
 
 struct AutoApproveConsent {
     resource: String,
-    scope: String,
+    scopes: Vec<String>,
 }
 
 impl OAuthConsentHandler for AutoApproveConsent {
     fn present(&self, model: OAuthConsentModel) -> BoxFuture<OAuthConsentPresentation> {
+        let expected = self.scopes.iter().collect::<HashSet<_>>();
+        let requested = model.requested_scopes.iter().collect::<HashSet<_>>();
         let approved = model.resource == self.resource
-            && model.requested_scopes.len() == 1
-            && model.requested_scopes[0] == self.scope;
+            && model.requested_scopes.len() == self.scopes.len()
+            && requested == expected;
         Box::pin(async move {
             if approved {
                 OAuthConsentPresentation::Approved
@@ -265,10 +267,12 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn consent_only_approves_the_exact_resource_and_scope() {
+    async fn consent_only_approves_the_exact_resource_and_scope_set() {
         let consent = AutoApproveConsent {
             resource: "https://mcp.example/mcp".to_owned(),
-            scope: "mcp:use".to_owned(),
+            scopes: ["mcp:use", "kubernetes:read", "kubernetes:write"]
+                .map(str::to_owned)
+                .to_vec(),
         };
         let model = |resource: &str, scopes: &[&str]| OAuthConsentModel {
             client_id: "client".to_owned(),
@@ -281,13 +285,28 @@ mod tests {
 
         assert!(matches!(
             consent
-                .present(model("https://mcp.example/mcp", &["mcp:use"]))
+                .present(model(
+                    "https://mcp.example/mcp",
+                    &["kubernetes:write", "mcp:use", "kubernetes:read"],
+                ))
                 .await,
             OAuthConsentPresentation::Approved
         ));
         assert!(matches!(
             consent
-                .present(model("https://mcp.example/mcp", &["mcp:use", "admin"]))
+                .present(model(
+                    "https://mcp.example/mcp",
+                    &["mcp:use", "kubernetes:read", "admin"],
+                ))
+                .await,
+            OAuthConsentPresentation::Response(_)
+        ));
+        assert!(matches!(
+            consent
+                .present(model(
+                    "https://mcp.example/mcp",
+                    &["mcp:use", "kubernetes:read"],
+                ))
                 .await,
             OAuthConsentPresentation::Response(_)
         ));

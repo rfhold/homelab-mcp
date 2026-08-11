@@ -16,9 +16,11 @@ The resource value has exact-string semantics. Alternate origins, paths, query s
 
 Each `/mcp` request stands alone after token validation. The service requires no MCP session identifier and stores no MCP protocol session state.
 
-Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:use`.
+Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain `mcp:use`, `kubernetes:read`, and `kubernetes:write` as independent scope values.
 
-The same `mcp:use` authorization permits every implemented Grafana query, image-rendering, and exec action, including operationally consequential `silence.create`. It also permits every Tekton query and exec action. The design has no separate read-only, image, or mutation scope.
+The required global set `mcp:use kubernetes:read kubernetes:write` permits every implemented Grafana, Tekton, and Kubernetes query and exec action. Kuri requests all three scopes automatically. The set gates the complete `/mcp` resource and does not enforce access per action.
+
+Current grants contain only `mcp:use`. Current users and clients must complete browser authorization again after the new scope set takes effect.
 
 Authentik provides browser identity only. Authentik access tokens, ID tokens, and other Authentik credentials never authorize `/mcp`.
 
@@ -38,7 +40,7 @@ The service must publish protected-resource and authorization-server metadata fo
 
 An unauthenticated `/mcp` request must return HTTP 401. Its `WWW-Authenticate` header must use the `Bearer` scheme and a `resource_metadata` parameter with the absolute protected-resource metadata URL.
 
-An invalid, expired, or incorrectly bound token must return HTTP 401 with Bearer error `invalid_token`. A valid token without `mcp:use` must return HTTP 403 with Bearer error `insufficient_scope` and scope `mcp:use`.
+An invalid, expired, or incorrectly bound token must return HTTP 401 with Bearer error `invalid_token`. A valid token that lacks any required scope returns HTTP 403 with Bearer error `insufficient_scope` and scope `mcp:use kubernetes:read kubernetes:write`.
 
 Challenges and OAuth errors must not include tokens, authorization codes, client secrets, signing material, or OIDC transaction values.
 
@@ -70,7 +72,7 @@ The callback verifies state, nonce, PKCE, signature, issuer, audience, expiratio
 
 `homelab-mcp` does not own OIDC transaction persistence or callback protocol logic.
 
-After successful authentication, hosted continuation approves only the configured `/mcp` resource and `mcp:use` scope. It rejects any different resource or scope.
+After successful authentication, hosted continuation approves only the configured `/mcp` resource and exact `mcp:use kubernetes:read kubernetes:write` scope set. It rejects any different resource or scope. This wiring is locally tested; browser and deployed verification remain pending.
 
 Authentik session lifetime does not extend local authorization codes, access tokens, refresh generations, or OIDC transactions.
 
@@ -94,7 +96,7 @@ The local issuer signs access tokens with ES256. Each access token must:
 - identify the configured local issuer exactly;
 - bind its audience to the exact configured `/mcp` resource;
 - remain within its validity interval; and
-- contain `mcp:use` as an independently matched scope value.
+- contain `mcp:use`, `kubernetes:read`, and `kubernetes:write` as independently matched scope values.
 
 The `/mcp` boundary must validate the signature, algorithm, token type, issuer, exact audience, time claims, and scope before MCP request handling.
 
@@ -116,6 +118,7 @@ Database transactions must enforce expiry and atomic single-use behavior for aut
 
 - The service must read Authentik, PostgreSQL, Grafana, and OAuth key material only from runtime secret sources.
 - Tekton credentials come from separate runtime secret sources. They include the Forgejo token, PAC input secret, and projected Kubernetes token.
+- Kubernetes runtime kubeconfigs use declared dedicated reduced ServiceAccount credentials for each configured cluster. They do not reuse the Tekton deployment provider kubeconfig; deployment and effective-RBAC evidence remain pending.
 - The service must send the shared Grafana token only in an upstream `Authorization` header for query, render, and exec requests.
 - The worktree configures the shared Grafana service account with Editor privileges because the same server-held token performs reads and creates silences; this promotion is not applied or verified live.
 - Browser URLs, redirects, logs, traces, render metadata, health responses, and OAuth errors must not contain secret values. MCP image content contains only validated PNG bytes and excludes the token, origin, URL, headers, and template variables from metadata.

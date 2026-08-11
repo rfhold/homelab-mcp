@@ -12,7 +12,15 @@ config:
   homelab-mcp:backupEndpoint: https://s3.pantheon.holdenitdown.net
   homelab-mcp:backupRetention: 14d
   homelab-mcp:backupSchedule: 0 0 2 * * *
-  homelab-mcp:kubernetesApiEndpointCidr: 172.16.3.0/24
+  homelab-mcp:kubernetesClusters:
+    - name: pantheon
+      context: pantheon
+      server: https://pantheon.holdenitdown.net:6443
+      apiServerEndpointCidrs: [172.16.3.0/24]
+    - name: romulus
+      context: romulus
+      server: https://romulus.holdenitdown.net:6443
+      apiServerEndpointCidrs: [172.16.4.0/24]
   homelab-mcp:mcpOAuthAccessTokenTtl: "300"
   homelab-mcp:mcpOAuthRefreshTokenTtl: "86400"
   homelab-mcp:mcpOAuthRefreshFamilyTtl: "2592000"

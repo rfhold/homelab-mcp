@@ -87,9 +87,27 @@ The CI deployment runs `pulumi up --skip-preview`. A separate authorized local p
 
 Run, task, pod, and PAC Repository access is fixed to `pipelines-as-code`. The Role remains namespace-scoped, and every tool action enforces the canonical ownership checks.
 
-Pantheon evaluates Kubernetes Service egress after DNAT to control-plane endpoints. The NetworkPolicy therefore allows TCP 6443 only to the stack-configured `kubernetesApiEndpointCidr`; allowing only the Service port 443 does not make the in-cluster API reachable.
+Pantheon evaluates Kubernetes Service egress after DNAT to control-plane endpoints. The NetworkPolicy therefore allows TCP 6443 only to the Pantheon catalog entry's configured `apiServerEndpointCidrs`; allowing only the Service port 443 does not make the in-cluster API reachable.
 
 Local Pulumi mocks can verify declarations but cannot verify effective cluster authorization or controller behavior. Any Stash seed, preview, apply, credential creation, cluster read, dispatch, rerun, cancellation, or live verification requires exact target-specific authority.
+
+## Kubernetes Access
+
+The Kubernetes runtime, OAuth wiring, container support, Pulumi declarations, and local tests exist in the worktree. They have not been deployed or verified through browser, live-cluster, or effective-RBAC checks. Production remains unapplied.
+
+The [Kubernetes tool specifications](../kubernetes/README.md) own action behavior and limits. The [deployment and RBAC contract](../kubernetes/spec/deployment-rbac.md) owns cluster credentials, exact permissions, process isolation, and operational gates.
+
+Runtime configuration defines one through 32 exact cluster objects and rejects unknown or credential-like fields. The initial catalog represents Pantheon and Romulus with HTTPS API servers on port 6443.
+
+The Tekton deployment kubeconfig serves only as provider bootstrap authority. The runtime uses dedicated reduced credentials for one combined exact-RBAC ServiceAccount in each target cluster.
+
+Each declared runtime ServiceAccount receives cluster-wide fixed reads, exact get-only discovery routes, and only the approved curated writes. It receives no application wildcard, Secret, ConfigMap, arbitrary CRD, pod-log, exec, attach, proxy, port-forward, node-write, force-delete, or general mutation authority. Kubernetes may separately grant broader authenticated discovery through `system:discovery`; the application grant does not remove inherited defaults.
+
+The deployment mounts runtime kubeconfigs separately from provider credentials, application secrets, and OAuth key material. NetworkPolicy derives each cluster egress port from the same validated server URL, using its explicit port or HTTPS default 443, and pairs it with only that cluster's configured endpoint CIDRs.
+
+The reviewed runtime image includes `kubectl`, and server code pins all command behavior. Callers never control an executable, kubeconfig, context, API server, verb, resource path, or output template.
+
+Before any preview apply, an authorized operator must review the exact catalog, ServiceAccounts, ClusterRoles, bindings, mounts, and egress destinations. Live reads, server dry-runs, real mutations, and credential operations require separate target-specific authority.
 
 ## Preview Pipeline
 
