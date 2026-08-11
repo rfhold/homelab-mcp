@@ -23,8 +23,8 @@ use super::{
     Error,
     actions::{
         RepositoryListQuery, RunCancelCommand, RunGetQuery, RunListQuery, RunRerunCommand,
-        RunWaitQuery, TaskListQuery, TaskLogsQuery, WorkflowDispatchCommand, WorkflowListQuery,
-        valid_repository_component,
+        RunStatusQuery, RunWaitQuery, TaskListQuery, TaskLogsQuery, WorkflowDispatchCommand,
+        WorkflowListQuery, valid_repository_component,
     },
 };
 
@@ -36,6 +36,8 @@ const MAX_WORKFLOW_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WORKFLOW_DOCUMENTS: usize = 32;
 const MAX_WORKFLOW_REPOSITORIES: usize = 50;
 const MAX_LOG_STEPS: usize = 8;
+const MAX_FAILED_TASKS: usize = 20;
+const MAX_CONDITION_MESSAGE_BYTES: usize = 4096;
 const MAX_KUBE_LIST_ITEMS: usize = 500;
 const MAX_KUBE_LIST_PAGES: usize = 10;
 const REPOSITORY_LABEL: &str = "pipelinesascode.tekton.dev/repository";
@@ -292,6 +294,49 @@ impl TektonClient {
         Ok(json!({"mode":"get", "result_type":"run", "result":normalized}))
     }
 
+    pub async fn status(&self, query: &RunStatusQuery) -> Result<Value, Error> {
+        let (run, repository) = self.owned_run(&query.run_id).await?;
+        let mut normalized =
+            normalize_run(&run, &self.namespace, &repository).ok_or(Error::InvalidResponse)?;
+        let (message, message_truncated) = self.condition_message(&run);
+        normalized["condition_message"] = json!(message);
+        normalized["condition_message_truncated"] = json!(message_truncated);
+
+        let run_name = object_name(&run).ok_or(Error::InvalidResponse)?;
+        let run_uid = object_uid(&run).ok_or(Error::InvalidResponse)?;
+        let repository_label = label(&run, REPOSITORY_LABEL).ok_or(Error::NotFound)?;
+        let path = format!("/apis/tekton.dev/v1/namespaces/{}/taskruns", self.namespace);
+        let selector = format!("{PIPELINE_RUN_LABEL}={run_name}");
+        let (items, source_truncated) = self.kube_list(&path, Some(&selector)).await?;
+        let mut failed_tasks = items
+            .iter()
+            .filter(|item| label(item, REPOSITORY_LABEL) == Some(repository_label))
+            .filter(|item| owned_by(item, "PipelineRun", run_name, run_uid))
+            .filter(|item| run_status(item) == "failed")
+            .filter_map(|item| {
+                let mut task = normalize_task(item, &self.namespace, run_name)?;
+                let (message, message_truncated) = self.condition_message(item);
+                task["condition_message"] = json!(message);
+                task["condition_message_truncated"] = json!(message_truncated);
+                task["steps_truncated"] = json!(
+                    item["status"]["steps"]
+                        .as_array()
+                        .is_some_and(|steps| steps.len() > 32)
+                );
+                Some(task)
+            })
+            .collect::<Vec<_>>();
+        sort_newest(&mut failed_tasks);
+        let result_truncated = failed_tasks.len() > MAX_FAILED_TASKS;
+        failed_tasks.truncate(MAX_FAILED_TASKS);
+        Ok(json!({
+            "mode":"status", "result_type":"run_status", "result":normalized,
+            "failed_tasks":failed_tasks, "failed_task_limit":MAX_FAILED_TASKS,
+            "source_truncated":source_truncated, "result_truncated":result_truncated,
+            "truncated":source_truncated || result_truncated,
+        }))
+    }
+
     pub async fn wait(&self, query: &RunWaitQuery) -> Result<Value, Error> {
         let _waiter = self
             .waiters
@@ -474,23 +519,19 @@ impl TektonClient {
         let reference = annotation(&run, "pipelinesascode.tekton.dev/branch")
             .or_else(|| annotation(&run, "pipelinesascode.tekton.dev/source-branch"))
             .ok_or(Error::MutationRejected)?;
-        let params = run["spec"]["params"]
-            .as_array()
-            .ok_or(Error::MutationRejected)?
-            .iter()
-            .map(|param| {
-                let name = param["name"].as_str().ok_or(Error::MutationRejected)?;
-                let value = param["value"].as_str().ok_or(Error::MutationRejected)?;
-                Ok((name.to_owned(), value.to_owned()))
-            })
-            .collect::<Result<BTreeMap<_, _>, Error>>()?;
-        if !valid_replay(reference, &params) {
+        let reference = reference.strip_prefix("refs/heads/").unwrap_or(reference);
+        if !bounded_text(reference, 512) {
             return Err(Error::MutationRejected);
         }
-        self.send_pac(&repository, &workflow.definition, reference, &params)
-            .await?;
+        self.send_pac(
+            &repository,
+            &workflow.definition,
+            reference,
+            &BTreeMap::new(),
+        )
+        .await?;
         Ok(
-            json!({"status":"accepted", "run_id":command.run_id, "repository":repository.id, "workflow":workflow.id}),
+            json!({"status":"accepted", "source_run_id":command.run_id, "repository":repository.id, "workflow":workflow.id}),
         )
     }
 
@@ -867,6 +908,19 @@ impl TektonClient {
         }
     }
 
+    fn condition_message(&self, item: &Value) -> (Option<String>, bool) {
+        let Some(message) = condition(item).and_then(|condition| condition["message"].as_str())
+        else {
+            return (None, false);
+        };
+        let mut message = message.to_owned();
+        for secret in self.redactions.iter() {
+            message = message.replace(secret, "[REDACTED]");
+        }
+        let truncated = truncate_utf8(&mut message, MAX_CONDITION_MESSAGE_BYTES);
+        (Some(message), truncated)
+    }
+
     async fn http_json(
         &self,
         builder: reqwest::RequestBuilder,
@@ -1018,7 +1072,7 @@ fn parse_repository(item: &Value, _namespace: &str, origin: &Url) -> Option<Repo
 }
 
 fn repository_json(repository: Repository) -> Value {
-    json!({"id":repository.id, "owner":repository.owner, "repository":repository.name, "url":repository.url})
+    json!({"repository":repository.id, "owner":repository.owner, "name":repository.name, "url":repository.url})
 }
 
 fn parse_workflows(
@@ -1255,20 +1309,6 @@ fn truncate_utf8(value: &mut String, maximum: usize) -> bool {
     true
 }
 
-fn valid_replay(reference: &str, params: &BTreeMap<String, String>) -> bool {
-    !reference.trim().is_empty()
-        && reference.len() <= 512
-        && !reference.chars().any(char::is_control)
-        && params.len() <= 20
-        && params.iter().all(|(key, value)| {
-            !key.trim().is_empty()
-                && key.len() <= 128
-                && value.len() <= 4096
-                && !key.chars().any(char::is_control)
-                && !value.chars().any(char::is_control)
-        })
-}
-
 fn bounded_text(value: &str, maximum: usize) -> bool {
     !value.trim().is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
 }
@@ -1305,11 +1345,15 @@ mod tests {
         repository_url: String,
         repository_items: Mutex<Option<Vec<Value>>>,
         run_items: Mutex<Vec<Value>>,
+        task_items: Mutex<Vec<Value>>,
         run_responses: Mutex<VecDeque<Value>>,
         pac_bodies: Mutex<Vec<Value>>,
         cancel_bodies: Mutex<Vec<Value>>,
         stall_pac: AtomicBool,
+        reject_pac: AtomicBool,
         repeat_page: AtomicBool,
+        truncate_task_source: AtomicBool,
+        workflow_triggerable: AtomicBool,
         conflict_cancel: AtomicBool,
         run_request_count: AtomicUsize,
         stall_run_request: AtomicUsize,
@@ -1347,6 +1391,30 @@ mod tests {
             ("GET", "/apis/tekton.dev/v1/namespaces/pipelines-as-code/pipelineruns") => {
                 Json(json!({"items":state.run_items.lock().unwrap().clone(),"metadata":{}}))
                     .into_response()
+            }
+            ("GET", "/apis/tekton.dev/v1/namespaces/pipelines-as-code/taskruns") => {
+                let mut items = state.task_items.lock().unwrap().clone();
+                let continuation = if state.truncate_task_source.load(Ordering::SeqCst) {
+                    let offset = request
+                        .uri()
+                        .query()
+                        .and_then(|query| {
+                            query
+                                .split('&')
+                                .find_map(|part| part.strip_prefix("continue="))
+                        })
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    items = items.into_iter().skip(offset).take(100).collect();
+                    Some((offset + items.len()).to_string())
+                } else {
+                    None
+                };
+                Json(json!({
+                    "items":items,
+                    "metadata":{"continue":continuation}
+                }))
+                .into_response()
             }
             ("GET", "/apis/tekton.dev/v1/namespaces/pipelines-as-code/pipelineruns/run") => {
                 let request_number = state.run_request_count.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1394,9 +1462,14 @@ mod tests {
             ]))
             .into_response(),
             ("GET", "/api/v1/repos/rfhold/repo/contents/.tekton/build.yaml") => {
-                let content = STANDARD.encode(
-                    b"kind: PipelineRun\nmetadata:\n  name: build\n  annotations:\n    pipelinesascode.tekton.dev/on-event: '[incoming]'\n",
-                );
+                let event = if state.workflow_triggerable.load(Ordering::SeqCst) {
+                    "incoming"
+                } else {
+                    "push"
+                };
+                let content = STANDARD.encode(format!(
+                    "kind: PipelineRun\nmetadata:\n  name: build\n  annotations:\n    pipelinesascode.tekton.dev/on-event: '[{event}]'\n"
+                ));
                 Json(json!({"encoding":"base64","content":content})).into_response()
             }
             ("POST", "/incoming") => {
@@ -1409,7 +1482,11 @@ mod tests {
                 if state.stall_pac.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
-                StatusCode::ACCEPTED.into_response()
+                if state.reject_pac.load(Ordering::SeqCst) {
+                    StatusCode::BAD_REQUEST.into_response()
+                } else {
+                    StatusCode::ACCEPTED.into_response()
+                }
             }
             _ => StatusCode::NOT_FOUND.into_response(),
         }
@@ -1422,11 +1499,15 @@ mod tests {
             repository_url: format!("{}rfhold/repo", origin.as_str()),
             repository_items: Mutex::new(None),
             run_items: Mutex::new(Vec::new()),
+            task_items: Mutex::new(Vec::new()),
             run_responses: Mutex::new(VecDeque::new()),
             pac_bodies: Mutex::new(Vec::new()),
             cancel_bodies: Mutex::new(Vec::new()),
             stall_pac: AtomicBool::new(false),
+            reject_pac: AtomicBool::new(false),
             repeat_page: AtomicBool::new(false),
+            truncate_task_source: AtomicBool::new(false),
+            workflow_triggerable: AtomicBool::new(true),
             conflict_cancel: AtomicBool::new(false),
             run_request_count: AtomicUsize::new(0),
             stall_run_request: AtomicUsize::new(0),
@@ -1468,8 +1549,34 @@ mod tests {
                 },
                 "annotations":{"pipelinesascode.tekton.dev/branch":branch}
             },
-            "spec":{"params":[]},
+            "spec":{"params":[
+                {"name":"repo-url","value":"https://git.example/rfhold/repo.git"},
+                {"name":"revision","value":revision},
+                {"name":"base-image","value":"registry.example/base:rendered"}
+            ]},
             "status":{"conditions":[{"type":"Succeeded","status":condition_status,"reason":if condition_status == "False" { "Failed" } else { "Succeeded" }}]}
+        })
+    }
+
+    fn task_object(name: &str, status: &str, repository: &str, owner_uid: &str) -> Value {
+        json!({
+            "metadata":{
+                "name":name, "creationTimestamp":format!("2026-01-01T00:00:{name:0>2}Z"),
+                "labels":{
+                    (REPOSITORY_LABEL):repository,
+                    (PIPELINE_RUN_LABEL):"run",
+                    "tekton.dev/pipelineTask":"build"
+                },
+                "ownerReferences":[{"kind":"PipelineRun","name":"run","uid":owner_uid}]
+            },
+            "status":{
+                "conditions":[{
+                    "type":"Succeeded", "status":status,
+                    "reason":if status == "False" { "StepFailed" } else { "Succeeded" },
+                    "message":format!("task {name} pac-secret {}", "é".repeat(4096))
+                }],
+                "steps":[{"name":"build","terminated":{"reason":"Error"}}]
+            }
         })
     }
 
@@ -1616,10 +1723,11 @@ spec: {}
         assert_eq!(
             listed["result"][0],
             json!({
-                "id":"rfhold/repo", "owner":"rfhold", "repository":"repo",
+                "repository":"rfhold/repo", "owner":"rfhold", "name":"repo",
                 "url":format!("{}rfhold/repo", origin.as_str())
             })
         );
+        assert!(listed["result"][0].get("id").is_none());
         assert!(matches!(
             client.repository("pipelines-as-code/pac-rfhold-repo").await,
             Err(Error::InvalidArguments)
@@ -1669,6 +1777,129 @@ spec: {}
         assert_eq!(result["source_truncated"], false);
         assert_eq!(result["result_truncated"], true);
         assert_eq!(result["truncated"], true);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn status_returns_redacted_bounded_run_and_failed_owned_task_conditions() {
+        let (origin, state, server) = mock_server().await;
+        let mut run = run_object("run", "2026-01-01T00:00:00Z", "main", "abc", "False");
+        run["status"]["conditions"][0]["message"] =
+            json!(format!("run pac-secret {}", "é".repeat(4096)));
+        state.run_responses.lock().unwrap().push_back(run);
+        let mut tasks = (0..21)
+            .map(|index| {
+                task_object(
+                    &format!("{index:02}"),
+                    "False",
+                    "pac-rfhold-repo",
+                    "run-uid",
+                )
+            })
+            .collect::<Vec<_>>();
+        tasks.push(task_object("success", "True", "pac-rfhold-repo", "run-uid"));
+        tasks.push(task_object(
+            "wrong-owner",
+            "False",
+            "pac-rfhold-repo",
+            "other-uid",
+        ));
+        tasks.push(task_object("wrong-repo", "False", "other-repo", "run-uid"));
+        *state.task_items.lock().unwrap() = tasks;
+
+        let client = TektonClient::for_test(origin, Duration::from_secs(1));
+        let status = client
+            .status(&RunStatusQuery {
+                run_id: "pipelines-as-code/run".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(status["mode"], "status");
+        assert_eq!(status["result_type"], "run_status");
+        assert_eq!(status["result"]["repository"], "rfhold/repo");
+        assert_eq!(status["result"]["status"], "failed");
+        assert_eq!(status["result"]["reason"], "Failed");
+        assert_eq!(status["result"]["condition_message_truncated"], true);
+        assert!(
+            status["result"]["condition_message"]
+                .as_str()
+                .unwrap()
+                .len()
+                <= 4096
+        );
+        assert_eq!(status["failed_tasks"].as_array().unwrap().len(), 20);
+        assert_eq!(status["failed_task_limit"], 20);
+        assert_eq!(status["source_truncated"], false);
+        assert_eq!(status["result_truncated"], true);
+        assert_eq!(status["truncated"], true);
+        assert!(
+            status["failed_tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|task| {
+                    task["status"] == "failed"
+                        && task["condition_message_truncated"] == true
+                        && task["condition_message"].as_str().unwrap().len() <= 4096
+                })
+        );
+        assert!(!status.to_string().contains("pac-secret"));
+        assert!(!status.to_string().contains("wrong-owner"));
+        assert!(!status.to_string().contains("wrong-repo"));
+        assert!(!status.to_string().contains("success"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn status_reports_task_source_and_step_truncation() {
+        let (origin, state, server) = mock_server().await;
+        state.run_responses.lock().unwrap().push_back(run_object(
+            "run",
+            "2026-01-01T00:00:00Z",
+            "main",
+            "abc",
+            "False",
+        ));
+        let mut task = task_object("failed", "False", "pac-rfhold-repo", "run-uid");
+        task["status"]["steps"] =
+            json!((0..33)
+            .map(|index| json!({"name":format!("step-{index}"),"terminated":{"reason":"Error"}}))
+            .collect::<Vec<_>>());
+        *state.task_items.lock().unwrap() = vec![task];
+        let client = TektonClient::for_test(origin, Duration::from_secs(1));
+        let query = RunStatusQuery {
+            run_id: "pipelines-as-code/run".to_owned(),
+        };
+
+        let status = client.status(&query).await.unwrap();
+        assert_eq!(status["failed_tasks"][0]["steps_truncated"], true);
+        assert_eq!(
+            status["failed_tasks"][0]["steps"].as_array().unwrap().len(),
+            32
+        );
+
+        let tasks = (0..MAX_KUBE_LIST_ITEMS)
+            .map(|index| {
+                let mut task = task_object(
+                    &format!("source-{index}"),
+                    "True",
+                    "pac-rfhold-repo",
+                    "run-uid",
+                );
+                task["status"]["conditions"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("message");
+                task
+            })
+            .collect();
+        *state.task_items.lock().unwrap() = tasks;
+        state.truncate_task_source.store(true, Ordering::SeqCst);
+        let status = client.status(&query).await.unwrap();
+        assert_eq!(status["failed_tasks"], json!([]));
+        assert_eq!(status["source_truncated"], true);
+        assert_eq!(status["result_truncated"], false);
+        assert_eq!(status["truncated"], true);
         server.abort();
     }
 
@@ -1863,7 +2094,7 @@ spec: {}
     }
 
     #[tokio::test]
-    async fn workflow_partial_failures_and_rerun_results_use_canonical_relationships() {
+    async fn workflow_partial_failures_and_rerun_use_canonical_current_branch_contract() {
         let (origin, state, server) = mock_server().await;
         *state.repository_items.lock().unwrap() = Some(vec![
             repository_object("pac-rfhold-repo", &format!("{}rfhold/repo", origin)),
@@ -1872,7 +2103,7 @@ spec: {}
         state.run_responses.lock().unwrap().push_back(run_object(
             "run",
             "2026-01-01T00:00:00Z",
-            "main",
+            "refs/heads/main",
             "abc",
             "Unknown",
         ));
@@ -1898,10 +2129,66 @@ spec: {}
             .unwrap();
         assert_eq!(rerun["repository"], "rfhold/repo");
         assert!(rerun["workflow"].as_str().unwrap().starts_with("workflow/"));
+        assert_eq!(rerun["source_run_id"], "pipelines-as-code/run");
+        assert!(rerun.get("run_id").is_none());
         assert_eq!(
-            state.pac_bodies.lock().unwrap()[0]["repository"],
-            "pac-rfhold-repo"
+            state.pac_bodies.lock().unwrap().as_slice(),
+            &[json!({
+                "repository":"pac-rfhold-repo", "namespace":"pipelines-as-code",
+                "branch":"main", "pipelinerun":"build", "secret":"pac-secret",
+                "params":{}
+            })]
         );
+
+        state.reject_pac.store(true, Ordering::SeqCst);
+        assert_eq!(
+            client
+                .rerun(&RunRerunCommand {
+                    run_id: "pipelines-as-code/run".to_owned(),
+                })
+                .await,
+            Err(Error::MutationRejected)
+        );
+        assert_eq!(state.pac_bodies.lock().unwrap().len(), 2);
+
+        state.reject_pac.store(false, Ordering::SeqCst);
+        state.stall_pac.store(true, Ordering::SeqCst);
+        let timeout_client =
+            TektonClient::for_test(client.pac_origin.clone(), Duration::from_millis(50));
+        assert_eq!(
+            timeout_client
+                .rerun(&RunRerunCommand {
+                    run_id: "pipelines-as-code/run".to_owned(),
+                })
+                .await,
+            Err(Error::MutationOutcomeUnknown)
+        );
+        assert_eq!(state.pac_bodies.lock().unwrap().len(), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rerun_rejects_current_workflow_without_incoming_before_post() {
+        let (origin, state, server) = mock_server().await;
+        state.run_responses.lock().unwrap().push_back(run_object(
+            "run",
+            "2026-01-01T00:00:00Z",
+            "main",
+            "abc",
+            "False",
+        ));
+        state.workflow_triggerable.store(false, Ordering::SeqCst);
+        let client = TektonClient::for_test(origin, Duration::from_secs(1));
+
+        assert_eq!(
+            client
+                .rerun(&RunRerunCommand {
+                    run_id: "pipelines-as-code/run".to_owned(),
+                })
+                .await,
+            Err(Error::MutationRejected)
+        );
+        assert!(state.pac_bodies.lock().unwrap().is_empty());
         server.abort();
     }
 

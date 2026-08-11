@@ -36,8 +36,8 @@ use crate::{
         Error as TektonError,
         actions::{
             RepositoryListInput, RunCancelCommand, RunCancelInput, RunGetInput, RunListInput,
-            RunRerunCommand, RunRerunInput, RunWaitInput, TaskListInput, TaskLogsInput,
-            WorkflowDispatchCommand, WorkflowDispatchInput, WorkflowListInput,
+            RunRerunCommand, RunRerunInput, RunStatusInput, RunWaitInput, TaskListInput,
+            TaskLogsInput, WorkflowDispatchCommand, WorkflowDispatchInput, WorkflowListInput,
         },
     },
     services::Services,
@@ -540,6 +540,27 @@ impl HomelabMcp {
         };
         let result = tokio::select! {
             result = self.services.tekton.run(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => json_result(output),
+            Err(error) => tekton_tool_error("run", error),
+        })
+    }
+
+    /// Diagnose one owned PipelineRun and its failed owned TaskRuns.
+    #[action(tool = "tekton_query", name = "run.status")]
+    async fn tekton_run_status(
+        &self,
+        input: RunStatusInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.tekton.status(&query) => result,
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         Ok(match result {
@@ -1087,7 +1108,7 @@ mod tests {
                 "result":[{"uid":"dash-1","title":"Overview"}]
             }),
             json!({
-                "status":"accepted", "run_id":"pipelines-as-code/run-1",
+                "status":"accepted", "source_run_id":"pipelines-as-code/run-1",
                 "repository":"rfhold/repo", "workflow":"workflow/abc"
             }),
         ] {
@@ -1843,6 +1864,7 @@ mod tests {
             "workflow.list",
             "run.list",
             "run.get",
+            "run.status",
             "run.wait",
             "task.list",
             "task.logs",
@@ -1881,7 +1903,7 @@ mod tests {
                 .iter()
                 .map(|action| action["action"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["run.list", "run.get", "run.wait"]
+            vec!["run.list", "run.get", "run.status", "run.wait"]
         );
         let run_list_schema = &tekton_run_actions
             .iter()
@@ -1900,6 +1922,12 @@ mod tests {
                 .get("timeout_seconds")
                 .is_some()
         );
+        let run_status_schema = &tekton_run_actions
+            .iter()
+            .find(|action| action["action"] == "run.status")
+            .unwrap()["input_schema"];
+        assert_eq!(run_status_schema["additionalProperties"], false);
+        assert_eq!(run_status_schema["required"], json!(["run_id"]));
         assert_eq!(
             query_tool["annotations"],
             json!({
@@ -2289,7 +2317,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_wait_dispatches_through_progressive_mcp_with_strict_schema() {
+    async fn tekton_run_reads_dispatch_through_progressive_mcp_with_strict_schemas() {
         let repository_url = Arc::new(Mutex::new(String::new()));
         let upstream = Router::new()
             .fallback(
@@ -2306,7 +2334,7 @@ mod tests {
                         .into_response(),
                         "/apis/tekton.dev/v1/namespaces/pipelines-as-code/pipelineruns/run" => Json(json!({
                             "metadata":{
-                                "name":"run",
+                                "name":"run", "uid":"run-uid",
                                 "labels":{
                                     "pipelinesascode.tekton.dev/repository":"pac-rfhold-repo",
                                     "pipelinesascode.tekton.dev/sha":"abc"
@@ -2315,6 +2343,10 @@ mod tests {
                             "status":{"conditions":[{
                                 "type":"Succeeded", "status":"True", "reason":"Succeeded"
                             }]}
+                        }))
+                        .into_response(),
+                        "/apis/tekton.dev/v1/namespaces/pipelines-as-code/taskruns" => Json(json!({
+                            "items":[], "metadata":{}
                         }))
                         .into_response(),
                         _ => StatusCode::NOT_FOUND.into_response(),
@@ -2357,6 +2389,28 @@ mod tests {
         assert_eq!(result["result_type"], "run");
         assert_eq!(result["result"]["repository"], "rfhold/repo");
         assert_eq!(result["timed_out"], false);
+
+        let (_, response) = post_mcp(
+            &format!("{mcp_origin}/mcp"),
+            request(
+                "tools/call",
+                "run-status",
+                json!({
+                    "name":TEKTON_QUERY_TOOL_NAME,
+                    "arguments":{
+                        "action":"run.status",
+                        "input":{"run_id":"pipelines-as-code/run"}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], Value::Null, "{response}");
+        let result = &response["result"]["structuredContent"];
+        assert_eq!(result["mode"], "status");
+        assert_eq!(result["result_type"], "run_status");
+        assert_eq!(result["result"]["repository"], "rfhold/repo");
+        assert_eq!(result["failed_tasks"], json!([]));
 
         upstream_task.abort();
         mcp_task.abort();
@@ -2402,7 +2456,7 @@ mod tests {
             (
                 TEKTON_QUERY_TOOL_NAME,
                 json!({
-                    "action":"run.wait",
+                    "action":"run.status",
                     "input":{"run_id":"pipelines-as-code/run","extra":true}
                 }),
             ),

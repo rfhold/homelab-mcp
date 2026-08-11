@@ -2,7 +2,7 @@
 
 ## Shared Ownership
 
-`run.list`, `run.get`, `run.wait`, `task.list`, and `task.logs` will return only resources that belong to an authorized repository. Each action will validate Kubernetes ownership and PAC relationships before it returns data.
+`run.list`, `run.get`, `run.status`, `run.wait`, `task.list`, and `task.logs` will return only resources that belong to an authorized repository. Each action will validate Kubernetes ownership and PAC relationships before it returns data.
 
 Repository selectors and relationships follow the [canonical repository key contract](repositories-workflows.md#repository-list).
 
@@ -20,6 +20,16 @@ An explicit `limit: 1` returns the newest matching run among inspected source ob
 
 `run.get` returns one owned `PipelineRun` by its exact namespace-qualified ID.
 
+## Run Status
+
+`run.status` diagnoses one owned `PipelineRun` selected by exact namespace-qualified `run_id`. It returns the normalized run status and reason together with the `Succeeded` condition message. The message is redacted against configured MCP-held secrets, then truncated on a UTF-8 boundary to at most 4,096 bytes; `condition_message_truncated` reports that omission.
+
+The action lists TaskRuns through the same exact repository label and immutable PipelineRun owner name/UID checks as `task.list`. It returns only failed TaskRun summaries, including condition reason, a redacted and UTF-8-bounded condition message, and at most 32 existing step state/reason summaries. `steps_truncated` reports omitted steps.
+
+At most 20 failed tasks are returned. Source traversal retains the shared 500-object ceiling. `source_truncated`, `result_truncated`, and aggregate `truncated` distinguish source omission from the failed-task result limit, and `failed_task_limit` reports the fixed result bound.
+
+The output uses allowlisted normalized fields only. It excludes task logs, pods, raw objects, parameter values, and arbitrary labels or annotations.
+
 ## Run Wait
 
 `run.wait` is read-only and requires an exact namespace-qualified `run_id`. Its optional timeout defaults to 60 seconds and accepts values from 1 through 300 seconds.
@@ -30,7 +40,7 @@ A terminal result observed during the condition wait contains the normalized run
 
 The server permits at most four concurrent waits, separate from the shared upstream HTTP request capacity. A wait remains cancellable and releases all permits when it ends. It does not hold an upstream HTTP permit while it sleeps.
 
-Before output, the action revalidates run ownership and the authorized canonical repository relationship. Its output contains no task details or logs. After a failed run, callers use `task.list` and `task.logs` for diagnosis.
+Before output, the action revalidates run ownership and the authorized canonical repository relationship. Its output contains no task details or logs. After a failed run, callers can use `run.status` for bounded diagnosis, then `task.list` and `task.logs` when explicitly needed.
 
 Run output will use an explicit allowlist. It can include identity, repository relationship, workflow relationship, revision, lifecycle timestamps, condition status, reason, and bounded parameter summaries.
 

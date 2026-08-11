@@ -8,9 +8,11 @@ The action will exclude a custom resource without a valid repository URL. This e
 
 Each result will contain:
 
-- `id` as the exact canonical `org/repo` repository key;
-- the normalized organization and repository names; and
+- `repository` as the exact canonical `org/repo` repository key;
+- `owner` and `name` as the normalized organization and repository names; and
 - the normalized URL under fixed origin `https://git.holdenitdown.net`.
+
+Results do not include a legacy `id` field or a leaf-only repository relationship.
 
 Normalization accepts only repository URLs that resolve to that fixed Forgejo origin and one organization/repository pair. It safely percent-decodes UTF-8 path components, accepts case-preserved RFC unreserved repository characters, strips a terminal `.git`, and rejects encoded separators or other characters outside that grammar. It derives `org/repo` from the normalized pair. Every repository selector and external repository relationship uses this canonical key.
 

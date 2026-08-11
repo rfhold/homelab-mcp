@@ -174,6 +174,29 @@ impl RunGetInput {
 
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct RunStatusInput {
+    /// Exact `<namespace>/<name>` PipelineRun identity.
+    pub run_id: String,
+}
+
+#[derive(Clone)]
+pub struct RunStatusQuery {
+    pub run_id: String,
+}
+
+impl RunStatusInput {
+    pub fn validate(self) -> Result<RunStatusQuery, ()> {
+        if !valid_namespaced_id(&self.run_id) {
+            return Err(());
+        }
+        Ok(RunStatusQuery {
+            run_id: self.run_id,
+        })
+    }
+}
+
+#[derive(Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TaskListInput {
     /// Exact `<namespace>/<name>` PipelineRun identity.
     pub run_id: String,
@@ -427,6 +450,13 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+        assert!(
+            RunStatusInput {
+                run_id: "pipelines-as-code/run".to_owned()
+            }
+            .validate()
+            .is_ok()
         );
     }
 

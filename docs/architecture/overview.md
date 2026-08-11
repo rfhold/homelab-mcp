@@ -31,7 +31,7 @@ The current worktree service:
 - uses Kuri's generic private `mcp` crate at a reviewed immutable Git revision;
 - serves MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
 - uses `#[mcp::progressive_server]` to generate read-only query and operationally consequential exec tools for Grafana, Tekton, and Kubernetes;
-- exposes nine Grafana query actions, two Grafana render actions, bounded silence creation, seven Tekton reads, three Tekton mutations, four Kubernetes reads, and five Kubernetes mutations;
+- exposes nine Grafana query actions, two Grafana render actions, bounded silence creation, eight Tekton reads, three Tekton mutations, four Kubernetes reads, and five Kubernetes mutations;
 - queries Grafana's HTTP API through fixed Loki, Mimir, Tempo, and Pyroscope datasource UIDs;
 - reads Grafana dashboard inventory, renders dashboard and panel PNGs, and uses fixed alerting API routes;
 - enforces local OAuth access tokens before MCP request handling; and

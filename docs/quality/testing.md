@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository runtime has 150 passing Rust tests under Rust 1.96: 148 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, Kubernetes actions, and cleanup control.
+The repository runtime has 153 passing Rust tests under Rust 1.96: 151 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, Kubernetes actions, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
@@ -159,11 +159,12 @@ Tests must cover the [Tekton tool specifications](../tekton/README.md), includin
 - namespace-qualified run and task IDs, ownership validation, reverse chronology, and output allowlists;
 - exact workflow, status, and revision run filters plus equivalent `main` and `refs/heads/main` branch labels;
 - newest matching `run.list` lookup with `limit: 1` and separate source, result, and aggregate truncation fields;
+- `run.status` ownership reuse, failed TaskRun repository-label and owner name/UID checks, 20-result and 500-source ceilings, explicit truncation, bounded configured-secret-redacted condition messages, bounded step summaries, and exclusion of logs and raw fields;
 - bounded `run.wait` timeout, fixed polling, terminal and deadline results, cancellation, and separate waiter capacity;
 - wait-time upstream permit release, output-time ownership revalidation, and exclusion of task details and logs;
 - task-log truncation metadata, MCP-held secret redaction, and no telemetry log content;
 - dispatch validation, fixed PAC POST `/incoming`, caller-control rejection, and 2xx acceptance semantics;
-- safe rerun replay of the prior branch and parameters;
+- rerun of the prior normalized branch at its current tip with current workflow validation, an empty parameter map, canonical relationships, `source_run_id`, one POST, safe 4xx rejection, and unknown timeout outcomes;
 - active owned-run checks and a `spec.status=Cancelled`-only patch;
 - no automatic retries and non-retryable `mutation_outcome_unknown` after ambiguous sends;
 - complete unfiltered normalized JSON in text content synchronized with `structuredContent`, including identities and mutation acceptance details needed by follow-up actions; and

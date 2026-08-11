@@ -22,9 +22,11 @@ Any HTTP 2xx response means that PAC accepted the request. Acceptance does not p
 
 ## Run Rerun
 
-`run.rerun` resolves an owned prior `PipelineRun` by exact namespace-qualified ID. It safely replays that run's prior branch and string parameters through the fixed PAC `/incoming` route under the same bounds as dispatch.
+`run.rerun` resolves an owned prior `PipelineRun` by exact namespace-qualified ID, revalidates its canonical repository relationship, and rediscovers the current incoming-enabled workflow. It sends the prior branch through the fixed PAC `/incoming` route so PAC resolves that branch's current tip. A stored `refs/heads/<branch>` value is normalized to `<branch>`.
 
-The caller cannot replace the prior branch, parameters, canonical repository relationship, workflow, namespace, or internal PAC identity. A rerun uses the same dispatch validation and outcome rules as `workflow.dispatch`.
+The rerun POST always contains `params: {}`. It does not replay rendered PipelineRun parameters, clone a PipelineRun, or target the prior exact revision. The caller cannot replace the prior branch, canonical repository relationship, workflow, namespace, internal PAC identity, or parameters. A rerun uses the same one-attempt and outcome rules as `workflow.dispatch`.
+
+A successful result identifies the prior run as `source_run_id` and returns canonical `repository` plus the current opaque `workflow` identity. It does not use `run_id`, because PAC acceptance does not identify a newly created PipelineRun.
 
 ## Run Cancel
 
