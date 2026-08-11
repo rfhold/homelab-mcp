@@ -82,8 +82,16 @@ pub(crate) fn osd(cluster: &str, value: &Value) -> Result<Value, Error> {
         "state":bounded_strings(map.get("state"), 16, 128)?,
         "weight":map.get("weight").and_then(Value::as_f64),
         "primary_affinity":map.get("primary_affinity").and_then(Value::as_f64),
-        "device_class":bounded_string(map.get("device_class"), 128)?,
-        "host":bounded_string(value.pointer("/host/name"), 256)?,
+        "device_class":bounded_string(
+            value.pointer("/osd_metadata/default_device_class")
+                .or_else(|| value.pointer("/tree/device_class")),
+            128,
+        )?,
+        "host":bounded_string(
+            value.pointer("/osd_metadata/hostname")
+                .or_else(|| value.pointer("/host/name")),
+            256,
+        )?,
         "operational_status":bounded_string(value.get("operational_status"), 128)?,
     }))
 }
@@ -136,7 +144,7 @@ pub(crate) fn device(cluster: &str, osd_id: u32, value: &Value) -> Result<Value,
     Ok(json!({
         "cluster":cluster,"osd_id":osd_id,"device_id":device_id,
         "daemons":bounded_strings(value.get("daemons"), 32, 256)?,
-        "location":bounded_strings(value.get("location"), 32, 256)?,
+        "location":device_locations(value.get("location"))?,
         "life_expectancy_enabled":value.get("life_expectancy_enabled").and_then(Value::as_bool),
         "life_expectancy_min":bounded_string(value.get("life_expectancy_min"), 128)?,
         "life_expectancy_max":bounded_string(value.get("life_expectancy_max"), 128)?,
@@ -330,6 +338,27 @@ fn bounded_strings(
         .collect()
 }
 
+fn device_locations(value: Option<&Value>) -> Result<Vec<Value>, Error> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or(Error::InvalidResponse)?;
+    if values.len() > 32 {
+        return Err(Error::InvalidResponse);
+    }
+    values
+        .iter()
+        .map(|value| {
+            value.as_object().ok_or(Error::InvalidResponse)?;
+            Ok(json!({
+                "host": bounded_string(value.get("host"), 256)?,
+                "dev": bounded_string(value.get("dev"), 256)?,
+                "path": bounded_string(value.get("path"), 256)?,
+            }))
+        })
+        .collect()
+}
+
 fn bounded_string(value: Option<&Value>, bytes: usize) -> Result<Option<String>, Error> {
     match value {
         None | Some(Value::Null) => Ok(None),
@@ -360,6 +389,123 @@ mod tests {
         assert_eq!(result["truncated"], true);
         assert!(status("romulus", &json!({"health":{"status":"HEALTH_WARN","checks":[{"type":"X","severity":"warning","summary":{"message":"ok"}}]}})).is_ok());
         assert!(status("romulus", &json!({"health":{"status":"x","checks":[{"type":"x","severity":"x","summary":{"message":"x".repeat(4097)}}]}})).is_err());
+    }
+
+    #[test]
+    fn squid_osd_list_and_detail_shapes_normalize_host_and_device_class() {
+        let list = json!([{
+            "id":2,
+            "up":1,
+            "in":1,
+            "state":["exists","up"],
+            "host":{"name":"osd-host-a"},
+            "tree":{"device_class":"ssd"},
+            "operational_status":"working"
+        }]);
+        let listed = osd_list("romulus", &list, 10).unwrap();
+        assert_eq!(listed["result"][0]["host"], "osd-host-a");
+        assert_eq!(listed["result"][0]["device_class"], "ssd");
+
+        let detail = json!({
+            "osd_map":{
+                "id":2,
+                "up":1,
+                "in":1,
+                "state":["exists","up"],
+                "weight":1.0
+            },
+            "osd_metadata":{
+                "hostname":"osd-host-a",
+                "default_device_class":"ssd"
+            },
+            "operational_status":"working"
+        });
+        let detailed = osd("romulus", &detail).unwrap();
+        assert_eq!(detailed["host"], "osd-host-a");
+        assert_eq!(detailed["device_class"], "ssd");
+        assert_eq!(detailed["operational_status"], "working");
+    }
+
+    #[test]
+    fn squid_device_location_is_bounded_and_allowlisted() {
+        let value = json!({
+            "devid":"dev-a",
+            "daemons":["osd.2"],
+            "life_expectancy_enabled":true,
+            "location":[{
+                "host":"osd-host-a",
+                "dev":"sda",
+                "path":"/dev/disk/by-id/dev-a",
+                "credential":"must-not-escape"
+            }],
+            "wear_level":12
+        });
+        let result = device("romulus", 2, &value).unwrap();
+        assert_eq!(
+            result,
+            json!({
+                "cluster":"romulus",
+                "osd_id":2,
+                "device_id":"dev-a",
+                "daemons":["osd.2"],
+                "location":[{
+                    "host":"osd-host-a",
+                    "dev":"sda",
+                    "path":"/dev/disk/by-id/dev-a"
+                }],
+                "life_expectancy_enabled":true,
+                "life_expectancy_min":null,
+                "life_expectancy_max":null
+            })
+        );
+        assert!(result.get("wear_level").is_none());
+        assert!(!result.to_string().contains("must-not-escape"));
+
+        let nullable = device(
+            "romulus",
+            2,
+            &json!({
+                "devid":"dev-a",
+                "location":[{"host":null,"dev":null,"path":null}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            nullable["location"],
+            json!([{"host":null,"dev":null,"path":null}])
+        );
+    }
+
+    #[test]
+    fn device_location_fails_closed_for_malformed_values() {
+        for location in [
+            json!(["osd-host-a"]),
+            json!([{"host":7,"dev":"sda","path":"/dev/sda"}]),
+            json!([{"host":"osd-host-a","dev":[],"path":"/dev/sda"}]),
+            json!([{"host":"osd-host-a","dev":"sda","path":{}}]),
+            json!([{"host":"x".repeat(257),"dev":"sda","path":"/dev/sda"}]),
+        ] {
+            assert_eq!(
+                device(
+                    "romulus",
+                    2,
+                    &json!({"devid":"dev-a","daemons":["osd.2"],"location":location})
+                ),
+                Err(Error::InvalidResponse)
+            );
+        }
+
+        let too_many = (0..33)
+            .map(|_| json!({"host":"osd-host-a","dev":"sda","path":"/dev/sda"}))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            device(
+                "romulus",
+                2,
+                &json!({"devid":"dev-a","daemons":["osd.2"],"location":too_many})
+            ),
+            Err(Error::InvalidResponse)
+        );
     }
 
     #[test]

@@ -91,6 +91,7 @@ cluster_input!(FlagsGetInput, FlagsGet);
 #[serde(deny_unknown_fields)]
 pub struct OsdListInput {
     pub cluster: String,
+    #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u16>,
 }
 impl OsdListInput {
@@ -131,6 +132,7 @@ osd_input!(OsdSafeToDestroyInput, OsdSafeToDestroy);
 pub struct DeviceListInput {
     pub cluster: String,
     pub osd_id: u32,
+    #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u16>,
 }
 impl DeviceListInput {
@@ -166,6 +168,7 @@ impl DeviceGetInput {
 #[serde(deny_unknown_fields)]
 pub struct TaskListInput {
     pub cluster: String,
+    #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u16>,
 }
 impl TaskListInput {
@@ -368,7 +371,26 @@ macro_rules! exec_input {
 }
 
 exec_input!(OsdMarkInput, Mark, { cluster: String, osd_id: u32, state: MarkState });
-exec_input!(OsdReweightInput, Reweight, { cluster: String, osd_id: u32, weight: f64 });
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OsdReweightInput {
+    pub cluster: String,
+    pub osd_id: u32,
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub weight: f64,
+}
+impl OsdReweightInput {
+    pub fn validate(self) -> Result<ExecCommand, ValidationError> {
+        ExecInput::Reweight {
+            cluster: self.cluster,
+            osd_id: self.osd_id,
+            weight: self.weight,
+        }
+        .validate()
+    }
+}
+
 exec_input!(OsdScrubInput, Scrub, { cluster: String, osd_id: u32, kind: ScrubKind });
 exec_input!(OsdDestroyInput, Destroy, { cluster: String, osd_id: u32, confirmation: String });
 exec_input!(OsdPurgeInput, Purge, { cluster: String, osd_id: u32, confirmation: String });

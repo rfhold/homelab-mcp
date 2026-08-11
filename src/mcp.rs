@@ -2274,6 +2274,14 @@ mod tests {
                 .iter()
                 .all(|action| action["input_schema"]["additionalProperties"] == false)
         );
+        for action_name in ["osd.list", "device.list", "task.list"] {
+            let limit_schema = &ceph_help_actions
+                .iter()
+                .find(|action| action["action"] == action_name)
+                .unwrap()["input_schema"]["properties"]["limit"];
+            assert_eq!(limit_schema["minimum"], 1, "{action_name} minimum");
+            assert_eq!(limit_schema["maximum"], 100, "{action_name} maximum");
+        }
         let (_, ceph_osd_help) = post_mcp(
             &endpoint,
             request(
@@ -2293,6 +2301,12 @@ mod tests {
         for action in ceph_osd_actions {
             assert_eq!(action["input_schema"]["additionalProperties"], false);
         }
+        let reweight_schema = &ceph_osd_actions
+            .iter()
+            .find(|action| action["action"] == "osd.reweight")
+            .unwrap()["input_schema"]["properties"]["weight"];
+        assert_eq!(reweight_schema["minimum"], 0.0);
+        assert_eq!(reweight_schema["maximum"], 1.0);
         let destroy_schema = &ceph_osd_actions
             .iter()
             .find(|action| action["action"] == "osd.destroy")

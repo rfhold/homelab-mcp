@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository runtime has 181 passing Rust tests under Rust 1.96: 179 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana, Tekton, Kubernetes, Ceph Dashboard, and cleanup control.
+The repository runtime has 184 passing Rust tests under Rust 1.96: 182 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana, Tekton, Kubernetes, Ceph Dashboard, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
@@ -215,7 +215,7 @@ Current preview evidence does not cover `kubernetes_query`, `kubernetes_exec`, t
 
 ## Ceph Dashboard Contract Coverage
 
-The [Ceph Dashboard specifications](../ceph/README.md) define locally implemented behavior. Coordinator evidence records successful `cargo fmt --check`, `cargo check`, `cargo clippy -- -D warnings`, and sequential `cargo test` with 179 library tests and two binary tests. It also records successful Pulumi `bun run build`, `bun test index.test.ts` with 21 tests, and `git diff --check`.
+The [Ceph Dashboard specifications](../ceph/README.md) define locally implemented behavior. Coordinator evidence records successful `cargo fmt --check`, `cargo check`, `cargo clippy -- -D warnings`, and sequential `cargo test` with 182 library tests and two binary tests. It also records successful Pulumi `bun run build`, `bun test index.test.ts` with 21 tests, and `git diff --check`.
 
 Local runtime tests cover:
 

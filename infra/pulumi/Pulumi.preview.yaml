@@ -36,5 +36,4 @@ config:
     - https://preview-kuri.holdenitdown.net
   homelab-mcp:mcpOAuthWrappingKeyVersions: [v1]
   homelab-mcp:mcpOAuthActiveWrappingKeyVersion: v1
-  homelab-mcp:image: cr.holdenitdown.net/rfhold/homelab-mcp@sha256:de02d7781770611b3fca9dfbea1b7baf1da812cedeb61a76bdd2449d46f8508a
 encryptionsalt: v1:JpursO2VfUY=:v1:b36ZTkbO7H7FZE0d:kQRTPgYHEdvYZTV5kFmLRAlYatccPg==

@@ -730,8 +730,8 @@ mod tests {
                 axum::Json(json!({"padding":"x".repeat(MAX_RESPONSE_BYTES)})).into_response()
             }
             ("GET", "/api/health/minimal") => axum::Json(health()).into_response(),
-            ("GET", "/api/osd") => axum::Json(json!([{"id":1,"up":1,"in":1,"state":["exists","up"]},{"id":2,"up":0,"in":1,"state":["exists"]}])).into_response(),
-            ("GET", "/api/osd/1") => axum::Json(json!({"osd_map":{"id":1,"up":1,"in":1,"state":["exists","up"],"weight":0.5}})).into_response(),
+            ("GET", "/api/osd") => axum::Json(json!([{"id":1,"up":1,"in":1,"state":["exists","up"],"host":{"name":"osd-host-a"},"tree":{"device_class":"ssd"},"operational_status":"working"},{"id":2,"up":0,"in":1,"state":["exists"],"host":{"name":"osd-host-b"},"tree":{"device_class":"hdd"},"operational_status":"working"}])).into_response(),
+            ("GET", "/api/osd/1") => axum::Json(json!({"osd_map":{"id":1,"up":1,"in":1,"state":["exists","up"],"weight":0.5},"osd_metadata":{"hostname":"osd-host-a","default_device_class":"ssd"},"operational_status":"working"})).into_response(),
             ("GET", "/api/osd/safe_to_destroy") => {
                 let delay = state.safe_to_destroy_delay_millis.load(Ordering::SeqCst);
                 if delay > 0 {
@@ -739,7 +739,7 @@ mod tests {
                 }
                 axum::Json(json!({"is_safe_to_destroy":!state.unsafe_destroy.load(Ordering::SeqCst),"active":[],"missing_stats":[],"stored_pgs":[]})).into_response()
             }
-            ("GET", "/api/osd/1/devices") => axum::Json(json!([{"devid":"dev-a","daemons":["osd.1"]},{"devid":"dev-b","daemons":["osd.1"]}])).into_response(),
+            ("GET", "/api/osd/1/devices") => axum::Json(json!([{"devid":"dev-a","daemons":["osd.1"],"life_expectancy_enabled":true,"location":[{"host":"osd-host-a","dev":"sda","path":"/dev/disk/by-id/dev-a"}],"wear_level":12},{"devid":"dev-b","daemons":["osd.1"],"life_expectancy_enabled":false,"location":[{"host":"osd-host-a","dev":"sdb","path":"/dev/disk/by-id/dev-b"}],"wear_level":4}])).into_response(),
             ("GET", "/api/osd/flags") => axum::Json(json!(["sortbitwise","noout"])).into_response(),
             ("GET", "/api/task") => {
                 axum::Json(state.task_response.lock().unwrap().clone()).into_response()
