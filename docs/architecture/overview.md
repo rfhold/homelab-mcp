@@ -2,9 +2,9 @@
 
 ## Status
 
-The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, nine bounded Grafana query reads, two bounded Grafana image renders, bounded silence creation, and bounded Tekton and PAC tools in the current worktree.
+The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, ten bounded Grafana query reads, two bounded Grafana image renders, bounded silence creation, and bounded Tekton and PAC tools in the current worktree.
 
-Preview runs the authenticated runtime from commit `4f2e192`. Health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge are verified. The worktree dashboard inventory, rendering, alerting, and Tekton revisions have not been deployed or operated live. Full browser OAuth, authenticated preview MCP calls, live integration behavior, renderer operation, and permission operation remain unverified; production remains excluded.
+Preview runs the authenticated runtime from commit `4f2e192`. Health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge are verified. The worktree dashboard inventory, rendering, alerting, recording-rule, and Tekton revisions have not been deployed or operated live. Full browser OAuth, authenticated preview MCP calls, live integration behavior, renderer operation, and permission operation remain unverified; production remains excluded.
 
 ## Purpose
 
@@ -31,9 +31,9 @@ The current worktree service:
 - uses Kuri's generic private `mcp` crate at a reviewed immutable Git revision;
 - serves MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
 - uses `#[mcp::progressive_server]` to generate read-only query and operationally consequential exec tools for Grafana, Tekton, and Kubernetes;
-- exposes nine Grafana query actions, two Grafana render actions, bounded silence creation, eight Tekton reads, three Tekton mutations, four Kubernetes reads, and five Kubernetes mutations;
+- exposes ten Grafana query actions, two Grafana render actions, bounded silence creation, eight Tekton reads, three Tekton mutations, four Kubernetes reads, and five Kubernetes mutations;
 - queries Grafana's HTTP API through fixed Loki, Mimir, Tempo, and Pyroscope datasource UIDs;
-- reads Grafana dashboard inventory, renders dashboard and panel PNGs, and uses fixed alerting API routes;
+- reads Grafana dashboard inventory, renders dashboard and panel PNGs, and partitions alert and recording rules from one fixed provisioning route;
 - enforces local OAuth access tokens before MCP request handling; and
 - persists generic OAuth and OIDC state in PostgreSQL schema `mcp`.
 

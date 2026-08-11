@@ -47,7 +47,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
 | OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, seven-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
-| Grafana actions | Datasource queries, dashboard inventory and PNG rendering, alerting reads and silence creation, bounds, normalization, fixed routes, redirects, semantic errors, timeout, capacity, and permit release against mock HTTP servers. |
+| Grafana actions | Datasource queries, dashboard inventory and PNG rendering, alerting and recording-rule reads, silence creation, bounds, normalization, fixed routes, redirects, semantic errors, timeout, capacity, and permit release against mock HTTP servers. |
 | Kubernetes actions | Exact typed action schemas, all 36 resource kinds, namespace scope, fixed API paths and mutations, normalization, limits, safe errors, process supervision, and uncertain mutation outcomes. |
 | Pulumi policy | Immutable images, HTTPS origins, wrapping-key versions, strict normalized Kubernetes cluster configuration and ports, Editor service-account declaration, and stack configuration safety. |
 | Pulumi topology | Namespace, backups, CNPG, Authentik, Grafana, Kubernetes identities and exact RBAC, Secrets, workload hardening, per-cluster egress, Service, and route. |
@@ -62,11 +62,11 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Hosted OAuth integration | Run complete authorization-code and refresh paths, including local token issuance and validation, beyond local consent, challenge, and mocked generic components. |
 | Live Authentik integration | Exercise OIDC discovery, browser login, callback validation, and transaction completion against the configured provider. |
 | Kuri-client integration | Exercise DCR, CIMD, native loopback authorization, token refresh, exact resource binding, and calls to all advertised MCP tools. |
-| Live Grafana integration | Exercise controlled datasource and dashboard reads, rendering, alerting reads, and silence creation without exposing credentials. Verify the renderer prerequisites and intended Editor operations. |
+| Live Grafana integration | Exercise controlled datasource and dashboard reads, rendering, alerting and recording-rule reads, and silence creation without exposing credentials. Verify the renderer prerequisites and intended Editor operations. |
 | Container runtime | Basic deployed startup is verified; complete the full browser OAuth and Grafana path in the deployed container. |
-| Preview end-to-end | Prove browser login, local token issuance and refresh, authenticated `/mcp`, and controlled Grafana datasource and alerting reads and silence creation on preview. |
+| Preview end-to-end | Prove browser login, local token issuance and refresh, authenticated `/mcp`, and controlled Grafana datasource, alerting, and recording-rule reads and silence creation on preview. |
 
-The Rust suite supplies local and mock evidence. Deployed evidence additionally covers startup, readiness, metadata, and challenge behavior, but not browser OAuth, authenticated MCP, live alert APIs, or Editor permission operation. No deployment or live operation occurred for the alerting revision.
+The Rust suite supplies local and mock evidence. Deployed evidence additionally covers startup, readiness, metadata, and challenge behavior, but not browser OAuth, authenticated MCP, live alert APIs, recording-rule behavior, or Editor permission operation. No deployment or live operation occurred for the alerting and recording-rule revision.
 
 The Tekton feature has worktree implementation, Rust unit and MCP discovery tests, and passing Pulumi declaration tests. It has no deployment or live evidence. Existing preview evidence does not cover `tekton_query`, `tekton_exec`, Forgejo, PAC, effective Kubernetes RBAC, or task logs.
 
@@ -123,9 +123,12 @@ Dashboard and render tests additionally cover:
 
 Alerting tests must additionally cover:
 
-- all three Grafana tool annotations, nine query actions, two render actions, and the single exec action;
+- all three Grafana tool annotations, ten query actions, two render actions, and the single exec action;
 - the all-`mcp:use` authorization boundary and rejection of actions sent to the wrong tool;
-- alert-rule limits, fixed provisioning route, bounded summaries, and the documented conservative URL-field exclusions;
+- separate alert-rule and recording-rule schemas, limits, and action-specific safe messages;
+- classification by the shared provisioning response's `record` field, category filtering before limits, and opposite-category exclusion;
+- strict normalization only for selected entries up to each limit, with malformed `record` discriminators rejected;
+- bounded alert and recording summaries, nullable target datasource UIDs, and documented conservative URL-field exclusions;
 - alert-instance matcher grammar and byte limits, repeated server-built filters, list limits, status booleans, and safe normalized maps;
 - silence-list state and limit bounds, fixed route without caller-controlled parameters, filtering before truncation, strict response validation, and normalized recovery fields;
 - required silence matchers, duration and comment bounds, immediate start, fixed `createdBy`, and exact three-field success output;
@@ -211,6 +214,6 @@ Current preview evidence does not cover `kubernetes_query`, `kubernetes_exec`, t
 
 The successful main pipeline and applied preview stack provide foundation preview evidence. Public health checks prove only the current health host.
 
-Before full OAuth and Grafana preview approval, record the local/mock, PostgreSQL, hosted OAuth, Authentik, Kuri-client, Grafana, and container-runtime results. This must include live alert API behavior and Editor permission operation. Then obtain explicit approval for the preview end-to-end check and any silence creation.
+Before full OAuth and Grafana preview approval, record the local/mock, PostgreSQL, hosted OAuth, Authentik, Kuri-client, Grafana, and container-runtime results. This must include live alert and recording-rule API behavior and Editor permission operation. Then obtain explicit approval for the preview end-to-end check and any silence creation.
 
 Before production approval, record all prior evidence plus image inspection, stack-specific preview review, rotation exercises, and recovery validation. Production remains outside the current target.

@@ -94,6 +94,7 @@ fn metric_action(action: &'static str) -> &'static str {
         "traceql.search" => "traceql.search",
         "profile.merge" => "profile.merge",
         "alert-rule.list" => "alert-rule.list",
+        "recording-rule.list" => "recording-rule.list",
         "alert-instance.list" => "alert-instance.list",
         "silence.list" => "silence.list",
         "silence.create" => "silence.create",
@@ -182,6 +183,7 @@ mod tests {
         guard.finish("attacker-outcome");
 
         assert_eq!(metric_action("alert-rule.list"), "alert-rule.list");
+        assert_eq!(metric_action("recording-rule.list"), "recording-rule.list");
         assert_eq!(metric_action("alert-instance.list"), "alert-instance.list");
         assert_eq!(metric_action("silence.list"), "silence.list");
         assert_eq!(metric_action("silence.create"), "silence.create");

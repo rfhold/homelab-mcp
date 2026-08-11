@@ -20,7 +20,7 @@ use crate::{
         actions::{
             AlertInstancesInput, AlertRulesInput, CreateSilenceCommand, CreateSilenceInput,
             GetDashboardInput, ListDashboardsInput, ListSilencesInput, LogqlInput, ProfilesInput,
-            PromqlInput, RenderDashboardInput, RenderPanelInput, TraceqlInput,
+            PromqlInput, RecordingRulesInput, RenderDashboardInput, RenderPanelInput, TraceqlInput,
         },
     },
     integrations::kubernetes::{
@@ -104,6 +104,7 @@ pub fn router(
         namespace(name = "traceql", description = "Search Tempo traces with TraceQL."),
         namespace(name = "profile", description = "Inspect Pyroscope profiles."),
         namespace(name = "alert-rule", description = "Inspect Grafana alert rules."),
+        namespace(name = "recording-rule", description = "Inspect Grafana recording rules."),
         namespace(name = "alert-instance", description = "Inspect current Grafana alert instances."),
         namespace(name = "silence", description = "Inspect Grafana alert silences."),
         namespace(name = "dashboard", description = "Inspect Grafana dashboard inventory.")
@@ -291,6 +292,27 @@ impl HomelabMcp {
         match result {
             Ok(output) => Ok(json_result(output)),
             Err(error) => Ok(tool_error("alert rule", error)),
+        }
+    }
+
+    /// List bounded Grafana recording-rule summaries.
+    #[action(tool = "grafana_query", name = "recording-rule.list")]
+    async fn recording_rules(
+        &self,
+        input: RecordingRulesInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tool_error("recording rule", GrafanaError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.grafana.recording_rules(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(json_result(output)),
+            Err(error) => Ok(tool_error("recording rule", error)),
         }
     }
 
@@ -1036,12 +1058,19 @@ mod tests {
             .route(
                 "/api/v1/provisioning/alert-rules",
                 get(|| async {
-                    Json(json!([{
-                        "uid":"rule-1", "title":"API errors", "folderUID":"folder-1",
-                        "ruleGroup":"api", "condition":"C", "noDataState":"NoData",
-                        "execErrState":"Error", "for":"5m", "isPaused":false,
-                        "labels":{"severity":"critical"}, "annotations":{"summary":"API is failing"}
-                    }]))
+                    Json(json!([
+                        {
+                            "uid":"recording-1", "title":"API request rate", "folderUID":"folder-1",
+                            "ruleGroup":"api", "record":{"metric":"api_request_rate","from":"A"},
+                            "isPaused":false, "labels":{"team":"platform"}
+                        },
+                        {
+                            "uid":"rule-1", "title":"API errors", "folderUID":"folder-1",
+                            "ruleGroup":"api", "condition":"C", "noDataState":"NoData",
+                            "execErrState":"Error", "for":"5m", "isPaused":false,
+                            "labels":{"severity":"critical"}, "annotations":{"summary":"API is failing"}
+                        }
+                    ]))
                 }),
             )
             .route(
@@ -1969,6 +1998,7 @@ mod tests {
             "help.traceql",
             "help.profile",
             "help.alert-rule",
+            "help.recording-rule",
             "help.alert-instance",
             "help.silence",
             "help.dashboard",
@@ -1977,6 +2007,7 @@ mod tests {
             "traceql.search",
             "profile.merge",
             "alert-rule.list",
+            "recording-rule.list",
             "alert-instance.list",
             "silence.list",
             "dashboard.list",
@@ -2035,6 +2066,7 @@ mod tests {
                 "traceql",
                 "profile",
                 "alert-rule",
+                "recording-rule",
                 "alert-instance",
                 "silence",
                 "dashboard"
@@ -2047,6 +2079,7 @@ mod tests {
             "traceql",
             "profile",
             "alert-rule",
+            "recording-rule",
             "alert-instance",
             "silence",
             "dashboard",
@@ -2082,6 +2115,7 @@ mod tests {
                 "traceql.search",
                 "profile.merge",
                 "alert-rule.list",
+                "recording-rule.list",
                 "alert-instance.list",
                 "silence.list",
                 "dashboard.list",
@@ -2105,6 +2139,7 @@ mod tests {
                 vec!["profile_type", "max_nodes"],
             ),
             ("alert-rule.list", vec![], vec!["limit"]),
+            ("recording-rule.list", vec![], vec!["limit"]),
             ("alert-instance.list", vec![], vec!["matchers", "limit"]),
             ("silence.list", vec![], vec!["state", "limit"]),
             (
@@ -2153,6 +2188,11 @@ mod tests {
 
         for (action, result_type, expected_field) in [
             ("alert-rule.list", "alert_rules", ("title", "API errors")),
+            (
+                "recording-rule.list",
+                "recording_rules",
+                ("metric", "api_request_rate"),
+            ),
             (
                 "alert-instance.list",
                 "alert_instances",
@@ -2448,10 +2488,15 @@ mod tests {
             (QUERY_TOOL_NAME, json!({"action":"unknown"})),
             (QUERY_TOOL_NAME, json!({"action":"silence.create"})),
             (EXEC_TOOL_NAME, json!({"action":"alert-rule.list"})),
+            (EXEC_TOOL_NAME, json!({"action":"recording-rule.list"})),
             (EXEC_TOOL_NAME, json!({"action":"silence.list"})),
             (
                 QUERY_TOOL_NAME,
                 json!({"action":"alert-rule.list","input":{"limit":1,"extra":true}}),
+            ),
+            (
+                QUERY_TOOL_NAME,
+                json!({"action":"recording-rule.list","input":{"limit":1,"extra":true}}),
             ),
             (
                 TEKTON_QUERY_TOOL_NAME,
@@ -2511,6 +2556,28 @@ mod tests {
             json!({"code":"invalid_arguments","message":"The LogQL arguments are invalid.","retryable":false})
         );
         assert!(!semantic.to_string().contains("grafana-secret"));
+
+        let (_, recording_semantic) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "recording-semantic",
+                json!({
+                    "name":QUERY_TOOL_NAME,
+                    "arguments":{"action":"recording-rule.list","input":{"limit":0}}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(recording_semantic["result"]["isError"], true);
+        assert_eq!(
+            recording_semantic["result"]["structuredContent"]["error"],
+            json!({
+                "code":"invalid_arguments",
+                "message":"The recording rule arguments are invalid.",
+                "retryable":false
+            })
+        );
 
         let (_, mutation_semantic) = post_mcp(
             &endpoint,

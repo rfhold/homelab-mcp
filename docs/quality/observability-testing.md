@@ -46,13 +46,13 @@ Tests cover these observability contracts:
 - credential-free HTTPS root Pyroscope origins, safe tags, and the absence of conflicting or per-pod profile tags;
 - telemetry environment and Pulumi downward API wiring;
 - Alloy egress ports 4318 and 4040;
-- generated help and schemas for all nine `grafana_query` actions, both flat `grafana_render` actions, and the sole `grafana_exec` action;
+- generated help and schemas for all ten `grafana_query` actions, both flat `grafana_render` actions, and the sole `grafana_exec` action;
 - exact PromQL, TraceQL, and Profiles routes, methods, parameters, and bodies;
 - action defaults, range limits, PromQL point limits, and strict flamegraph result normalization;
 - shared four-request capacity, 30-second timeout, redirect denial, permit release, and error mapping;
 - the 8192-byte encoded URL cap and 4 MiB decoded response cap;
-- fixed dashboard inventory, rendering, alerting, mode, destination, and outcome telemetry values; and
-- exclusion of dashboard and panel identifiers, render controls and image metadata, matchers, comments, alert data, URLs, credentials, query data, and upstream bodies from telemetry.
+- fixed dashboard inventory, rendering, alerting, recording-rule, mode, destination, and outcome telemetry values; and
+- exclusion of dashboard and panel identifiers, render controls and image metadata, matchers, comments, alert and recording-rule data, URLs, credentials, query data, and upstream bodies from telemetry.
 
 ## Post-Deployment Evidence
 
@@ -74,6 +74,7 @@ After an authorized deployment, record evidence for each row. Use timestamps, no
 | TraceQL | An authenticated search returns bounded traces through UID `tempo`. |
 | Profiles action | An authenticated merge returns one top-level flamegraph with arrays `names` and `levels` plus string fields `total` and `maxSelf`. Other 200 JSON objects return `invalid_response`. |
 | Alert rules | An authenticated list returns bounded normalized summaries without internal URLs, raw wrappers, or query models. |
+| Recording rules | An authenticated list returns only bounded recording summaries from the shared provisioning route, without expressions, query models, annotations, datasource internals, or raw responses. |
 | Alert instances | An authenticated matcher-filtered list returns bounded normalized current alerts without internal URLs or raw wrappers. |
 | Dashboard inventory | Authenticated list and get calls return only bounded dashboard, variable, and flattened panel inventory. |
 | Rendering | With Grafana 13.1.1 and separately deployed renderer 5.7.1, authenticated dashboard and panel calls return validated PNG image blocks to a Kuri `6eebdb0+` consumer and an image-capable selected model. This is required future evidence, not a live-validation claim. |
@@ -84,4 +85,4 @@ After an authorized deployment, record evidence for each row. Use timestamps, no
 
 Use the [operations queries](../operations/observability.md#validation) for backend checks. Follow each action's specification under [Grafana tools](../grafana-query/README.md).
 
-Do not record credentials, authorization headers, Secret values, full environment output, dashboard or panel UIDs, ranges, timezones, dimensions, variables, image bytes or digests, matchers, silence comments, alert data, internal URLs, or upstream bodies as evidence.
+Do not record credentials, authorization headers, Secret values, full environment output, dashboard or panel UIDs, ranges, timezones, dimensions, variables, image bytes or digests, matchers, silence comments, alert or recording-rule data, internal URLs, or upstream bodies as evidence.

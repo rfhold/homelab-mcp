@@ -20,8 +20,8 @@ use super::{
     actions::{
         AlertInstancesQuery, AlertRulesQuery, CreateSilenceCommand, GetDashboardQuery,
         LabelMatcher, ListDashboardsQuery, ListSilencesQuery, Mode, ProfilesQuery, PromqlQuery,
-        Query, RenderDashboardRequest, RenderOptions, RenderPanelRequest, SilenceState,
-        TraceqlQuery, valid_matcher_name, valid_panel_id,
+        Query, RecordingRulesQuery, RenderDashboardRequest, RenderOptions, RenderPanelRequest,
+        SilenceState, TraceqlQuery, valid_matcher_name, valid_panel_id,
     },
     telemetry::{GrafanaMetricsGuard, request_outcome},
 };
@@ -223,6 +223,23 @@ impl GrafanaClient {
             "grafana_alerting",
             OperationKind::Read,
             |body| normalize_alert_rules(query.limit, body),
+        )
+        .await
+    }
+
+    pub async fn recording_rules(&self, query: &RecordingRulesQuery) -> Result<Value, Error> {
+        self.run(
+            UpstreamRequest {
+                method: Method::GET,
+                path: "/api/v1/provisioning/alert-rules".to_owned(),
+                parameters: Vec::new(),
+                body: None,
+            },
+            "recording-rule.list",
+            "list",
+            "grafana_alerting",
+            OperationKind::Read,
+            |body| normalize_recording_rules(query.limit, body),
         )
         .await
     }
@@ -732,13 +749,11 @@ fn matcher_filter(matcher: &LabelMatcher) -> String {
 }
 
 fn normalize_alert_rules(limit: u16, wrapper: Value) -> Result<Value, Error> {
-    let rules = wrapper.as_array().ok_or(Error::InvalidResponse)?;
+    let rules = select_rules(limit, &wrapper, RuleKind::Alert)?;
     let result = rules
-        .iter()
-        .enumerate()
-        .map(|(index, rule)| {
-            let object = rule.as_object().ok_or(Error::InvalidResponse)?;
-            let normalized = json!({
+        .into_iter()
+        .map(|object| {
+            Ok(json!({
                 "uid": bounded_string(object, "uid", MAX_SAFE_KEY_BYTES)?,
                 "title": bounded_string(object, "title", MAX_SUMMARY_BYTES)?,
                 "folder_uid": bounded_string(object, "folderUID", MAX_SAFE_KEY_BYTES)?,
@@ -750,18 +765,74 @@ fn normalize_alert_rules(limit: u16, wrapper: Value) -> Result<Value, Error> {
                 "is_paused": object.get("isPaused").and_then(Value::as_bool).ok_or(Error::InvalidResponse)?,
                 "labels": safe_string_map(object.get("labels").ok_or(Error::InvalidResponse)?)?,
                 "annotations": safe_string_map(object.get("annotations").ok_or(Error::InvalidResponse)?)?,
-            });
-            Ok((index < usize::from(limit)).then_some(normalized))
+            }))
         })
-        .collect::<Result<Vec<_>, Error>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, Error>>()?;
     Ok(json!({
         "mode": "list",
         "result_type": "alert_rules",
         "result": result,
     }))
+}
+
+fn normalize_recording_rules(limit: u16, wrapper: Value) -> Result<Value, Error> {
+    let rules = select_rules(limit, &wrapper, RuleKind::Recording)?;
+    let result = rules
+        .into_iter()
+        .map(|object| {
+            let record = object
+                .get("record")
+                .and_then(Value::as_object)
+                .ok_or(Error::InvalidResponse)?;
+            Ok(json!({
+                "uid": bounded_string(object, "uid", MAX_SAFE_KEY_BYTES)?,
+                "title": bounded_string(object, "title", MAX_SUMMARY_BYTES)?,
+                "folder_uid": bounded_string(object, "folderUID", MAX_SAFE_KEY_BYTES)?,
+                "rule_group": bounded_string(object, "ruleGroup", MAX_SUMMARY_BYTES)?,
+                "metric": bounded_string(record, "metric", MAX_SUMMARY_BYTES)?,
+                "source_ref": bounded_string(record, "from", MAX_SAFE_KEY_BYTES)?,
+                "target_datasource_uid": optional_nonempty_bounded_string(
+                    record,
+                    "target_datasource_uid",
+                    MAX_SAFE_KEY_BYTES,
+                )?,
+                "is_paused": object.get("isPaused").and_then(Value::as_bool).ok_or(Error::InvalidResponse)?,
+                "labels": safe_string_map(object.get("labels").ok_or(Error::InvalidResponse)?)?,
+            }))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(json!({
+        "mode": "list",
+        "result_type": "recording_rules",
+        "result": result,
+    }))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuleKind {
+    Alert,
+    Recording,
+}
+
+fn select_rules(
+    limit: u16,
+    wrapper: &Value,
+    selected_kind: RuleKind,
+) -> Result<Vec<&Map<String, Value>>, Error> {
+    let rules = wrapper.as_array().ok_or(Error::InvalidResponse)?;
+    let mut selected = Vec::new();
+    for rule in rules {
+        let object = rule.as_object().ok_or(Error::InvalidResponse)?;
+        let kind = match object.get("record") {
+            None | Some(Value::Null) => RuleKind::Alert,
+            Some(Value::Object(_)) => RuleKind::Recording,
+            Some(_) => return Err(Error::InvalidResponse),
+        };
+        if kind == selected_kind && selected.len() < usize::from(limit) {
+            selected.push(object);
+        }
+    }
+    Ok(selected)
 }
 
 fn normalize_alert_instances(limit: u16, wrapper: Value) -> Result<Value, Error> {
@@ -1145,6 +1216,19 @@ fn optional_bounded_string(
     }
 }
 
+fn optional_nonempty_bounded_string(
+    object: &Map<String, Value>,
+    key: &str,
+    maximum_bytes: usize,
+) -> Result<Option<String>, Error> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.is_empty() => Ok(None),
+        Some(Value::String(value)) if value.len() <= maximum_bytes => Ok(Some(value.clone())),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+
 fn allow_empty_bounded_string<'a>(
     object: &'a Map<String, Value>,
     key: &str,
@@ -1447,7 +1531,7 @@ mod tests {
         AlertInstancesInput, AlertRulesInput, CreateSilenceInput, DEFAULT_MAX_NODES,
         DEFAULT_PROFILE_TYPE, Direction, GetDashboardInput, LabelMatcher, ListDashboardsInput,
         ListSilencesInput, LogqlInput, MatcherOperator, ProfilesInput, PromqlInput,
-        RenderDashboardInput, RenderPanelInput, TraceqlInput,
+        RecordingRulesInput, RenderDashboardInput, RenderPanelInput, TraceqlInput,
     };
 
     use super::*;
@@ -1552,6 +1636,23 @@ mod tests {
         Json(alert_rules_response())
     }
 
+    async fn record_recording_rules_request(
+        State(record): State<Arc<Mutex<RequestRecord>>>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+    ) -> Json<Value> {
+        *record.lock().unwrap() = RequestRecord {
+            method: "GET".to_owned(),
+            path: uri.path().to_owned(),
+            authorization: headers["authorization"].to_str().unwrap().to_owned(),
+            traceparent: traceparent(&headers),
+            parameters: HashMap::new(),
+            parameter_pairs: Vec::new(),
+            body: Value::Null,
+        };
+        Json(mixed_rules_response())
+    }
+
     async fn record_alert_instances_request(
         State(record): State<Arc<Mutex<RequestRecord>>>,
         OriginalUri(uri): OriginalUri,
@@ -1649,6 +1750,33 @@ mod tests {
             "labels": {"severity":"critical"},
             "isPaused": false,
         }])
+    }
+
+    fn mixed_rules_response() -> Value {
+        let alert = alert_rules_response()[0].clone();
+        json!([
+            {
+                "uid":"recording-1", "title":"API request rate", "folderUID":"folder-1",
+                "ruleGroup":"api", "record":{"metric":"api_request_rate","from":"A"},
+                "isPaused":false, "labels":{"team":"platform","runbook_url":"https://unsafe"},
+                "data":[{"refId":"A","model":{"expr":"secret expression"}}],
+                "annotations":{"summary":"must not be exposed"}
+            },
+            alert,
+            {
+                "uid":"recording-2", "title":"API error rate", "folderUID":"folder-1",
+                "ruleGroup":"api", "record":{
+                    "metric":"api_error_rate", "from":"B", "target_datasource_uid":"mimir"
+                },
+                "isPaused":true, "labels":{"team":"sre"}
+            },
+            {
+                "uid":"rule-2", "title":"Latency", "folderUID":"folder-2",
+                "ruleGroup":"latency", "condition":"A", "noDataState":"OK",
+                "execErrState":"Error", "for":"1m", "isPaused":false,
+                "labels":{}, "annotations":{}
+            }
+        ])
     }
 
     fn alert_instances_response() -> Value {
@@ -1786,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_alert_rules_and_instances_without_upstream_internal_fields() {
+    fn normalizes_alert_rules_recording_rules_and_instances_without_upstream_internal_fields() {
         let rules = normalize_alert_rules(1, alert_rules_response()).unwrap();
         assert_eq!(rules["mode"], "list");
         assert_eq!(rules["result_type"], "alert_rules");
@@ -1794,6 +1922,34 @@ mod tests {
         assert_eq!(rules["result"][0]["labels"]["severity"], "critical");
         assert!(!rules.to_string().contains("datasource"));
         assert!(!rules.to_string().contains("orgID"));
+
+        let recording = normalize_recording_rules(2, mixed_rules_response()).unwrap();
+        assert_eq!(recording["mode"], "list");
+        assert_eq!(recording["result_type"], "recording_rules");
+        assert_eq!(
+            recording["result"],
+            json!([
+                {
+                    "uid":"recording-1", "title":"API request rate", "folder_uid":"folder-1",
+                    "rule_group":"api", "metric":"api_request_rate", "source_ref":"A",
+                    "target_datasource_uid":null, "is_paused":false, "labels":{"team":"platform"}
+                },
+                {
+                    "uid":"recording-2", "title":"API error rate", "folder_uid":"folder-1",
+                    "rule_group":"api", "metric":"api_error_rate", "source_ref":"B",
+                    "target_datasource_uid":"mimir", "is_paused":true, "labels":{"team":"sre"}
+                }
+            ])
+        );
+        for omitted in [
+            "secret expression",
+            "must not be exposed",
+            "\"data\":",
+            "\"model\":",
+            "\"annotations\":",
+        ] {
+            assert!(!recording.to_string().contains(omitted));
+        }
 
         let alerts = normalize_alert_instances(1, alert_instances_response()).unwrap();
         assert_eq!(alerts["result_type"], "alert_instances");
@@ -1857,13 +2013,96 @@ mod tests {
     }
 
     #[test]
-    fn strictly_validates_alert_responses_including_truncated_entries() {
+    fn rule_partitioning_validates_discriminators_and_only_selected_entries() {
         let mut rules = alert_rules_response().as_array().unwrap().clone();
         rules.push(json!({"uid":"malformed"}));
+        assert!(normalize_alert_rules(1, Value::Array(rules)).is_ok());
+
+        let mixed = mixed_rules_response();
+        let alerts = normalize_alert_rules(1, mixed.clone()).unwrap();
+        assert_eq!(alerts["result"][0]["uid"], "rule-1");
+        let recording = normalize_recording_rules(1, mixed).unwrap();
+        assert_eq!(recording["result"][0]["uid"], "recording-1");
+
+        let mut null_record = alert_rules_response();
+        null_record[0]["record"] = Value::Null;
         assert_eq!(
-            normalize_alert_rules(1, Value::Array(rules)),
+            normalize_alert_rules(1, null_record).unwrap()["result"][0]["uid"],
+            "rule-1"
+        );
+
+        let alert_before_recording = json!([
+            alert_rules_response()[0].clone(),
+            mixed_rules_response()[0].clone()
+        ]);
+        let recording = normalize_recording_rules(1, alert_before_recording).unwrap();
+        assert_eq!(recording["result"][0]["uid"], "recording-1");
+
+        let opposite_category_malformed = json!([
+            {
+                "record":{"metric":7,"from":false},
+                "labels":7,
+                "isPaused":"no"
+            },
+            alert_rules_response()[0].clone()
+        ]);
+        assert!(normalize_alert_rules(1, opposite_category_malformed).is_ok());
+
+        let selected_recording_malformed = json!([{
+            "uid":"recording", "title":"Broken", "folderUID":"folder",
+            "ruleGroup":"group", "record":{"metric":"", "from":"A"},
+            "isPaused":false, "labels":{}
+        }]);
+        assert_eq!(
+            normalize_recording_rules(1, selected_recording_malformed),
             Err(Error::InvalidResponse)
         );
+
+        for (field, value) in [
+            ("metric", json!("x".repeat(MAX_SUMMARY_BYTES + 1))),
+            ("from", json!("")),
+            ("from", json!("x".repeat(MAX_SAFE_KEY_BYTES + 1))),
+            ("target_datasource_uid", json!(7)),
+            (
+                "target_datasource_uid",
+                json!("x".repeat(MAX_SAFE_KEY_BYTES + 1)),
+            ),
+        ] {
+            let mut invalid = mixed_rules_response()[0].clone();
+            invalid["record"][field] = value;
+            assert_eq!(
+                normalize_recording_rules(1, json!([invalid])),
+                Err(Error::InvalidResponse),
+                "accepted invalid {field}"
+            );
+        }
+
+        let mut empty_target = mixed_rules_response()[0].clone();
+        empty_target["record"]["target_datasource_uid"] = json!("");
+        assert_eq!(
+            normalize_recording_rules(1, json!([empty_target])).unwrap()["result"][0]["target_datasource_uid"],
+            Value::Null
+        );
+
+        let mut camel_target = mixed_rules_response()[0].clone();
+        camel_target["record"]
+            .as_object_mut()
+            .unwrap()
+            .remove("target_datasource_uid");
+        camel_target["record"]["targetDatasourceUid"] = json!("mimir");
+        assert_eq!(
+            normalize_recording_rules(1, json!([camel_target])).unwrap()["result"][0]["target_datasource_uid"],
+            Value::Null
+        );
+
+        for discriminator in [json!(false), json!("recording"), json!([])] {
+            let mut invalid = alert_rules_response();
+            invalid[0]["record"] = discriminator;
+            assert_eq!(
+                normalize_alert_rules(1, invalid),
+                Err(Error::InvalidResponse)
+            );
+        }
 
         let mut alerts = alert_instances_response().as_array().unwrap().clone();
         alerts.push(json!({"generatorURL":"http://unsafe"}));
@@ -2277,6 +2516,33 @@ mod tests {
         assert!(record.parameter_pairs.is_empty());
         assert_eq!(output["result"].as_array().unwrap().len(), 1);
         assert_eq!(output["result"][0]["title"], "API errors");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn sends_exact_recording_rule_request_and_partitions_before_limiting() {
+        let record = Arc::new(Mutex::new(RequestRecord::default()));
+        let router = Router::new()
+            .route(
+                "/api/v1/provisioning/alert-rules",
+                get(record_recording_rules_request),
+            )
+            .with_state(Arc::clone(&record));
+        let (origin, task) = serve(router).await;
+        let client = GrafanaClient::for_test(origin, TIMEOUT);
+
+        let output = client
+            .recording_rules(&RecordingRulesInput { limit: Some(1) }.validate().unwrap())
+            .await
+            .unwrap();
+        let record = record.lock().unwrap();
+        assert_eq!(record.method, "GET");
+        assert_eq!(record.path, "/api/v1/provisioning/alert-rules");
+        assert_eq!(record.authorization, "Bearer grafana-secret");
+        assert!(record.traceparent.is_empty());
+        assert!(record.parameter_pairs.is_empty());
+        assert_eq!(output["result"].as_array().unwrap().len(), 1);
+        assert_eq!(output["result"][0]["uid"], "recording-1");
         task.abort();
     }
 

@@ -100,9 +100,10 @@ Metric backend translation can replace dots with underscores and append `_total`
 | Profiles do not appear | Confirm `HOMELAB_MCP_PYROSCOPE_URL` exists and egress reaches port 4040. Match the exact profile tags, then inspect Alloy and Pyroscope observability. |
 | CPU or latency rises | Compare against a window without profiling. Remove the Pyroscope URL if 100 Hz sampling causes unacceptable overhead. |
 | Grafana-upstream failures spike | Group upstream outcomes by action, mode, and datasource UID. Use `grafana.query` traces and correlated logs for the same interval. |
+| Alert and recording-rule lists disagree | Confirm both actions use `grafana_alerting`, then inspect safe outcomes by action. The actions partition one fixed provisioning response by `record`. |
 | Silence creation has an uncertain outcome | Do not retry automatically. Query current silences first; `mutation_outcome_unknown` means Grafana may have accepted the request before transport, timeout, or response validation failed. |
 
-Never place tokens, authorization headers, full environment dumps, query text, profile selectors, alert matchers, comments, alert data, internal URLs, or upstream bodies in tickets or shared logs.
+Never place tokens, authorization headers, full environment dumps, query text, profile selectors, alert matchers, comments, alert or recording-rule data, internal URLs, or upstream bodies in tickets or shared logs.
 
 `RUST_LOG` affects JSON logs only. It cannot enable dependency target trees or bypass application redaction for URLs, bodies, upstream errors, or credentials.
 

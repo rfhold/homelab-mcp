@@ -5,7 +5,7 @@ This index routes readers to the implemented preview runtime, deployment status,
 | Document | Covers |
 | --- | --- |
 | [Architecture](architecture/README.md) | Service boundaries, components, data flows, and authentication. |
-| [Grafana query tools](grafana-query/README.md) | Canonical contracts for nine read actions and bounded silence creation. |
+| [Grafana query tools](grafana-query/README.md) | Canonical contracts for ten read actions and bounded silence creation. |
 | [Grafana render tool](grafana-render/README.md) | Canonical contracts for bounded dashboard and panel PNG rendering. |
 | [Tekton tools](tekton/README.md) | Implemented contracts for repository, workflow, run, task, log, and mutation actions. |
 | [Kubernetes tools](kubernetes/README.md) | Locally implemented contracts for bounded multi-cluster reads and curated exact-object mutations. |
@@ -16,4 +16,4 @@ The repository implements hosted OAuth, authenticated `/mcp`, Grafana tools, Tek
 
 The Kubernetes implementation changes the global `/mcp` scope set to `mcp:use kubernetes:read kubernetes:write`. This wiring is locally tested but not deployed or verified through a browser flow.
 
-Preview runs the previously deployed authenticated runtime. Basic health, readiness, OAuth metadata, and Bearer-challenge behavior are verified. The dashboard inventory, rendering, alerting, Tekton, and Kubernetes worktree revisions have not been deployed or exercised live. Full browser OAuth, authenticated preview MCP calls, live integration behavior, renderer operation, effective RBAC, and expanded permission operation remain unverified. Production remains excluded and has zero resources.
+Preview runs the previously deployed authenticated runtime. Basic health, readiness, OAuth metadata, and Bearer-challenge behavior are verified. The dashboard inventory, rendering, alerting, recording-rule, Tekton, and Kubernetes worktree revisions have not been deployed or exercised live. Full browser OAuth, authenticated preview MCP calls, live integration behavior, renderer operation, effective RBAC, and expanded permission operation remain unverified. Production remains excluded and has zero resources.

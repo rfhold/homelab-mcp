@@ -7,6 +7,7 @@ mod list_silences;
 mod logql;
 mod profiles;
 mod promql;
+mod recording_rules;
 mod render;
 mod traceql;
 
@@ -19,6 +20,7 @@ pub use logql::{LogqlInput, Query};
 pub(crate) use profiles::{DEFAULT_MAX_NODES, DEFAULT_PROFILE_TYPE};
 pub use profiles::{ProfilesInput, ProfilesQuery};
 pub use promql::{PromqlInput, PromqlQuery};
+pub use recording_rules::{RecordingRulesInput, RecordingRulesQuery};
 pub(crate) use render::valid_panel_id;
 pub use render::{
     RenderDashboardInput, RenderDashboardRequest, RenderOptions, RenderPanelInput,
