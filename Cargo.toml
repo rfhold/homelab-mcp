@@ -15,6 +15,7 @@ mcp = { git = "https://git.holdenitdown.net/rfhold/kuri.git", rev = "184ce47ba45
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
+percent-encoding = "2.3.2"
 pyroscope = { version = "=2.0.6", features = ["backend-pprof-rs"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls"] }
 reqwest-middleware = { version = "0.5.1", features = ["json"] }

@@ -10,6 +10,7 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use percent_encoding::percent_decode_str;
 use reqwest::{Certificate, Client, Method, StatusCode, Url, redirect::Policy};
 use serde::Deserialize as _;
 use serde_json::{Value, json};
@@ -22,7 +23,8 @@ use super::{
     Error,
     actions::{
         RepositoryListQuery, RunCancelCommand, RunGetQuery, RunListQuery, RunRerunCommand,
-        TaskListQuery, TaskLogsQuery, WorkflowDispatchCommand, WorkflowListQuery,
+        RunWaitQuery, TaskListQuery, TaskLogsQuery, WorkflowDispatchCommand, WorkflowListQuery,
+        valid_repository_component,
     },
 };
 
@@ -57,7 +59,10 @@ pub struct TektonClient {
     external: Client,
     kubernetes: Client,
     permits: Arc<Semaphore>,
+    waiters: Arc<Semaphore>,
     timeout: Duration,
+    wait_poll_interval: Duration,
+    wait_timeout_unit: Duration,
     redactions: Arc<Vec<String>>,
 }
 
@@ -134,7 +139,10 @@ impl TektonClient {
             external,
             kubernetes,
             permits: Arc::new(Semaphore::new(4)),
+            waiters: Arc::new(Semaphore::new(4)),
             timeout: TIMEOUT,
+            wait_poll_interval: Duration::from_secs(2),
+            wait_timeout_unit: Duration::from_secs(1),
             redactions: Arc::new(redactions),
         })
     }
@@ -153,13 +161,16 @@ impl TektonClient {
             external: safe_client().unwrap(),
             kubernetes: safe_client().unwrap(),
             permits: Arc::new(Semaphore::new(4)),
+            waiters: Arc::new(Semaphore::new(4)),
             timeout: Duration::from_millis(100),
+            wait_poll_interval: Duration::from_millis(10),
+            wait_timeout_unit: Duration::from_millis(30),
             redactions: Arc::new(vec!["forgejo-secret".to_owned(), "pac-secret".to_owned()]),
         }
     }
 
     #[cfg(test)]
-    fn for_test(origin: Url, timeout: Duration) -> Self {
+    pub(crate) fn for_test(origin: Url, timeout: Duration) -> Self {
         Self {
             forgejo_origin: origin.clone(),
             forgejo_token: Secret::for_test("forgejo-secret"),
@@ -171,7 +182,10 @@ impl TektonClient {
             external: safe_client().unwrap(),
             kubernetes: safe_client().unwrap(),
             permits: Arc::new(Semaphore::new(4)),
+            waiters: Arc::new(Semaphore::new(4)),
             timeout,
+            wait_poll_interval: Duration::from_millis(10),
+            wait_timeout_unit: Duration::from_millis(30),
             redactions: Arc::new(vec!["pac-secret".to_owned(), "kube-secret".to_owned()]),
         }
     }
@@ -234,7 +248,7 @@ impl TektonClient {
         let (items, source_truncated) = self.kube_list(&path, Some(&selector)).await?;
         let mut runs = items
             .iter()
-            .filter_map(|item| normalize_run(item, &self.namespace, &repository.cr_name))
+            .filter_map(|item| normalize_run(item, &self.namespace, &repository))
             .filter(|run| {
                 query
                     .workflow
@@ -245,7 +259,13 @@ impl TektonClient {
                 query
                     .branch
                     .as_ref()
-                    .is_none_or(|value| run["branch"] == *value)
+                    .is_none_or(|value| branch_matches(run["branch"].as_str(), value))
+            })
+            .filter(|run| {
+                query
+                    .revision
+                    .as_ref()
+                    .is_none_or(|value| run["revision"] == *value)
             })
             .filter(|run| {
                 query
@@ -259,20 +279,67 @@ impl TektonClient {
         runs.truncate(usize::from(query.limit));
         Ok(json!({
             "mode":"list", "result_type":"runs", "result":runs,
+            "source_truncated":source_truncated,
+            "result_truncated":result_truncated,
             "truncated":source_truncated || result_truncated
         }))
     }
 
     pub async fn run(&self, query: &RunGetQuery) -> Result<Value, Error> {
-        let run = self.owned_run(&query.run_id).await?;
-        let repository = label(&run, REPOSITORY_LABEL).ok_or(Error::NotFound)?;
+        let (run, repository) = self.owned_run(&query.run_id).await?;
         let normalized =
-            normalize_run(&run, &self.namespace, repository).ok_or(Error::InvalidResponse)?;
+            normalize_run(&run, &self.namespace, &repository).ok_or(Error::InvalidResponse)?;
         Ok(json!({"mode":"get", "result_type":"run", "result":normalized}))
     }
 
+    pub async fn wait(&self, query: &RunWaitQuery) -> Result<Value, Error> {
+        let _waiter = self
+            .waiters
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::CapacityExhausted)?;
+        let deadline =
+            tokio::time::Instant::now() + self.wait_timeout_unit * u32::from(query.timeout_seconds);
+        let (run, repository) = tokio::time::timeout_at(deadline, self.owned_run(&query.run_id))
+            .await
+            .map_err(|_| Error::Timeout)??;
+        let mut normalized =
+            normalize_run(&run, &self.namespace, &repository).ok_or(Error::InvalidResponse)?;
+        if terminal_status(&normalized) {
+            return Ok(wait_json(normalized, false));
+        }
+
+        loop {
+            tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(deadline) => break,
+                () = tokio::time::sleep(self.wait_poll_interval) => {}
+            }
+            let poll = self.owned_run_matching(&query.run_id, &repository);
+            let run = match tokio::time::timeout_at(deadline, poll).await {
+                Ok(result) => result?,
+                Err(_) => break,
+            };
+            normalized =
+                normalize_run(&run, &self.namespace, &repository).ok_or(Error::InvalidResponse)?;
+            if terminal_status(&normalized) {
+                return Ok(wait_json(normalized, false));
+            }
+        }
+
+        let run = tokio::time::timeout(
+            self.timeout,
+            self.owned_run_matching(&query.run_id, &repository),
+        )
+        .await
+        .map_err(|_| Error::Timeout)??;
+        normalized =
+            normalize_run(&run, &self.namespace, &repository).ok_or(Error::InvalidResponse)?;
+        Ok(wait_json(normalized, true))
+    }
+
     pub async fn tasks(&self, query: &TaskListQuery) -> Result<Value, Error> {
-        let run = self.owned_run(&query.run_id).await?;
+        let (run, _) = self.owned_run(&query.run_id).await?;
         let run_name = object_name(&run).ok_or(Error::InvalidResponse)?;
         let run_uid = object_uid(&run).ok_or(Error::InvalidResponse)?;
         let repository = label(&run, REPOSITORY_LABEL).ok_or(Error::NotFound)?;
@@ -295,7 +362,7 @@ impl TektonClient {
     }
 
     pub async fn logs(&self, query: &TaskLogsQuery) -> Result<Value, Error> {
-        let run = self.owned_run(&query.run_id).await?;
+        let (run, _) = self.owned_run(&query.run_id).await?;
         let run_name = object_name(&run).ok_or(Error::InvalidResponse)?;
         let run_uid = object_uid(&run).ok_or(Error::InvalidResponse)?;
         let repository = label(&run, REPOSITORY_LABEL).ok_or(Error::NotFound)?;
@@ -392,11 +459,11 @@ impl TektonClient {
     }
 
     pub async fn rerun(&self, command: &RunRerunCommand) -> Result<Value, Error> {
-        let run = self.owned_run(&command.run_id).await?;
+        let (run, repository) = self.owned_run(&command.run_id).await?;
         let repository_name = label(&run, REPOSITORY_LABEL).ok_or(Error::NotFound)?;
-        let repository = self
-            .repository(&format!("{}/{}", self.namespace, repository_name))
-            .await?;
+        if repository.cr_name != repository_name {
+            return Err(Error::NotFound);
+        }
         let definition = workflow_name(&run).ok_or(Error::MutationRejected)?;
         let workflow = self
             .repository_workflows(&repository)
@@ -428,7 +495,7 @@ impl TektonClient {
     }
 
     pub async fn cancel(&self, command: &RunCancelCommand) -> Result<Value, Error> {
-        let run = self.owned_run(&command.run_id).await?;
+        let (run, _) = self.owned_run(&command.run_id).await?;
         if run_status(&run) != "running" {
             return Err(Error::MutationRejected);
         }
@@ -464,16 +531,29 @@ impl TektonClient {
             .iter()
             .filter_map(|item| parse_repository(item, &self.namespace, &self.forgejo_origin))
             .collect::<Vec<_>>();
+        let mut canonical = HashSet::new();
+        if repositories
+            .iter()
+            .any(|repository| !canonical.insert(repository.id.clone()))
+        {
+            return Err(Error::InvalidResponse);
+        }
         repositories.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(repositories)
     }
 
     async fn repository(&self, id: &str) -> Result<Repository, Error> {
-        self.repository_catalog()
-            .await?
-            .into_iter()
-            .find(|repository| repository.id == id)
-            .ok_or(Error::NotFound)
+        let catalog = self.repository_catalog().await?;
+        if let Some(repository) = catalog.iter().find(|repository| repository.id == id) {
+            return Ok(repository.clone());
+        }
+        if catalog
+            .iter()
+            .any(|repository| id == format!("{}/{}", self.namespace, repository.cr_name))
+        {
+            return Err(Error::InvalidArguments);
+        }
+        Err(Error::NotFound)
     }
 
     async fn repository_workflows(&self, repository: &Repository) -> Result<Vec<Workflow>, Error> {
@@ -567,7 +647,7 @@ impl TektonClient {
             .ok_or(Error::MutationRejected)
     }
 
-    async fn owned_run(&self, id: &str) -> Result<Value, Error> {
+    async fn owned_run(&self, id: &str) -> Result<(Value, Repository), Error> {
         let (_, name) = namespaced_id(id, &self.namespace)?;
         let path = format!(
             "/apis/tekton.dev/v1/namespaces/{}/pipelineruns/{name}",
@@ -577,8 +657,19 @@ impl TektonClient {
             .kube_json(Method::GET, &path, &[], None, OperationKind::Read)
             .await?;
         let repository = label(&run, REPOSITORY_LABEL).ok_or(Error::NotFound)?;
-        self.repository(&format!("{}/{}", self.namespace, repository))
-            .await?;
+        let catalog = self.repository_catalog().await?;
+        let repository = catalog
+            .into_iter()
+            .find(|candidate| candidate.cr_name == repository)
+            .ok_or(Error::NotFound)?;
+        Ok((run, repository))
+    }
+
+    async fn owned_run_matching(&self, id: &str, expected: &Repository) -> Result<Value, Error> {
+        let (run, repository) = self.owned_run(id).await?;
+        if repository.cr_name != expected.cr_name || repository.id != expected.id {
+            return Err(Error::NotFound);
+        }
         Ok(run)
     }
 
@@ -878,7 +969,7 @@ fn operation_failure(kind: OperationKind) -> Error {
     }
 }
 
-fn parse_repository(item: &Value, namespace: &str, origin: &Url) -> Option<Repository> {
+fn parse_repository(item: &Value, _namespace: &str, origin: &Url) -> Option<Repository> {
     let cr_name = object_name(item)?.to_owned();
     let raw = item["spec"]["url"].as_str()?;
     let url = Url::parse(raw).ok()?;
@@ -899,17 +990,30 @@ fn parse_repository(item: &Value, namespace: &str, origin: &Url) -> Option<Repos
     if parts.len() != 2 {
         return None;
     }
+    let owner = percent_decode_str(parts[0])
+        .decode_utf8()
+        .ok()?
+        .into_owned();
+    let encoded_name = percent_decode_str(parts[1]).decode_utf8().ok()?;
+    let name = encoded_name
+        .strip_suffix(".git")
+        .unwrap_or(&encoded_name)
+        .to_owned();
+    if !valid_repository_component(&owner) || !valid_repository_component(&name) {
+        return None;
+    }
+    let canonical_url = format!(
+        "{}/{}/{}",
+        origin.as_str().trim_end_matches('/'),
+        owner,
+        name
+    );
     Some(Repository {
-        id: format!("{namespace}/{cr_name}"),
+        id: format!("{owner}/{name}"),
         cr_name,
-        owner: parts[0].to_owned(),
-        name: parts[1].trim_end_matches(".git").to_owned(),
-        url: format!(
-            "{}/{}/{}",
-            origin.as_str().trim_end_matches('/'),
-            parts[0],
-            parts[1].trim_end_matches(".git")
-        ),
+        owner,
+        name,
+        url: canonical_url,
     })
 }
 
@@ -993,8 +1097,8 @@ fn workflow_json(workflow: Workflow) -> Value {
     })
 }
 
-fn normalize_run(item: &Value, namespace: &str, repository: &str) -> Option<Value> {
-    if label(item, REPOSITORY_LABEL)? != repository {
+fn normalize_run(item: &Value, namespace: &str, repository: &Repository) -> Option<Value> {
+    if label(item, REPOSITORY_LABEL)? != repository.cr_name {
         return None;
     }
     let name = object_name(item)?;
@@ -1010,7 +1114,7 @@ fn normalize_run(item: &Value, namespace: &str, repository: &str) -> Option<Valu
         .unwrap_or_default();
     Some(json!({
         "id":format!("{namespace}/{name}"),
-        "repository":format!("{namespace}/{repository}"),
+        "repository":repository.id,
         "workflow":workflow_name(item).unwrap_or(name),
         "branch":annotation(item, "pipelinesascode.tekton.dev/branch").or_else(|| annotation(item, "pipelinesascode.tekton.dev/source-branch")),
         "revision":label(item, "pipelinesascode.tekton.dev/sha"),
@@ -1116,6 +1220,29 @@ fn sort_newest(values: &mut [Value]) {
     });
 }
 
+fn branch_matches(actual: Option<&str>, expected: &str) -> bool {
+    actual.is_some_and(|actual| {
+        actual == expected
+            || matches!(
+                (actual, expected),
+                ("main", "refs/heads/main") | ("refs/heads/main", "main")
+            )
+    })
+}
+
+fn terminal_status(run: &Value) -> bool {
+    matches!(
+        run["status"].as_str(),
+        Some("succeeded" | "failed" | "cancelled")
+    )
+}
+
+fn wait_json(run: Value, timed_out: bool) -> Value {
+    json!({
+        "mode":"wait", "result_type":"run", "result":run, "timed_out":timed_out
+    })
+}
+
 fn truncate_utf8(value: &mut String, maximum: usize) -> bool {
     if value.len() <= maximum {
         return false;
@@ -1155,9 +1282,12 @@ fn cancel_patch(resource_version: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
     };
 
     use axum::{
@@ -1173,11 +1303,17 @@ mod tests {
 
     struct MockState {
         repository_url: String,
+        repository_items: Mutex<Option<Vec<Value>>>,
+        run_items: Mutex<Vec<Value>>,
+        run_responses: Mutex<VecDeque<Value>>,
         pac_bodies: Mutex<Vec<Value>>,
         cancel_bodies: Mutex<Vec<Value>>,
         stall_pac: AtomicBool,
         repeat_page: AtomicBool,
         conflict_cancel: AtomicBool,
+        run_request_count: AtomicUsize,
+        stall_run_request: AtomicUsize,
+        replace_repository_on_run_request: Mutex<Option<(usize, Vec<Value>)>>,
     }
 
     async fn mock_upstreams(
@@ -1193,21 +1329,49 @@ mod tests {
                 if state.repeat_page.load(Ordering::SeqCst) {
                     Json(json!({"items":[], "metadata":{"continue":"repeat"}})).into_response()
                 } else {
+                    let items = state
+                        .repository_items
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| {
+                            vec![repository_object("pac-rfhold-repo", &state.repository_url)]
+                        });
                     Json(json!({
-                        "items":[{"metadata":{"name":"pac-rfhold-repo"},"spec":{"url":state.repository_url}}],
+                        "items":items,
                         "metadata":{}
-                    })).into_response()
+                    }))
+                    .into_response()
                 }
             }
+            ("GET", "/apis/tekton.dev/v1/namespaces/pipelines-as-code/pipelineruns") => {
+                Json(json!({"items":state.run_items.lock().unwrap().clone(),"metadata":{}}))
+                    .into_response()
+            }
             ("GET", "/apis/tekton.dev/v1/namespaces/pipelines-as-code/pipelineruns/run") => {
-                Json(json!({
-                    "metadata":{
-                        "name":"run", "uid":"run-uid", "resourceVersion":"rv-1",
-                        "labels":{"pipelinesascode.tekton.dev/repository":"pac-rfhold-repo"}
-                    },
-                    "status":{"conditions":[{"type":"Succeeded","status":"Unknown"}]}
-                }))
-                .into_response()
+                let request_number = state.run_request_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if state.stall_run_request.load(Ordering::SeqCst) == request_number {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                let replacement = state
+                    .replace_repository_on_run_request
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|(at, _)| *at == request_number)
+                    .map(|(_, items)| items.clone());
+                if let Some(items) = replacement {
+                    *state.repository_items.lock().unwrap() = Some(items);
+                }
+                let mut responses = state.run_responses.lock().unwrap();
+                let run = if responses.len() > 1 {
+                    responses.pop_front().unwrap()
+                } else {
+                    responses.front().cloned().unwrap_or_else(|| {
+                        run_object("run", "2026-01-01T00:00:00Z", "main", "abc", "Unknown")
+                    })
+                };
+                Json(run).into_response()
             }
             ("PATCH", "/apis/tekton.dev/v1/namespaces/pipelines-as-code/pipelineruns/run") => {
                 let body = to_bytes(request.into_body(), 16 * 1024).await.unwrap();
@@ -1256,11 +1420,17 @@ mod tests {
         let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
         let state = Arc::new(MockState {
             repository_url: format!("{}rfhold/repo", origin.as_str()),
+            repository_items: Mutex::new(None),
+            run_items: Mutex::new(Vec::new()),
+            run_responses: Mutex::new(VecDeque::new()),
             pac_bodies: Mutex::new(Vec::new()),
             cancel_bodies: Mutex::new(Vec::new()),
             stall_pac: AtomicBool::new(false),
             repeat_page: AtomicBool::new(false),
             conflict_cancel: AtomicBool::new(false),
+            run_request_count: AtomicUsize::new(0),
+            stall_run_request: AtomicUsize::new(0),
+            replace_repository_on_run_request: Mutex::new(None),
         });
         let server_state = state.clone();
         let task = tokio::spawn(async move {
@@ -1276,6 +1446,33 @@ mod tests {
         (origin, state, task)
     }
 
+    fn repository_object(name: &str, url: &str) -> Value {
+        json!({"metadata":{"name":name},"spec":{"url":url}})
+    }
+
+    fn run_object(
+        name: &str,
+        created_at: &str,
+        branch: &str,
+        revision: &str,
+        condition_status: &str,
+    ) -> Value {
+        json!({
+            "metadata":{
+                "name":name, "uid":format!("{name}-uid"), "resourceVersion":"rv-1",
+                "creationTimestamp":created_at,
+                "labels":{
+                    "pipelinesascode.tekton.dev/repository":"pac-rfhold-repo",
+                    "pipelinesascode.tekton.dev/sha":revision,
+                    "pipelinesascode.tekton.dev/original-prname":"build"
+                },
+                "annotations":{"pipelinesascode.tekton.dev/branch":branch}
+            },
+            "spec":{"params":[]},
+            "status":{"conditions":[{"type":"Succeeded","status":condition_status,"reason":if condition_status == "False" { "Failed" } else { "Succeeded" }}]}
+        })
+    }
+
     #[test]
     fn repository_parser_excludes_non_repositories_and_foreign_origins() {
         let origin = Url::parse("https://git.example/").unwrap();
@@ -1288,15 +1485,42 @@ mod tests {
             .is_none()
         );
         assert!(parse_repository(&json!({"metadata":{"name":"foreign"},"spec":{"url":"https://other.example/rfhold/repo"}}), "pipelines-as-code", &origin).is_none());
-        let repository = parse_repository(&json!({"metadata":{"name":"pac-rfhold-repo"},"spec":{"url":"https://git.example/rfhold/repo"}}), "pipelines-as-code", &origin).unwrap();
-        assert_eq!(repository.id, "pipelines-as-code/pac-rfhold-repo");
+        let repository = parse_repository(&json!({"metadata":{"name":"pac-rfhold-repo"},"spec":{"url":"https://git.example/rfhold/repo.git"}}), "pipelines-as-code", &origin).unwrap();
+        assert_eq!(repository.id, "rfhold/repo");
         assert_eq!(repository.name, "repo");
+        assert_eq!(repository.url, "https://git.example/rfhold/repo");
+        let underscore = parse_repository(&json!({"metadata":{"name":"underscore"},"spec":{"url":"https://git.example/My_Org/Repo_Name"}}), "pipelines-as-code", &origin).unwrap();
+        assert_eq!(underscore.id, "My_Org/Repo_Name");
+
+        let encoded = parse_repository(&json!({"metadata":{"name":"encoded"},"spec":{"url":"https://git.example/My%5FOrg/Repo%7EName%2Egit"}}), "pipelines-as-code", &origin).unwrap();
+        assert_eq!(encoded.id, "My_Org/Repo~Name");
+        assert_eq!(encoded.owner, "My_Org");
+        assert_eq!(encoded.name, "Repo~Name");
+        assert_eq!(encoded.url, "https://git.example/My_Org/Repo~Name");
+
+        for raw in [
+            "https://git.example/org/repo%2Fextra",
+            "https://git.example/org%2Frepo/name",
+            "https://git.example/org/repo%ZZ",
+            "https://git.example/org/repo%FF",
+            "https://git.example/org/repo%20name",
+        ] {
+            assert!(
+                parse_repository(
+                    &json!({"metadata":{"name":"bad"},"spec":{"url":raw}}),
+                    "pipelines-as-code",
+                    &origin
+                )
+                .is_none(),
+                "accepted {raw}"
+            );
+        }
     }
 
     #[test]
     fn workflow_parser_marks_only_exact_incoming_event_triggerable() {
         let repository = Repository {
-            id: "pipelines-as-code/pac-rfhold-repo".to_owned(),
+            id: "rfhold/repo".to_owned(),
             cr_name: "pac-rfhold-repo".to_owned(),
             owner: "rfhold".to_owned(),
             name: "repo".to_owned(),
@@ -1326,16 +1550,46 @@ spec: {}
     }
 
     #[test]
+    fn workflow_identity_is_bound_to_canonical_repository_key() {
+        let make = |id: &str| Repository {
+            id: id.to_owned(),
+            cr_name: "same-private-cr".to_owned(),
+            owner: "rfhold".to_owned(),
+            name: "repo".to_owned(),
+            url: "https://git.example/rfhold/repo".to_owned(),
+        };
+        let bytes = b"kind: PipelineRun\nmetadata:\n  name: build\n";
+        let canonical =
+            parse_workflows(&make("rfhold/repo"), "main", ".tekton/build.yaml", bytes).unwrap();
+        let other =
+            parse_workflows(&make("other/repo"), "main", ".tekton/build.yaml", bytes).unwrap();
+        assert_ne!(canonical[0].id, other[0].id);
+        assert_eq!(canonical[0].repository, "rfhold/repo");
+        assert!(!canonical[0].id.contains("same-private-cr"));
+    }
+
+    #[test]
     fn normalization_uses_exact_ownership_and_hides_parameter_values() {
         let run = json!({
             "metadata":{"name":"run","labels":{"pipelinesascode.tekton.dev/repository":"pac-rfhold-repo","pipelinesascode.tekton.dev/sha":"abc"},"creationTimestamp":"2026-01-01T00:00:00Z"},
             "spec":{"params":[{"name":"token","value":"secret-value"}]},
             "status":{"conditions":[{"type":"Succeeded","status":"True","reason":"Succeeded"}]}
         });
-        let normalized = normalize_run(&run, "pipelines-as-code", "pac-rfhold-repo").unwrap();
+        let repository = Repository {
+            id: "rfhold/repo".to_owned(),
+            cr_name: "pac-rfhold-repo".to_owned(),
+            owner: "rfhold".to_owned(),
+            name: "repo".to_owned(),
+            url: "https://git.example/rfhold/repo".to_owned(),
+        };
+        let normalized = normalize_run(&run, "pipelines-as-code", &repository).unwrap();
+        assert_eq!(normalized["repository"], "rfhold/repo");
+        assert_eq!(normalized["revision"], "abc");
         assert_eq!(normalized["parameter_names"], json!(["token"]));
         assert!(!normalized.to_string().contains("secret-value"));
-        assert!(normalize_run(&run, "pipelines-as-code", "different").is_none());
+        let mut different = repository;
+        different.cr_name = "different".to_owned();
+        assert!(normalize_run(&run, "pipelines-as-code", &different).is_none());
     }
 
     #[test]
@@ -1352,25 +1606,244 @@ spec: {}
     }
 
     #[tokio::test]
+    async fn catalog_exposes_only_canonical_keys_and_rejects_duplicates_and_legacy_selectors() {
+        let (origin, state, server) = mock_server().await;
+        let client = TektonClient::for_test(origin.clone(), Duration::from_secs(1));
+        let listed = client
+            .repositories(&RepositoryListQuery { limit: 10 })
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["result"][0],
+            json!({
+                "id":"rfhold/repo", "owner":"rfhold", "repository":"repo",
+                "url":format!("{}rfhold/repo", origin.as_str())
+            })
+        );
+        assert!(matches!(
+            client.repository("pipelines-as-code/pac-rfhold-repo").await,
+            Err(Error::InvalidArguments)
+        ));
+
+        *state.repository_items.lock().unwrap() = Some(vec![
+            repository_object("first", &format!("{}rfhold/repo", origin.as_str())),
+            repository_object("second", &format!("{}rfhold/repo.git", origin.as_str())),
+        ]);
+        assert!(matches!(
+            client.repository_catalog().await,
+            Err(Error::InvalidResponse)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn run_list_filters_revision_and_main_ref_then_returns_newest_one_with_split_truncation()
+    {
+        let (origin, state, server) = mock_server().await;
+        *state.run_items.lock().unwrap() = vec![
+            run_object("older", "2026-01-01T00:00:00Z", "main", "abc", "True"),
+            run_object(
+                "newer",
+                "2026-01-02T00:00:00Z",
+                "refs/heads/main",
+                "abc",
+                "True",
+            ),
+            run_object("wrong-sha", "2026-01-03T00:00:00Z", "main", "def", "True"),
+        ];
+        let client = TektonClient::for_test(origin, Duration::from_secs(1));
+        let result = client
+            .runs(&RunListQuery {
+                repository: "rfhold/repo".to_owned(),
+                workflow: Some("build".to_owned()),
+                branch: Some("main".to_owned()),
+                revision: Some("abc".to_owned()),
+                status: Some("succeeded".to_owned()),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result["result"][0]["id"], "pipelines-as-code/newer");
+        assert_eq!(result["result"][0]["branch"], "refs/heads/main");
+        assert_eq!(result["result"][0]["repository"], "rfhold/repo");
+        assert_eq!(result["source_truncated"], false);
+        assert_eq!(result["result_truncated"], true);
+        assert_eq!(result["truncated"], true);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn wait_returns_terminal_transition_and_latest_timeout_state() {
+        let (origin, state, server) = mock_server().await;
+        let client = TektonClient::for_test(origin, Duration::from_secs(1));
+        let query = RunWaitQuery {
+            run_id: "pipelines-as-code/run".to_owned(),
+            timeout_seconds: 1,
+        };
+
+        state.run_responses.lock().unwrap().push_back(run_object(
+            "run",
+            "2026-01-01T00:00:00Z",
+            "main",
+            "terminal",
+            "True",
+        ));
+        let terminal = client.wait(&query).await.unwrap();
+        assert_eq!(terminal["mode"], "wait");
+        assert_eq!(terminal["result_type"], "run");
+        assert_eq!(terminal["result"]["status"], "succeeded");
+        assert_eq!(terminal["timed_out"], false);
+
+        *state.run_responses.lock().unwrap() = VecDeque::from([
+            run_object("run", "2026-01-01T00:00:00Z", "main", "first", "Unknown"),
+            run_object("run", "2026-01-01T00:00:00Z", "main", "second", "True"),
+        ]);
+        let transitioned = client.wait(&query).await.unwrap();
+        assert_eq!(transitioned["result"]["revision"], "second");
+        assert_eq!(transitioned["timed_out"], false);
+
+        *state.run_responses.lock().unwrap() = VecDeque::from([
+            run_object("run", "2026-01-01T00:00:00Z", "main", "first", "Unknown"),
+            run_object("run", "2026-01-01T00:00:00Z", "main", "latest", "Unknown"),
+        ]);
+        let timed_out = client.wait(&query).await.unwrap();
+        assert_eq!(timed_out["result"]["revision"], "latest");
+        assert_eq!(timed_out["result"]["status"], "running");
+        assert_eq!(timed_out["timed_out"], true);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn wait_fails_closed_on_relationship_mismatch() {
+        let (origin, state, server) = mock_server().await;
+        let client = TektonClient::for_test(origin, Duration::from_secs(1));
+        let mut mismatched = run_object("run", "2026-01-01T00:00:00Z", "main", "second", "True");
+        mismatched["metadata"]["labels"][REPOSITORY_LABEL] = json!("other-cr");
+        *state.run_responses.lock().unwrap() = VecDeque::from([
+            run_object("run", "2026-01-01T00:00:00Z", "main", "first", "Unknown"),
+            mismatched,
+        ]);
+        let result = client
+            .wait(&RunWaitQuery {
+                run_id: "pipelines-as-code/run".to_owned(),
+                timeout_seconds: 1,
+            })
+            .await;
+        assert_eq!(result, Err(Error::NotFound));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn wait_timeout_final_read_revalidates_changed_repository_relationship() {
+        let (origin, state, server) = mock_server().await;
+        let client = TektonClient::for_test(origin.clone(), Duration::from_secs(1));
+        state.run_responses.lock().unwrap().push_back(run_object(
+            "run",
+            "2026-01-01T00:00:00Z",
+            "main",
+            "still-running",
+            "Unknown",
+        ));
+        state.stall_run_request.store(3, Ordering::SeqCst);
+        *state.replace_repository_on_run_request.lock().unwrap() = Some((
+            4,
+            vec![repository_object(
+                "pac-rfhold-repo",
+                &format!("{}other/repo", origin.as_str()),
+            )],
+        ));
+
+        let result = client
+            .wait(&RunWaitQuery {
+                run_id: "pipelines-as-code/run".to_owned(),
+                timeout_seconds: 1,
+            })
+            .await;
+        assert_eq!(state.run_request_count.load(Ordering::SeqCst), 4);
+        assert_eq!(result, Err(Error::NotFound));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn wait_capacity_is_separate_and_cancellation_releases_its_permit() {
+        let (origin, state, server) = mock_server().await;
+        state.run_responses.lock().unwrap().push_back(run_object(
+            "run",
+            "2026-01-01T00:00:00Z",
+            "main",
+            "abc",
+            "Unknown",
+        ));
+        let client = TektonClient::for_test(origin, Duration::from_secs(1));
+        let query = RunWaitQuery {
+            run_id: "pipelines-as-code/run".to_owned(),
+            timeout_seconds: 300,
+        };
+        let mut waits = Vec::new();
+        for _ in 0..4 {
+            let client = client.clone();
+            let query = query.clone();
+            waits.push(tokio::spawn(async move { client.wait(&query).await }));
+        }
+        for _ in 0..100 {
+            if client.waiters.available_permits() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(client.waiters.available_permits(), 0);
+        for _ in 0..100 {
+            if client.permits.available_permits() == 4 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(client.permits.available_permits(), 4);
+        assert_eq!(client.wait(&query).await, Err(Error::CapacityExhausted));
+
+        waits.pop().unwrap().abort();
+        for _ in 0..100 {
+            if client.waiters.available_permits() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(client.waiters.available_permits(), 1);
+        let replacement = {
+            let client = client.clone();
+            let query = query.clone();
+            tokio::spawn(async move { client.wait(&query).await })
+        };
+        for wait in waits {
+            wait.abort();
+        }
+        replacement.abort();
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn dispatch_sends_exact_pac_body_once_and_marks_timeout_uncertain() {
         let (origin, state, server) = mock_server().await;
         let client = TektonClient::for_test(origin, Duration::from_millis(50));
         let catalog = client
             .workflows(&WorkflowListQuery {
-                repository: Some("pipelines-as-code/pac-rfhold-repo".to_owned()),
+                repository: Some("rfhold/repo".to_owned()),
                 limit: 10,
             })
             .await
             .unwrap();
         let workflow = catalog["result"][0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(catalog["result"][0]["repository"], "rfhold/repo");
+        assert!(!workflow.contains("pac-rfhold-repo"));
         let command = WorkflowDispatchCommand {
-            repository: "pipelines-as-code/pac-rfhold-repo".to_owned(),
+            repository: "rfhold/repo".to_owned(),
             workflow,
             reference: "main".to_owned(),
             params: BTreeMap::from([("image".to_owned(), "example".to_owned())]),
         };
         let result = client.dispatch(&command).await.unwrap();
         assert_eq!(result["status"], "accepted");
+        assert_eq!(result["repository"], "rfhold/repo");
         assert_eq!(
             state.pac_bodies.lock().unwrap().as_slice(),
             &[json!({
@@ -1386,6 +1859,49 @@ spec: {}
             Err(Error::MutationOutcomeUnknown)
         );
         assert_eq!(state.pac_bodies.lock().unwrap().len(), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn workflow_partial_failures_and_rerun_results_use_canonical_relationships() {
+        let (origin, state, server) = mock_server().await;
+        *state.repository_items.lock().unwrap() = Some(vec![
+            repository_object("pac-rfhold-repo", &format!("{}rfhold/repo", origin)),
+            repository_object("pac-other", &format!("{}other/missing", origin)),
+        ]);
+        state.run_responses.lock().unwrap().push_back(run_object(
+            "run",
+            "2026-01-01T00:00:00Z",
+            "main",
+            "abc",
+            "Unknown",
+        ));
+        let client = TektonClient::for_test(origin, Duration::from_secs(1));
+        let workflows = client
+            .workflows(&WorkflowListQuery {
+                repository: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(workflows["result"][0]["repository"], "rfhold/repo");
+        assert_eq!(
+            workflows["partial_failures"],
+            json!([{"repository":"other/missing","code":"discovery_failed"}])
+        );
+
+        let rerun = client
+            .rerun(&RunRerunCommand {
+                run_id: "pipelines-as-code/run".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(rerun["repository"], "rfhold/repo");
+        assert!(rerun["workflow"].as_str().unwrap().starts_with("workflow/"));
+        assert_eq!(
+            state.pac_bodies.lock().unwrap()[0]["repository"],
+            "pac-rfhold-repo"
+        );
         server.abort();
     }
 

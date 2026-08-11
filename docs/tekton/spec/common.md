@@ -10,7 +10,7 @@ The authenticated MCP server exposes two progressive tools:
 
 | Tool | Actions | MCP annotations |
 | --- | --- | --- |
-| `tekton_query` | `repository.list`, `workflow.list`, `run.list`, `run.get`, `task.list`, `task.logs` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
+| `tekton_query` | `repository.list`, `workflow.list`, `run.list`, `run.get`, `run.wait`, `task.list`, `task.logs` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
 | `tekton_exec` | `workflow.dispatch`, `run.rerun`, `run.cancel` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` |
 
 Each tool provides progressive `help` actions, action-dependent `input`, and an optional jq-compatible `filter`. Filtering affects successful structured content only.
@@ -27,7 +27,11 @@ This choice lets every current MCP principal dispatch workflows, rerun runs, and
 
 Kubernetes PAC `Repository` custom resources in namespace `pipelines-as-code` define repository authority. Forgejo organization enumeration does not define or expand that authority.
 
-Repository results include the exact `pipelines-as-code/<name>` custom-resource identity. Run and task IDs use exact `<namespace>/<name>` Kubernetes identities.
+Every external repository key uses exact canonical `org/repo` form. The [repository specification](repositories-workflows.md#repository-list) defines derivation, validation, duplicate handling, and the hard-cut alias policy.
+
+PAC custom-resource names remain internal authority and adapter values. Callers cannot use them as selectors, and results cannot use them as relationship values.
+
+Run and task IDs use exact `<namespace>/<name>` Kubernetes identities. Workflow IDs remain opaque `workflow/<base64url-sha256>` values.
 
 Every run and task read or mutation validates ownership against an authorized PAC repository. A caller-supplied namespace, name, label, or relationship cannot bypass that validation.
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository runtime has 105 passing Rust tests under Rust 1.96. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, and silence actions, and cleanup control.
+The repository runtime has 116 passing Rust tests under Rust 1.96: 114 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
@@ -146,12 +146,18 @@ Tests must cover the [Tekton tool specifications](../tekton/README.md), includin
 - generated help, schemas, filters, action separation, and exact MCP annotations;
 - all-`mcp:use` authorization, including access by every current MCP principal;
 - PAC `Repository` authority in fixed namespace `pipelines-as-code`;
-- exclusion of invalid repository URLs and normalization to the fixed Forgejo origin;
+- canonical `org/repo` keys from valid fixed-origin Forgejo URLs for all repository selectors and relationships, including safe unreserved percent-decoding and encoded-separator rejection;
+- internal-only PAC custom-resource names, no legacy aliases, and fail-closed duplicate canonical keys;
 - direct root `.tekton/*.yaml` and `.tekton/*.yml` discovery only;
 - fixed fanout, file, byte, YAML document, result, step, tail, and log-byte limits;
 - partial workflow-discovery failures and every `PipelineRun` definition and event;
 - triggerable status only for exact `incoming` events;
+- workflow ID rotation from canonical repository hash input and required client rediscovery;
 - namespace-qualified run and task IDs, ownership validation, reverse chronology, and output allowlists;
+- exact workflow, status, and revision run filters plus equivalent `main` and `refs/heads/main` branch labels;
+- newest matching `run.list` lookup with `limit: 1` and separate source, result, and aggregate truncation fields;
+- bounded `run.wait` timeout, fixed polling, terminal and deadline results, cancellation, and separate waiter capacity;
+- wait-time upstream permit release, output-time ownership revalidation, and exclusion of task details and logs;
 - task-log truncation metadata, MCP-held secret redaction, and no telemetry log content;
 - dispatch validation, fixed PAC POST `/incoming`, caller-control rejection, and 2xx acceptance semantics;
 - safe rerun replay of the prior branch and parameters;

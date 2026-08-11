@@ -8,15 +8,21 @@ The action will exclude a custom resource without a valid repository URL. This e
 
 Each result will contain:
 
-- the exact `pipelines-as-code/<name>` custom-resource identity;
-- the normalized owner and repository names; and
+- `id` as the exact canonical `org/repo` repository key;
+- the normalized organization and repository names; and
 - the normalized URL under fixed origin `https://git.holdenitdown.net`.
 
-Normalization accepts only repository URLs that resolve to that fixed Forgejo origin and one owner/repository pair. Results sort by exact PAC repository identity.
+Normalization accepts only repository URLs that resolve to that fixed Forgejo origin and one organization/repository pair. It safely percent-decodes UTF-8 path components, accepts case-preserved RFC unreserved repository characters, strips a terminal `.git`, and rejects encoded separators or other characters outside that grammar. It derives `org/repo` from the normalized pair. Every repository selector and external repository relationship uses this canonical key.
+
+PAC custom-resource names remain internal authority and adapter values. Callers cannot select repositories with those names, and results cannot expose them as relationships. No legacy repository aliases exist.
+
+Authority catalog reads follow Kubernetes continuation tokens for at most 500 source objects. The catalog fails closed if that ceiling is exceeded.
+
+If multiple valid PAC custom resources resolve to one canonical key, authority catalog construction fails closed. Results sort by canonical repository key.
 
 ## Workflow Discovery
 
-`workflow.list` first resolves an authorized PAC repository. Forgejo then reads only direct root files that match `.tekton/*.yaml` or `.tekton/*.yml` in that PAC-configured repository. Its result limit defaults to 100 and accepts values from 1 through 200.
+`workflow.list` first resolves an authorized repository from its canonical key. Forgejo then reads only direct root files that match `.tekton/*.yaml` or `.tekton/*.yml` in that PAC-configured repository. Its result limit defaults to 100 and accepts values from 1 through 200.
 
 The action will not recurse below `.tekton/`. It will not read workflow definitions from another origin, organization enumeration, or an unregistered repository.
 
@@ -28,13 +34,15 @@ A workflow event will be triggerable only when its event value equals exact stri
 
 Workflow identity binds these source facts:
 
-- the PAC `Repository` custom-resource identity;
+- the canonical repository key;
 - the repository revision used for discovery;
 - the direct `.tekton` file path;
 - the zero-based YAML document index; and
 - the `PipelineRun` definition identity.
 
-Events are grouped on that definition result. The serialized ID is `workflow/<base64url-sha256>` over the PAC repository identity, default-branch revision, file path, zero-based YAML document index, and definition identity. Dispatch repeats discovery and requires an exact ID match against the same authorized source facts.
+Events are grouped on that definition result. The serialized ID is `workflow/<base64url-sha256>` over the canonical repository key, default-branch revision, file path, zero-based YAML document index, and definition identity. Dispatch repeats discovery and requires an exact ID match against the same authorized source facts.
+
+The canonical repository key changes the hash input from the prior internal identity. Workflow IDs therefore rotate, and clients must rediscover workflows before dispatch.
 
 ## Forgejo Boundary
 

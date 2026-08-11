@@ -32,7 +32,7 @@ impl RepositoryListInput {
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowListInput {
-    /// Exact `pipelines-as-code/<name>` PAC Repository identity.
+    /// Exact `org/repo` repository identity returned by `repository.list`.
     pub repository: Option<String>,
     /// Maximum workflows to return, from 1 through 200.
     pub limit: Option<u16>,
@@ -49,7 +49,7 @@ impl WorkflowListInput {
         if self
             .repository
             .as_ref()
-            .is_some_and(|value| !valid_id(value))
+            .is_some_and(|value| !valid_repository_key(value))
         {
             return Err(());
         }
@@ -63,12 +63,14 @@ impl WorkflowListInput {
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunListInput {
-    /// Exact PAC Repository identity returned by `repository.list`.
+    /// Exact `org/repo` repository identity returned by `repository.list`.
     pub repository: String,
     /// Optional workflow definition name.
     pub workflow: Option<String>,
     /// Optional exact branch or ref recorded by PAC.
     pub branch: Option<String>,
+    /// Optional exact normalized PAC revision SHA.
+    pub revision: Option<String>,
     /// Optional normalized status: running, succeeded, failed, or cancelled.
     pub status: Option<String>,
     /// Maximum runs to return, from 1 through 100.
@@ -80,19 +82,24 @@ pub struct RunListQuery {
     pub repository: String,
     pub workflow: Option<String>,
     pub branch: Option<String>,
+    pub revision: Option<String>,
     pub status: Option<String>,
     pub limit: u16,
 }
 
 impl RunListInput {
     pub fn validate(self) -> Result<RunListQuery, ()> {
-        if !valid_id(&self.repository)
+        if !valid_repository_key(&self.repository)
             || self
                 .workflow
                 .as_ref()
                 .is_some_and(|value| !valid_text(value, 253))
             || self
                 .branch
+                .as_ref()
+                .is_some_and(|value| !valid_text(value, MAX_REF_BYTES))
+            || self
+                .revision
                 .as_ref()
                 .is_some_and(|value| !valid_text(value, MAX_REF_BYTES))
             || self.status.as_ref().is_some_and(|value| {
@@ -108,8 +115,36 @@ impl RunListInput {
             repository: self.repository,
             workflow: self.workflow,
             branch: self.branch,
+            revision: self.revision,
             status: self.status,
             limit: bounded_limit(self.limit, 50, 100)?,
+        })
+    }
+}
+
+#[derive(Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunWaitInput {
+    /// Exact `<namespace>/<name>` PipelineRun identity.
+    pub run_id: String,
+    /// Maximum wait in seconds, from 1 through 300. Defaults to 60.
+    pub timeout_seconds: Option<u16>,
+}
+
+#[derive(Clone)]
+pub struct RunWaitQuery {
+    pub run_id: String,
+    pub timeout_seconds: u16,
+}
+
+impl RunWaitInput {
+    pub fn validate(self) -> Result<RunWaitQuery, ()> {
+        if !valid_namespaced_id(&self.run_id) {
+            return Err(());
+        }
+        Ok(RunWaitQuery {
+            run_id: self.run_id,
+            timeout_seconds: bounded_limit(self.timeout_seconds, 60, 300)?,
         })
     }
 }
@@ -217,7 +252,7 @@ impl TaskLogsInput {
 #[derive(Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowDispatchInput {
-    /// Exact PAC Repository identity returned by `repository.list`.
+    /// Exact `org/repo` repository identity returned by `repository.list`.
     pub repository: String,
     /// Opaque workflow identity returned by `workflow.list`.
     pub workflow: String,
@@ -239,7 +274,7 @@ pub struct WorkflowDispatchCommand {
 
 impl WorkflowDispatchInput {
     pub fn validate(self) -> Result<WorkflowDispatchCommand, ()> {
-        if !valid_id(&self.repository)
+        if !valid_repository_key(&self.repository)
             || !valid_text(&self.workflow, MAX_IDENTIFIER_BYTES)
             || !valid_text(&self.reference, MAX_REF_BYTES)
             || !valid_params(&self.params)
@@ -306,10 +341,19 @@ fn bounded_limit(value: Option<u16>, default: u16, maximum: u16) -> Result<u16, 
     (value > 0 && value <= maximum).then_some(value).ok_or(())
 }
 
-fn valid_id(value: &str) -> bool {
-    valid_text(value, MAX_IDENTIFIER_BYTES)
+fn valid_repository_key(value: &str) -> bool {
+    let mut parts = value.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(owner), Some(repository), None)
+            if valid_repository_component(owner) && valid_repository_component(repository)
+    )
+}
+
+pub(super) fn valid_repository_component(value: &str) -> bool {
+    valid_text(value, 253)
         && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '/' | '-' | '.')
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_' | '~')
         })
 }
 
@@ -362,10 +406,80 @@ mod tests {
             .is_ok()
         );
         assert!(
+            RunWaitInput {
+                run_id: "pipelines-as-code/run".to_owned(),
+                timeout_seconds: Some(300),
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            RunWaitInput {
+                run_id: "pipelines-as-code/run".to_owned(),
+                timeout_seconds: Some(301),
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
             RunGetInput {
                 run_id: "ambiguous".to_owned()
             }
             .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repository_and_run_filters_are_strict() {
+        for repository in ["org", "org/repo/extra", "/repo", "org/", "org/re%2Fpo"] {
+            assert!(
+                WorkflowListInput {
+                    repository: Some(repository.to_owned()),
+                    limit: None,
+                }
+                .validate()
+                .is_err(),
+                "accepted {repository}"
+            );
+        }
+        for repository in ["my_org/my_repo", "My~Org/Repo_Name"] {
+            assert!(
+                WorkflowListInput {
+                    repository: Some(repository.to_owned()),
+                    limit: None,
+                }
+                .validate()
+                .is_ok(),
+                "rejected {repository}"
+            );
+        }
+        let query = RunListInput {
+            repository: "rfhold/repo".to_owned(),
+            workflow: None,
+            branch: Some("refs/heads/main".to_owned()),
+            revision: Some("abc123".to_owned()),
+            status: None,
+            limit: Some(1),
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(query.revision.as_deref(), Some("abc123"));
+        assert_eq!(query.limit, 1);
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        assert!(
+            serde_json::from_value::<RunListInput>(serde_json::json!({
+                "repository":"rfhold/repo", "unknown":true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<RunWaitInput>(serde_json::json!({
+                "run_id":"pipelines-as-code/run", "unknown":true
+            }))
             .is_err()
         );
     }

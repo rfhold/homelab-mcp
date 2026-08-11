@@ -12,11 +12,11 @@ Timeout, transport failure, MCP cancellation, and response failure after send ca
 
 ## Workflow Dispatch
 
-`workflow.dispatch` validates the authorized repository, exact triggerable workflow identity, Git reference, and bounded parameters before send. Only a workflow definition with an event whose exact value is `incoming` can dispatch. References are nonblank, control-free, and at most 512 bytes. At most 20 string parameters are accepted; keys are nonblank and at most 128 bytes, and values are at most 4,096 bytes.
+`workflow.dispatch` validates the repository selector under the [canonical repository key contract](repositories-workflows.md#repository-list). It also validates the exact triggerable workflow identity, Git reference, and bounded parameters before send. Only a workflow definition with an event whose exact value is `incoming` can dispatch. References are nonblank, control-free, and at most 512 bytes. At most 20 string parameters are accepted; keys are nonblank and at most 128 bytes, and values are at most 4,096 bytes.
 
 The action will send one POST to the fixed PAC controller internal route `/incoming`. The body will contain the server-held PAC secret and validated dispatch data.
 
-The caller cannot control the URL, method, headers, secret, namespace, PAC custom-resource identity, or repository mapping. The service will reject caller input that conflicts with those fixed values.
+The caller cannot control the URL, method, headers, secret, namespace, internal PAC custom-resource identity, or repository mapping. The service will reject caller input that conflicts with those fixed values.
 
 Any HTTP 2xx response means that PAC accepted the request. Acceptance does not prove that PAC created a `PipelineRun` or that the run succeeded.
 
@@ -24,7 +24,7 @@ Any HTTP 2xx response means that PAC accepted the request. Acceptance does not p
 
 `run.rerun` resolves an owned prior `PipelineRun` by exact namespace-qualified ID. It safely replays that run's prior branch and string parameters through the fixed PAC `/incoming` route under the same bounds as dispatch.
 
-The caller cannot replace the prior branch, parameters, repository, workflow, namespace, or PAC identity. A rerun uses the same dispatch validation and outcome rules as `workflow.dispatch`.
+The caller cannot replace the prior branch, parameters, canonical repository relationship, workflow, namespace, or internal PAC identity. A rerun uses the same dispatch validation and outcome rules as `workflow.dispatch`.
 
 ## Run Cancel
 

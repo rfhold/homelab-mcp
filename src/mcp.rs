@@ -27,8 +27,8 @@ use crate::{
         Error as TektonError,
         actions::{
             RepositoryListInput, RunCancelCommand, RunCancelInput, RunGetInput, RunListInput,
-            RunRerunCommand, RunRerunInput, TaskListInput, TaskLogsInput, WorkflowDispatchCommand,
-            WorkflowDispatchInput, WorkflowListInput,
+            RunRerunCommand, RunRerunInput, RunWaitInput, TaskListInput, TaskLogsInput,
+            WorkflowDispatchCommand, WorkflowDispatchInput, WorkflowListInput,
         },
     },
     services::Services,
@@ -515,6 +515,27 @@ impl HomelabMcp {
         })
     }
 
+    /// Wait up to a bounded deadline for one owned PipelineRun to become terminal.
+    #[action(tool = "tekton_query", name = "run.wait")]
+    async fn tekton_run_wait(
+        &self,
+        input: RunWaitInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.tekton.wait(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => tekton_result(output),
+            Err(error) => tekton_tool_error("run", error),
+        })
+    }
+
     /// List owned TaskRuns for an exact PipelineRun.
     #[action(tool = "tekton_query", name = "task.list")]
     async fn tekton_tasks(
@@ -724,8 +745,10 @@ mod tests {
     use crate::integrations::grafana::GrafanaClient;
     use axum::{
         Json, Router,
+        body::Body,
         extract::State,
-        http::HeaderMap,
+        http::{HeaderMap, Request as HttpRequest},
+        response::IntoResponse,
         routing::{get, post},
     };
     use mcp::{
@@ -1510,6 +1533,7 @@ mod tests {
             "workflow.list",
             "run.list",
             "run.get",
+            "run.wait",
             "task.list",
             "task.logs",
         ] {
@@ -1527,6 +1551,45 @@ mod tests {
                 "missing {action}"
             );
         }
+        let (_, tekton_run_help) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "tekton-run-help",
+                json!({
+                    "name":TEKTON_QUERY_TOOL_NAME,
+                    "arguments":{"action":"help.run","filter":".actions"}
+                }),
+            ),
+        )
+        .await;
+        let tekton_run_actions = tekton_run_help["result"]["structuredContent"]["result"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            tekton_run_actions
+                .iter()
+                .map(|action| action["action"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["run.list", "run.get", "run.wait"]
+        );
+        let run_list_schema = &tekton_run_actions
+            .iter()
+            .find(|action| action["action"] == "run.list")
+            .unwrap()["input_schema"];
+        assert_eq!(run_list_schema["additionalProperties"], false);
+        assert!(run_list_schema["properties"].get("revision").is_some());
+        let run_wait_schema = &tekton_run_actions
+            .iter()
+            .find(|action| action["action"] == "run.wait")
+            .unwrap()["input_schema"];
+        assert_eq!(run_wait_schema["additionalProperties"], false);
+        assert_eq!(run_wait_schema["required"], json!(["run_id"]));
+        assert!(
+            run_wait_schema["properties"]
+                .get("timeout_seconds")
+                .is_some()
+        );
         assert_eq!(
             query_tool["annotations"],
             json!({
@@ -1916,6 +1979,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_wait_dispatches_through_progressive_mcp_with_strict_schema() {
+        let repository_url = Arc::new(Mutex::new(String::new()));
+        let upstream = Router::new()
+            .fallback(
+                |State(repository_url): State<Arc<Mutex<String>>>,
+                 request: HttpRequest<Body>| async move {
+                    match request.uri().path() {
+                        "/apis/pipelinesascode.tekton.dev/v1alpha1/namespaces/pipelines-as-code/repositories" => Json(json!({
+                            "items":[{
+                                "metadata":{"name":"pac-rfhold-repo"},
+                                "spec":{"url":repository_url.lock().unwrap().clone()}
+                            }],
+                            "metadata":{}
+                        }))
+                        .into_response(),
+                        "/apis/tekton.dev/v1/namespaces/pipelines-as-code/pipelineruns/run" => Json(json!({
+                            "metadata":{
+                                "name":"run",
+                                "labels":{
+                                    "pipelinesascode.tekton.dev/repository":"pac-rfhold-repo",
+                                    "pipelinesascode.tekton.dev/sha":"abc"
+                                }
+                            },
+                            "status":{"conditions":[{
+                                "type":"Succeeded", "status":"True", "reason":"Succeeded"
+                            }]}
+                        }))
+                        .into_response(),
+                        _ => StatusCode::NOT_FOUND.into_response(),
+                    }
+                },
+            )
+            .with_state(Arc::clone(&repository_url));
+        let (upstream_origin, upstream_task) = serve(upstream).await;
+        *repository_url.lock().unwrap() = format!("{upstream_origin}/rfhold/repo.git");
+        let origin = url::Url::parse(&format!("{upstream_origin}/")).unwrap();
+        let handler = Arc::new(HomelabMcp {
+            services: Arc::new(Services {
+                grafana: GrafanaClient::for_test(origin.clone(), std::time::Duration::from_secs(1)),
+                tekton: crate::integrations::tekton::TektonClient::for_test(
+                    origin,
+                    std::time::Duration::from_secs(1),
+                ),
+            }),
+        });
+        let (mcp_origin, mcp_task) = serve(streamable_http_router(handler)).await;
+        let (_, response) = post_mcp(
+            &format!("{mcp_origin}/mcp"),
+            request(
+                "tools/call",
+                "run-wait",
+                json!({
+                    "name":TEKTON_QUERY_TOOL_NAME,
+                    "arguments":{
+                        "action":"run.wait",
+                        "input":{"run_id":"pipelines-as-code/run","timeout_seconds":1}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], Value::Null, "{response}");
+        let result = &response["result"]["structuredContent"];
+        assert_eq!(result["mode"], "wait");
+        assert_eq!(result["result_type"], "run");
+        assert_eq!(result["result"]["repository"], "rfhold/repo");
+        assert_eq!(result["timed_out"], false);
+
+        upstream_task.abort();
+        mcp_task.abort();
+    }
+
+    #[tokio::test]
     async fn malformed_shapes_actions_filters_and_semantic_failures_keep_error_boundary() {
         let (handler, _, grafana_task) = test_handler().await;
         let (origin, mcp_task) = serve(streamable_http_router(handler)).await;
@@ -1951,6 +2087,13 @@ mod tests {
             (
                 QUERY_TOOL_NAME,
                 json!({"action":"alert-rule.list","input":{"limit":1,"extra":true}}),
+            ),
+            (
+                TEKTON_QUERY_TOOL_NAME,
+                json!({
+                    "action":"run.wait",
+                    "input":{"run_id":"pipelines-as-code/run","extra":true}
+                }),
             ),
             (
                 EXEC_TOOL_NAME,

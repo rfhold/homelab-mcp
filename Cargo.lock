@@ -1125,6 +1125,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "percent-encoding",
  "pyroscope",
  "reqwest",
  "reqwest-middleware",
