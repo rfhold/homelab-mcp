@@ -4,5 +4,5 @@ mod telemetry;
 
 pub mod actions;
 
-pub use client::GrafanaClient;
+pub use client::{GrafanaClient, RenderedImage};
 pub use error::Error;

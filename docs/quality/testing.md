@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository runtime has a passing Rust suite under Rust 1.96. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana read and silence actions, and cleanup control.
+The repository runtime has 105 passing Rust tests under Rust 1.96. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, and silence actions, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
@@ -46,8 +46,8 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Generic Kuri `mcp` | 111 standard all-feature tests pass; both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly. |
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
-| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, two-tool listing and annotations, generated help, filters, calls, and safe JSON-RPC/tool-error boundaries. |
-| Grafana actions | Datasource queries, alert-rule, alert-instance, and silence reads, silence creation, input bounds, normalized results, fixed routes, redirects, read and mutation errors, timeout, capacity, and permit release against mock HTTP servers. |
+| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, five-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
+| Grafana actions | Datasource queries, dashboard inventory and PNG rendering, alerting reads and silence creation, bounds, normalization, fixed routes, redirects, semantic errors, timeout, capacity, and permit release against mock HTTP servers. |
 | Pulumi policy | Immutable images, HTTPS origins, wrapping-key versions, Editor service-account declaration, and stack configuration safety. |
 | Pulumi topology | Namespace, backups, CNPG, Authentik, Grafana, Secrets, workload hardening, network, Service, and route. |
 | Current container runtime | Multi-architecture image delivery succeeded; the preview pod is ready with zero restarts. |
@@ -61,7 +61,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Hosted OAuth integration | Run complete authorization-code and refresh paths, including local token issuance and validation, beyond local consent, challenge, and mocked generic components. |
 | Live Authentik integration | Exercise OIDC discovery, browser login, callback validation, and transaction completion against the configured provider. |
 | Kuri-client integration | Exercise DCR, CIMD, native loopback authorization, token refresh, exact resource binding, and calls to both MCP tools. |
-| Live Grafana integration | Exercise controlled datasource reads, alert-rule, alert-instance, and silence reads, and silence creation without exposing credentials. Verify that Editor permits only the intended operation. |
+| Live Grafana integration | Exercise controlled datasource and dashboard reads, rendering, alerting reads, and silence creation without exposing credentials. Verify the renderer prerequisites and intended Editor operations. |
 | Container runtime | Basic deployed startup is verified; complete the full browser OAuth and Grafana path in the deployed container. |
 | Preview end-to-end | Prove browser login, local token issuance and refresh, authenticated `/mcp`, and controlled Grafana datasource and alerting reads and silence creation on preview. |
 
@@ -110,9 +110,17 @@ Tests must cover the [Grafana tool specifications](../grafana-query/README.md), 
 - every stable semantic error code and retryable value; and
 - JSON-RPC errors for malformed protocol, tool shape, action, and filter requests.
 
+Dashboard and render tests additionally cover:
+
+- `dashboard.list` and `dashboard.get` schemas, exact routes, deterministic query order, bounded normalization, recursive panel flattening, numeric and string panel IDs, strict variable/panel/output caps, and omission of raw dashboard internals;
+- exactly flat `grafana_render` actions `dashboard` and `panel`, slugless routes, server-owned parameters, render-only capacity, complete timeout, and permit release;
+- exact status mapping, PNG MIME parameters, streaming size and signature validation, body-read safety, lowercase SHA-256, redacted image `Debug`, and standard-padded Base64;
+- text plus typed MCP image parsing through the pinned Kuri revision, structured metadata omissions, and filters that preserve image content; and
+- fixed render telemetry labels excluding UIDs, panel IDs, ranges, dimensions, timezones, variables, digests, URLs, bodies, images, and credentials.
+
 Alerting tests must additionally cover:
 
-- both tool annotations, seven query actions, and the single exec action;
+- all three Grafana tool annotations, nine query actions, two render actions, and the single exec action;
 - the all-`mcp:use` authorization boundary and rejection of actions sent to the wrong tool;
 - alert-rule limits, fixed provisioning route, bounded summaries, and the documented conservative URL-field exclusions;
 - alert-instance matcher grammar and byte limits, repeated server-built filters, list limits, status booleans, and safe normalized maps;
@@ -123,7 +131,7 @@ Alerting tests must additionally cover:
 
 ## Resource and Failure Coverage
 
-Tests must enforce the shared 30-second timeout, concurrency cap of four, 8192-byte URL cap, and 4 MiB response cap, plus action-specific query and result limits.
+Tests must enforce the shared 30-second timeout, concurrency cap of four, 8192-byte URL cap, and 4 MiB response cap, plus action-specific query and result limits. Rendering additionally enforces a 25-second complete timeout and two immediate render permits while retaining the global permit.
 
 Capacity tests must prove immediate failure with retryable `capacity_exhausted`. They must prove that a rejected call never reaches Grafana.
 

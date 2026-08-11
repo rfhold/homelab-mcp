@@ -11,6 +11,9 @@ pub enum Error {
     MutationOutcomeUnknown,
     UpstreamUnavailable,
     InvalidResponse,
+    RenderTimeout,
+    RenderRejected,
+    RenderInvalidResponse,
 }
 
 impl Error {
@@ -49,6 +52,21 @@ impl Error {
             Self::InvalidResponse => (
                 "invalid_response",
                 "Grafana returned an invalid response.".to_owned(),
+                false,
+            ),
+            Self::RenderTimeout => (
+                "render_timeout",
+                "The Grafana render timed out.".to_owned(),
+                true,
+            ),
+            Self::RenderRejected => (
+                "render_rejected",
+                "Grafana rejected the render request.".to_owned(),
+                false,
+            ),
+            Self::RenderInvalidResponse => (
+                "render_invalid_response",
+                "Grafana returned an invalid render response.".to_owned(),
                 false,
             ),
         };

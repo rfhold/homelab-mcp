@@ -18,7 +18,7 @@ Each `/mcp` request stands alone after token validation. The service requires no
 
 Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:use`.
 
-The same `mcp:use` authorization permits every implemented Grafana action, including operationally consequential `silence.create`. It will also permit every planned `tekton_query` and `tekton_exec` action. Every current MCP principal will be able to dispatch workflows, rerun runs, and cancel active runs. The design has no separate read-only or mutation scope.
+The same `mcp:use` authorization permits every implemented Grafana query, image-rendering, and exec action, including operationally consequential `silence.create`. It also permits every Tekton query and exec action. The design has no separate read-only, image, or mutation scope.
 
 Authentik provides browser identity only. Authentik access tokens, ID tokens, and other Authentik credentials never authorize `/mcp`.
 
@@ -116,9 +116,9 @@ Database transactions must enforce expiry and atomic single-use behavior for aut
 
 - The service must read Authentik, PostgreSQL, Grafana, and OAuth key material only from runtime secret sources.
 - Tekton credentials come from separate runtime secret sources. They include the Forgejo token, PAC input secret, and projected Kubernetes token.
-- The service must send the Grafana token only in an upstream `Authorization` header.
+- The service must send the shared Grafana token only in an upstream `Authorization` header for query, render, and exec requests.
 - The worktree configures the shared Grafana service account with Editor privileges because the same server-held token performs reads and creates silences; this promotion is not applied or verified live.
-- Browser URLs, redirects, logs, traces, MCP content, health responses, and OAuth errors must not contain secret values.
+- Browser URLs, redirects, logs, traces, render metadata, health responses, and OAuth errors must not contain secret values. MCP image content contains only validated PNG bytes and excludes the token, origin, URL, headers, and template variables from metadata.
 - Tekton MCP results, telemetry, and errors exclude MCP-held secret values. Task logs retain the documented residual risk for arbitrary workload secrets.
 - The service must not persist plaintext OAuth signing keys.
 - Build output and container layers must not contain private Git or provider credentials.

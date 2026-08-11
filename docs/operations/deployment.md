@@ -61,7 +61,9 @@ The deployed service issues local ES256 access tokens and uses Authentik only fo
 
 PostgreSQL holds generic OAuth/OIDC state and encrypted signing material in the `mcp` schema. Migrations V1-V3 own hosted OAuth, signing, and registration state; V4 adds one-shot OIDC attempts.
 
-The Grafana client sends its token only in the `Authorization` header. It uses fixed datasource and alerting API routes with disabled redirects. Callers cannot select the origin, token, path, datasource, headers, or method.
+The Grafana client sends its token only in the `Authorization` header. It uses fixed datasource, dashboard, render, and alerting API routes with disabled redirects. Callers cannot select the origin, token, slug, organization, path, datasource, headers, or method.
+
+Grafana rendering requires Grafana 13.1.1 and image renderer 5.7.1 deployed separately. The Kuri consumer must include model-visible image support from revision `6eebdb0` or newer, and the selected model must support images. These renderer prerequisites and live rendering have not been validated by this repository change.
 
 Runtime logs, redirects, MCP results, image layers, rendered outputs, and health responses must not expose secret values.
 
@@ -111,11 +113,11 @@ It requires locally issued `mcp:use` tokens and configures DCR, CIMD, and native
 
 Generic Kuri owns strict OIDC login, callback, one-shot transaction state, ID-token verification, the mapper seam, and hosted continuation. Homelab supplies Authentik configuration and stable issuer-plus-subject mapping.
 
-The current worktree exposes seven read-only actions through `grafana_query` and only `silence.create` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes both tools. Their canonical limits, results, and errors are defined by the [Grafana tool specifications](../grafana-query/README.md). The deployed preview revision predates the alerting expansion.
+The current worktree exposes nine read-only actions through `grafana_query`, two image actions through `grafana_render`, and only `silence.create` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes all three Grafana tools. Their canonical limits, results, and errors are defined by the [Grafana query](../grafana-query/README.md) and [render](../grafana-render/README.md) specifications. The deployed preview revision predates this expansion.
 
 Silence creation performs no automatic retry. If it returns `mutation_outcome_unknown`, use `silence.list` to inspect current silences before deciding whether to retry because Grafana may already have applied the request. A silence suppresses matching notifications; it does not stop rule evaluation or delete alert data.
 
-Commit `4f2e192` is deployed to preview. No deployment or live operation occurred for the alerting revision. Full browser OAuth, authenticated preview MCP calls, live alert API behavior, and Editor permission operation still require the layered evidence from the [testing document](../quality/testing.md) and explicit approval for each external action; basic public endpoint checks do not satisfy that boundary.
+Commit `4f2e192` is deployed to preview. No deployment or live operation occurred for the dashboard, rendering, and alerting expansion. Full browser OAuth, authenticated preview MCP calls, live Grafana behavior, renderer operation, and Editor permission operation still require the layered evidence from the [testing document](../quality/testing.md) and explicit approval for each external action; basic public endpoint checks do not satisfy that boundary.
 
 ## Delivery Inputs
 

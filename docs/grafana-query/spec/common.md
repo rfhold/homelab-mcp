@@ -2,15 +2,16 @@
 
 ## Status
 
-This document defines implemented worktree behavior. Local tests cover both generated tool surfaces and mock Grafana integration. The alerting revision has not been deployed or exercised against live Grafana.
+This document defines implemented worktree behavior. Local tests cover all three generated Grafana tool surfaces and mock Grafana integration. The dashboard, rendering, and alerting expansion has not been deployed or exercised against live Grafana.
 
 ## Tool Surfaces
 
-One authenticated MCP server exposes two progressive tools:
+One authenticated MCP server exposes three Grafana progressive tools:
 
 | Tool | Actions | MCP annotations |
 | --- | --- | --- |
-| `grafana_query` | `logql.query`, `promql.query`, `traceql.search`, `profile.merge`, `alert-rule.list`, `alert-instance.list`, `silence.list` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
+| `grafana_query` | `logql.query`, `promql.query`, `traceql.search`, `profile.merge`, `alert-rule.list`, `alert-instance.list`, `silence.list`, `dashboard.list`, `dashboard.get` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
+| `grafana_render` | `dashboard`, `panel` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
 | `grafana_exec` | `silence.create` | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false`, `openWorldHint: true` |
 
 `grafana_exec` is separately advertised as operationally consequential. `silence.create` is not available through `grafana_query`, and `silence.list` and the other read actions are not available through `grafana_exec`.
@@ -21,9 +22,9 @@ For a schema-valid action that returns a successful semantic `McpToolResult`, `f
 
 ## Authorization and Destination
 
-The existing `mcp:use` scope authorizes every action on both tools. There is no narrower read or mutation scope, so every principal allowed to query can also request silence creation.
+The existing `mcp:use` scope authorizes every action on all three tools. There is no narrower read, render, or mutation scope, so every principal allowed to query can also render images and request silence creation.
 
-All actions share one `GrafanaClient`, one configured Grafana origin, and one server-held Editor service-account token. Pulumi promotes this account from Viewer to Editor so the same credential can read alerting state and create silences. The caller cannot choose the origin, token, API path, datasource, headers, or HTTP method.
+All actions share one `GrafanaClient`, one configured Grafana origin, and one server-held Editor service-account token. The same credential reads dashboards, requests rendering, reads alerting state, and creates silences. The caller cannot choose the origin, token, API path, datasource, headers, or HTTP method.
 
 The token is sent only as an upstream Bearer `Authorization` header. Redirects remain disabled so credentials never reach a redirect target.
 
@@ -31,10 +32,12 @@ The token is sent only as an upstream Bearer `Authorization` header. Redirects r
 
 | Limit | Contract |
 | --- | --- |
-| Concurrent Grafana operations | Four across both tools and all actions. Permits are acquired immediately without waiting. |
+| Concurrent Grafana operations | Four across all three Grafana tools and actions. Permits are acquired immediately without waiting. |
 | Operation timeout | 30 seconds after permit acquisition, covering dispatch and the complete response read. |
 | Encoded URL | At most 8192 bytes after path join and query encoding. |
 | Decoded response body | At most 4 MiB, with or without `Content-Length`. |
+
+Rendering additionally has two immediate permits and a 25-second complete-operation timeout. It must acquire both a global and render permit; either capacity failure occurs before dispatch, and both permits are released on every completion or cancellation path. Render responses use the [separate image contract](../../grafana-render/spec/common.md).
 
 The client releases its permit after success, failure, timeout, or cancellation. Capacity exhaustion returns before contacting Grafana. No action automatically retries an upstream request.
 
@@ -90,6 +93,6 @@ All semantic messages omit matchers, comments, alert data, credentials, URLs, re
 
 Kuri generic MCP owns standard request spans and metrics. Homelab records only bounded Grafana-upstream attributes on `grafana.query` spans and request, duration, and in-flight metrics.
 
-Alerting uses fixed action values `alert-rule.list`, `alert-instance.list`, `silence.list`, and `silence.create`; modes `list` and `create`; and destination value `grafana_alerting`. Mutation outcomes add `mutation_rejected` and `mutation_outcome_unknown` to the fixed outcome allowlist. Telemetry never emits matchers, comments, alert data, URLs, credentials, query data, or upstream bodies.
+Dashboard inventory adds fixed actions `dashboard.list` and `dashboard.get`, modes `list` and `get`, and destination `grafana_dashboards`. Rendering uses fixed actions `dashboard` and `panel`, mode `render`, destination `grafana_rendering`, and outcomes `render_rejected` and `render_invalid_response`. Alerting retains its existing fixed values. Telemetry never emits UIDs, panel IDs, ranges, timezones, dimensions, variables, digests, images, matchers, comments, alert data, URLs, credentials, query data, or upstream bodies.
 
 See the [observability architecture](../../architecture/observability.md) for metric names and the complete data-safety boundary.

@@ -1,12 +1,17 @@
 mod alert_instances;
 mod alert_rules;
 mod create_silence;
+mod get_dashboard;
+mod list_dashboards;
 mod list_silences;
 mod logql;
 mod profiles;
 mod promql;
+mod render;
 mod traceql;
 
+pub use get_dashboard::{GetDashboardInput, GetDashboardQuery};
+pub use list_dashboards::{ListDashboardsInput, ListDashboardsQuery};
 #[cfg(test)]
 pub(crate) use logql::Direction;
 pub use logql::{LogqlInput, Query};
@@ -14,6 +19,11 @@ pub use logql::{LogqlInput, Query};
 pub(crate) use profiles::{DEFAULT_MAX_NODES, DEFAULT_PROFILE_TYPE};
 pub use profiles::{ProfilesInput, ProfilesQuery};
 pub use promql::{PromqlInput, PromqlQuery};
+pub(crate) use render::valid_panel_id;
+pub use render::{
+    RenderDashboardInput, RenderDashboardRequest, RenderOptions, RenderPanelInput,
+    RenderPanelRequest,
+};
 pub use traceql::{TraceqlInput, TraceqlQuery};
 
 use chrono::{DateTime, Utc};
@@ -88,6 +98,15 @@ pub(crate) fn valid_matcher_name(name: &str) -> bool {
             .next()
             .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
         && characters.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+pub(crate) fn valid_dashboard_uid(uid: &str) -> bool {
+    let mut characters = uid.bytes();
+    (1..=40).contains(&uid.len())
+        && characters
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && characters.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

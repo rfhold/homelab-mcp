@@ -5,6 +5,7 @@ use opentelemetry::trace::TraceContextExt as _;
 use reqwest::{Client, Method, Response, StatusCode, Url, redirect::Policy};
 use reqwest_middleware::ClientWithMiddleware;
 use serde_json::{Map, Value, json};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
 use tracing::{Instrument as _, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -17,9 +18,10 @@ use crate::{
 use super::{
     Error,
     actions::{
-        AlertInstancesQuery, AlertRulesQuery, CreateSilenceCommand, LabelMatcher,
-        ListSilencesQuery, Mode, ProfilesQuery, PromqlQuery, Query, SilenceState, TraceqlQuery,
-        valid_matcher_name,
+        AlertInstancesQuery, AlertRulesQuery, CreateSilenceCommand, GetDashboardQuery,
+        LabelMatcher, ListDashboardsQuery, ListSilencesQuery, Mode, ProfilesQuery, PromqlQuery,
+        Query, RenderDashboardRequest, RenderOptions, RenderPanelRequest, SilenceState,
+        TraceqlQuery, valid_matcher_name, valid_panel_id,
     },
     telemetry::{GrafanaMetricsGuard, request_outcome},
 };
@@ -27,6 +29,11 @@ use super::{
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_URL_BYTES: usize = 8192;
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DASHBOARD_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_DASHBOARD_VARIABLES: usize = 100;
+const MAX_DASHBOARD_PANELS: usize = 500;
+const RENDER_TIMEOUT: Duration = Duration::from_secs(25);
+const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const MAX_SAFE_MAP_ENTRIES: usize = 64;
 const MAX_SAFE_KEY_BYTES: usize = 128;
 const MAX_SAFE_VALUE_BYTES: usize = 4096;
@@ -40,7 +47,7 @@ enum OperationKind {
 
 struct UpstreamRequest {
     method: Method,
-    path: &'static str,
+    path: String,
     parameters: Vec<(&'static str, String)>,
     body: Option<Value>,
 }
@@ -51,7 +58,9 @@ pub struct GrafanaClient {
     token: Secret,
     client: ClientWithMiddleware,
     permits: Arc<Semaphore>,
+    render_permits: Arc<Semaphore>,
     timeout: Duration,
+    render_timeout: Duration,
 }
 
 impl GrafanaClient {
@@ -70,13 +79,17 @@ impl GrafanaClient {
             token,
             client: traced_client(client),
             permits: Arc::new(Semaphore::new(4)),
+            render_permits: Arc::new(Semaphore::new(2)),
             timeout,
+            render_timeout: RENDER_TIMEOUT,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn for_test(origin: Url, timeout: Duration) -> Self {
-        Self::new(origin, Secret::for_test("grafana-secret"), timeout).unwrap()
+        let mut client = Self::new(origin, Secret::for_test("grafana-secret"), timeout).unwrap();
+        client.render_timeout = timeout;
+        client
     }
 
     pub async fn execute(&self, query: &Query) -> Result<Value, Error> {
@@ -102,7 +115,7 @@ impl GrafanaClient {
         self.run(
             UpstreamRequest {
                 method: Method::GET,
-                path,
+                path: path.to_owned(),
                 parameters,
                 body: None,
             },
@@ -134,7 +147,7 @@ impl GrafanaClient {
         self.run(
             UpstreamRequest {
                 method: Method::GET,
-                path,
+                path: path.to_owned(),
                 parameters,
                 body: None,
             },
@@ -161,7 +174,7 @@ impl GrafanaClient {
         self.run(
             UpstreamRequest {
                 method: Method::GET,
-                path: "/api/datasources/proxy/uid/tempo/api/search",
+                path: "/api/datasources/proxy/uid/tempo/api/search".to_owned(),
                 parameters,
                 body: None,
             },
@@ -178,7 +191,7 @@ impl GrafanaClient {
         self.run(
             UpstreamRequest {
                 method: Method::POST,
-                path: "/api/datasources/proxy/uid/pyroscope/querier.v1.QuerierService/SelectMergeStacktraces",
+                path: "/api/datasources/proxy/uid/pyroscope/querier.v1.QuerierService/SelectMergeStacktraces".to_owned(),
                 parameters: Vec::new(),
                 body: Some(json!({
                     "profileTypeID": query.profile_type,
@@ -201,7 +214,7 @@ impl GrafanaClient {
         self.run(
             UpstreamRequest {
                 method: Method::GET,
-                path: "/api/v1/provisioning/alert-rules",
+                path: "/api/v1/provisioning/alert-rules".to_owned(),
                 parameters: Vec::new(),
                 body: None,
             },
@@ -223,7 +236,7 @@ impl GrafanaClient {
         self.run(
             UpstreamRequest {
                 method: Method::GET,
-                path: "/api/alertmanager/grafana/api/v2/alerts",
+                path: "/api/alertmanager/grafana/api/v2/alerts".to_owned(),
                 parameters,
                 body: None,
             },
@@ -240,7 +253,7 @@ impl GrafanaClient {
         self.run(
             UpstreamRequest {
                 method: Method::GET,
-                path: "/api/alertmanager/grafana/api/v2/silences",
+                path: "/api/alertmanager/grafana/api/v2/silences".to_owned(),
                 parameters: Vec::new(),
                 body: None,
             },
@@ -277,7 +290,7 @@ impl GrafanaClient {
         self.run(
             UpstreamRequest {
                 method: Method::POST,
-                path: "/api/alertmanager/grafana/api/v2/silences",
+                path: "/api/alertmanager/grafana/api/v2/silences".to_owned(),
                 parameters: Vec::new(),
                 body: Some(json!({
                     "matchers": matchers,
@@ -294,6 +307,171 @@ impl GrafanaClient {
             |body| normalize_create_silence(&starts_at, &ends_at, body),
         )
         .await
+    }
+
+    pub async fn list_dashboards(&self, query: &ListDashboardsQuery) -> Result<Value, Error> {
+        let mut parameters = vec![("type", "dash-db".to_owned())];
+        if let Some(search) = &query.query {
+            parameters.push(("query", search.clone()));
+        }
+        parameters.extend(query.tags.iter().map(|tag| ("tag", tag.clone())));
+        parameters.extend([
+            ("page", query.page.to_string()),
+            ("limit", query.limit.to_string()),
+        ]);
+        self.run(
+            UpstreamRequest {
+                method: Method::GET,
+                path: "/api/search".to_owned(),
+                parameters,
+                body: None,
+            },
+            "dashboard.list",
+            "list",
+            "grafana_dashboards",
+            OperationKind::Read,
+            |body| normalize_dashboards(query.limit, body),
+        )
+        .await
+    }
+
+    pub async fn get_dashboard(&self, query: &GetDashboardQuery) -> Result<Value, Error> {
+        let path = format!("/api/dashboards/uid/{}", query.uid);
+        self.run_path(
+            UpstreamRequestOwned {
+                method: Method::GET,
+                path,
+                parameters: Vec::new(),
+                body: None,
+            },
+            "dashboard.get",
+            "get",
+            "grafana_dashboards",
+            OperationKind::Read,
+            normalize_dashboard,
+        )
+        .await
+    }
+
+    pub async fn render_dashboard(
+        &self,
+        request: &RenderDashboardRequest,
+    ) -> Result<RenderedImage, Error> {
+        self.render(
+            format!("/render/d/{}", request.uid),
+            None,
+            &request.options,
+            "dashboard",
+        )
+        .await
+    }
+
+    pub async fn render_panel(&self, request: &RenderPanelRequest) -> Result<RenderedImage, Error> {
+        self.render(
+            format!("/render/d-solo/{}", request.uid),
+            Some(&request.panel_id),
+            &request.options,
+            "panel",
+        )
+        .await
+    }
+
+    async fn render(
+        &self,
+        path: String,
+        panel_id: Option<&str>,
+        options: &RenderOptions,
+        action: &'static str,
+    ) -> Result<RenderedImage, Error> {
+        let mut metrics = GrafanaMetricsGuard::new(action, "render", "grafana_rendering");
+        let span = tracing::info_span!(
+            target: "homelab_mcp::grafana",
+            "grafana.query",
+            grafana.action = action,
+            grafana.mode = "render",
+            grafana.datasource_uid = "grafana_rendering",
+            grafana.outcome = tracing::field::Empty,
+        );
+        let result = async {
+            let _global = self
+                .permits
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::CapacityExhausted)?;
+            let _render = self
+                .render_permits
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| Error::CapacityExhausted)?;
+            let operation = async {
+                let mut url = self
+                    .origin
+                    .join(&path)
+                    .map_err(|_| Error::UpstreamUnavailable)?;
+                {
+                    let mut pairs = url.query_pairs_mut();
+                    if let Some(panel_id) = panel_id {
+                        pairs.append_pair("panelId", panel_id);
+                    }
+                    for (key, value) in [
+                        ("width", options.width.to_string()),
+                        ("height", options.height.to_string()),
+                        ("scale", options.scale.to_string()),
+                        ("theme", options.theme.as_str().to_owned()),
+                        ("tz", options.timezone.clone()),
+                        ("from", options.from.clone()),
+                        ("to", options.to.clone()),
+                        ("timeout", "20".to_owned()),
+                    ] {
+                        pairs.append_pair(key, &value);
+                    }
+                    for (name, value) in &options.variables {
+                        pairs.append_pair(&format!("var-{name}"), value);
+                    }
+                }
+                if url.as_str().len() > MAX_URL_BYTES {
+                    return Err(Error::InvalidArguments);
+                }
+                let mut client_span = ClientRequestSpanGuard::new(&Method::GET);
+                let response = match client_span
+                    .attach(self.client.get(url).bearer_auth(self.token.expose()))
+                    .send()
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(_) => {
+                        client_span.finish_transport_error();
+                        return Err(Error::UpstreamUnavailable);
+                    }
+                };
+                let status = response.status();
+                client_span.record_status(status);
+                match status {
+                    StatusCode::OK => read_png(response, &mut client_span).await,
+                    StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                        client_span.finish_http_error(status);
+                        Err(Error::Unauthorized)
+                    }
+                    status if status.is_client_error() => {
+                        client_span.finish_http_error(status);
+                        Err(Error::RenderRejected)
+                    }
+                    _ => {
+                        client_span.finish_http_error(status);
+                        Err(Error::UpstreamUnavailable)
+                    }
+                }
+            };
+            tokio::time::timeout(self.render_timeout, operation)
+                .await
+                .map_err(|_| Error::RenderTimeout)?
+        }
+        .instrument(span.clone())
+        .await;
+        let outcome = request_outcome(&result);
+        span.record("grafana.outcome", outcome);
+        metrics.finish(outcome);
+        result
     }
 
     async fn run(
@@ -333,7 +511,7 @@ impl GrafanaClient {
             let operation = async {
                 let mut url = self
                     .origin
-                    .join(request.path)
+                    .join(&request.path)
                     .map_err(|_| operation_failure(kind))?;
                 url.query_pairs_mut()
                     .extend_pairs(request.parameters.iter().map(|(key, value)| (*key, value)));
@@ -404,6 +582,102 @@ impl GrafanaClient {
         metrics.finish(outcome);
         result
     }
+
+    async fn run_path(
+        &self,
+        request: UpstreamRequestOwned,
+        action: &'static str,
+        mode: &'static str,
+        datasource_uid: &'static str,
+        kind: OperationKind,
+        normalize: impl FnOnce(Value) -> Result<Value, Error>,
+    ) -> Result<Value, Error> {
+        let path = request.path;
+        self.run(
+            UpstreamRequest {
+                method: request.method,
+                path,
+                parameters: request.parameters,
+                body: request.body,
+            },
+            action,
+            mode,
+            datasource_uid,
+            kind,
+            normalize,
+        )
+        .await
+    }
+}
+
+struct UpstreamRequestOwned {
+    method: Method,
+    path: String,
+    parameters: Vec<(&'static str, String)>,
+    body: Option<Value>,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct RenderedImage {
+    pub bytes: Vec<u8>,
+    pub decoded_bytes: usize,
+    pub sha256: String,
+}
+
+impl std::fmt::Debug for RenderedImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RenderedImage")
+            .field("decoded_bytes", &self.decoded_bytes)
+            .field("sha256", &self.sha256)
+            .finish_non_exhaustive()
+    }
+}
+
+async fn read_png(
+    mut response: Response,
+    client_span: &mut ClientRequestSpanGuard,
+) -> Result<RenderedImage, Error> {
+    let valid_mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("image/png"));
+    if !valid_mime
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        client_span.finish_response_error();
+        return Err(Error::RenderInvalidResponse);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| {
+        client_span.finish_response_error();
+        Error::RenderInvalidResponse
+    })? {
+        if chunk.len() > MAX_RESPONSE_BYTES - bytes.len() {
+            client_span.finish_response_error();
+            return Err(Error::RenderInvalidResponse);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.len() < PNG_SIGNATURE.len() || &bytes[..PNG_SIGNATURE.len()] != PNG_SIGNATURE {
+        client_span.finish_response_error();
+        return Err(Error::RenderInvalidResponse);
+    }
+    client_span.finish_success();
+    let decoded_bytes = bytes.len();
+    let sha256 = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(RenderedImage {
+        bytes,
+        decoded_bytes,
+        sha256,
+    })
 }
 
 async fn read_json(
@@ -711,6 +985,186 @@ fn has_markdown_link(value: &str) -> bool {
         .any(|(index, _)| value[index + 2..].find(')').is_some_and(|end| end > 0))
 }
 
+fn normalize_dashboards(limit: u16, wrapper: Value) -> Result<Value, Error> {
+    let dashboards = wrapper.as_array().ok_or(Error::InvalidResponse)?;
+    let result = dashboards
+        .iter()
+        .map(|dashboard| {
+            let object = dashboard.as_object().ok_or(Error::InvalidResponse)?;
+            let tags = object
+                .get("tags")
+                .and_then(Value::as_array)
+                .ok_or(Error::InvalidResponse)?
+                .iter()
+                .map(|tag| {
+                    tag.as_str()
+                        .filter(|tag| tag.len() <= MAX_SAFE_KEY_BYTES)
+                        .map(str::to_owned)
+                        .ok_or(Error::InvalidResponse)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(json!({
+                "uid": bounded_string(object, "uid", MAX_SAFE_KEY_BYTES)?,
+                "title": bounded_string(object, "title", MAX_SUMMARY_BYTES)?,
+                "folder_uid": optional_bounded_string(object, "folderUid", MAX_SAFE_KEY_BYTES)?,
+                "folder_title": optional_bounded_string(object, "folderTitle", MAX_SUMMARY_BYTES)?,
+                "tags": tags,
+            }))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(json!({
+        "mode":"list",
+        "result_type":"dashboards",
+        "result":result.into_iter().take(usize::from(limit)).collect::<Vec<_>>()
+    }))
+}
+
+fn normalize_dashboard(wrapper: Value) -> Result<Value, Error> {
+    let wrapper = wrapper.as_object().ok_or(Error::InvalidResponse)?;
+    let dashboard = wrapper
+        .get("dashboard")
+        .and_then(Value::as_object)
+        .ok_or(Error::InvalidResponse)?;
+    let meta = wrapper
+        .get("meta")
+        .and_then(Value::as_object)
+        .ok_or(Error::InvalidResponse)?;
+    let tags = dashboard
+        .get("tags")
+        .and_then(Value::as_array)
+        .ok_or(Error::InvalidResponse)?
+        .iter()
+        .map(|tag| {
+            tag.as_str()
+                .filter(|tag| tag.len() <= MAX_SAFE_KEY_BYTES)
+                .map(str::to_owned)
+                .ok_or(Error::InvalidResponse)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let variables = dashboard
+        .get("templating")
+        .and_then(Value::as_object)
+        .and_then(|templating| templating.get("list"))
+        .and_then(Value::as_array)
+        .ok_or(Error::InvalidResponse)?;
+    if variables.len() > MAX_DASHBOARD_VARIABLES {
+        return Err(Error::InvalidResponse);
+    }
+    let variables = variables
+        .iter()
+        .map(|variable| {
+            let object = variable.as_object().ok_or(Error::InvalidResponse)?;
+            Ok(json!({
+                "name": bounded_string(object, "name", MAX_SAFE_KEY_BYTES)?,
+                "label": optional_bounded_string(object, "label", MAX_SUMMARY_BYTES)?,
+                "type": bounded_string(object, "type", MAX_SAFE_KEY_BYTES)?,
+            }))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let source_panels = dashboard
+        .get("panels")
+        .and_then(Value::as_array)
+        .ok_or(Error::InvalidResponse)?;
+    let mut panels = Vec::new();
+    flatten_panels(source_panels, &mut panels, 0)?;
+    let result = json!({
+        "uid": bounded_string(dashboard, "uid", MAX_SAFE_KEY_BYTES)?,
+        "title": bounded_string(dashboard, "title", MAX_SUMMARY_BYTES)?,
+        "folder_uid": optional_bounded_string(meta, "folderUid", MAX_SAFE_KEY_BYTES)?,
+        "folder_title": optional_bounded_string(meta, "folderTitle", MAX_SUMMARY_BYTES)?,
+        "tags": tags,
+        "timezone": bounded_string(dashboard, "timezone", MAX_SAFE_KEY_BYTES)?,
+        "version": bounded_integer(dashboard, "version")?,
+        "schema_version": bounded_integer(dashboard, "schemaVersion")?,
+        "variables": variables,
+        "panels": panels,
+    });
+    bounded_dashboard_output(json!({
+        "mode":"get",
+        "result_type":"dashboard",
+        "result":result
+    }))
+}
+
+fn bounded_dashboard_output(output: Value) -> Result<Value, Error> {
+    if serde_json::to_vec(&output)
+        .map_err(|_| Error::InvalidResponse)?
+        .len()
+        > MAX_DASHBOARD_OUTPUT_BYTES
+    {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(output)
+}
+
+fn flatten_panels(panels: &[Value], output: &mut Vec<Value>, depth: usize) -> Result<(), Error> {
+    if depth > 64 {
+        return Err(Error::InvalidResponse);
+    }
+    for panel in panels {
+        if output.len() >= MAX_DASHBOARD_PANELS {
+            return Err(Error::InvalidResponse);
+        }
+        let object = panel.as_object().ok_or(Error::InvalidResponse)?;
+        let id = match object.get("id") {
+            Some(Value::String(id)) if valid_panel_id(id) => id.clone(),
+            Some(Value::Number(id)) => id
+                .as_u64()
+                .map(|id| id.to_string())
+                .ok_or(Error::InvalidResponse)?,
+            _ => return Err(Error::InvalidResponse),
+        };
+        if !valid_panel_id(&id) {
+            return Err(Error::InvalidResponse);
+        }
+        output.push(json!({
+            "id": id,
+            "title": allow_empty_bounded_string(object, "title", MAX_SUMMARY_BYTES)?,
+            "type": bounded_string(object, "type", MAX_SAFE_KEY_BYTES)?,
+        }));
+        if let Some(children) = object.get("panels") {
+            flatten_panels(
+                children.as_array().ok_or(Error::InvalidResponse)?,
+                output,
+                depth + 1,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn optional_bounded_string(
+    object: &Map<String, Value>,
+    key: &str,
+    maximum_bytes: usize,
+) -> Result<Option<String>, Error> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.len() <= maximum_bytes => Ok(Some(value.clone())),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+
+fn allow_empty_bounded_string<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    maximum_bytes: usize,
+) -> Result<&'a str, Error> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| value.len() <= maximum_bytes)
+        .ok_or(Error::InvalidResponse)
+}
+
+fn bounded_integer(object: &Map<String, Value>, key: &str) -> Result<i64, Error> {
+    object
+        .get(key)
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or(Error::InvalidResponse)
+}
+
 fn normalize_logql(mode: Mode, limit: u16, wrapper: Value) -> Result<Value, Error> {
     if wrapper.get("status").and_then(Value::as_str) != Some("success") {
         return Err(Error::InvalidResponse);
@@ -987,12 +1441,13 @@ mod tests {
         response::Redirect,
         routing::{get, post},
     };
-    use tokio::{net::TcpListener, task::JoinHandle};
+    use tokio::{io::AsyncWriteExt as _, net::TcpListener, task::JoinHandle};
 
     use crate::integrations::grafana::actions::{
         AlertInstancesInput, AlertRulesInput, CreateSilenceInput, DEFAULT_MAX_NODES,
-        DEFAULT_PROFILE_TYPE, Direction, LabelMatcher, ListSilencesInput, LogqlInput,
-        MatcherOperator, ProfilesInput, PromqlInput, TraceqlInput,
+        DEFAULT_PROFILE_TYPE, Direction, GetDashboardInput, LabelMatcher, ListDashboardsInput,
+        ListSilencesInput, LogqlInput, MatcherOperator, ProfilesInput, PromqlInput,
+        RenderDashboardInput, RenderPanelInput, TraceqlInput,
     };
 
     use super::*;
@@ -2216,5 +2671,557 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(client.permits.available_permits(), 4);
         server_task.abort();
+    }
+
+    #[test]
+    fn dashboard_inventory_is_strict_bounded_and_omits_raw_fields() {
+        let listed = normalize_dashboards(
+            100,
+            json!([{
+                "id":7,"uid":"dash-1","title":"Overview","folderUid":"folder-1",
+                "folderTitle":"Operations","tags":["prod"],"url":"/unsafe","slug":"unsafe"
+            }]),
+        )
+        .unwrap();
+        assert_eq!(
+            listed["result"][0],
+            json!({
+                "uid":"dash-1","title":"Overview","folder_uid":"folder-1",
+                "folder_title":"Operations","tags":["prod"]
+            })
+        );
+
+        let dashboard = normalize_dashboard(json!({
+            "meta":{"folderUid":"folder-1","folderTitle":"Operations","url":"/unsafe"},
+            "dashboard":{
+                "uid":"dash-1","title":"Overview","tags":["prod"],"timezone":"browser",
+                "version":2,"schemaVersion":42,
+                "templating":{"list":[{"name":"cluster","label":null,"type":"query","options":["secret"]}]},
+                "panels":[{"id":1,"title":"Row","type":"row","panels":[
+                    {"id":"panel-13","title":"CPU","type":"timeseries","targets":[{"expr":"secret"}]}
+                ]}]
+            }
+        }))
+        .unwrap();
+        assert_eq!(dashboard["result"]["panels"][1]["id"], "panel-13");
+        assert_eq!(
+            dashboard["result"]["variables"][0],
+            json!({"name":"cluster","label":null,"type":"query"})
+        );
+        for omitted in ["unsafe", "targets", "expr", "options", "secret"] {
+            assert!(!dashboard.to_string().contains(omitted));
+        }
+
+        let variables = (0..=MAX_DASHBOARD_VARIABLES)
+            .map(|index| json!({"name":format!("v{index}"),"label":null,"type":"query"}))
+            .collect::<Vec<_>>();
+        let oversized = json!({
+            "meta":{},
+            "dashboard":{"uid":"d","title":"d","tags":[],"timezone":"utc","version":1,
+                "schemaVersion":1,"templating":{"list":variables},"panels":[]}
+        });
+        assert_eq!(normalize_dashboard(oversized), Err(Error::InvalidResponse));
+    }
+
+    #[test]
+    fn dashboard_panel_ids_counts_depth_and_output_size_are_strict() {
+        for invalid_id in [
+            json!(-1),
+            json!(1.5),
+            json!("panel/13"),
+            json!("x".repeat(65)),
+        ] {
+            let response = dashboard_response_with_panels(vec![json!({
+                "id":invalid_id,"title":"Panel","type":"timeseries"
+            })]);
+            assert_eq!(normalize_dashboard(response), Err(Error::InvalidResponse));
+        }
+
+        let maximum_panels = (0..MAX_DASHBOARD_PANELS)
+            .map(|id| json!({"id":id,"title":"Panel","type":"timeseries"}))
+            .collect();
+        assert_eq!(
+            normalize_dashboard(dashboard_response_with_panels(maximum_panels)).unwrap()["result"]
+                ["panels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_DASHBOARD_PANELS
+        );
+        let excessive_panels = (0..=MAX_DASHBOARD_PANELS)
+            .map(|id| json!({"id":id,"title":"Panel","type":"timeseries"}))
+            .collect();
+        assert_eq!(
+            normalize_dashboard(dashboard_response_with_panels(excessive_panels)),
+            Err(Error::InvalidResponse)
+        );
+
+        assert!(normalize_dashboard(dashboard_response_with_panels(nested_panels(64))).is_ok());
+        assert_eq!(
+            normalize_dashboard(dashboard_response_with_panels(nested_panels(65))),
+            Err(Error::InvalidResponse)
+        );
+
+        let exact = Value::String("x".repeat(MAX_DASHBOARD_OUTPUT_BYTES - 2));
+        assert!(bounded_dashboard_output(exact).is_ok());
+        let excessive = Value::String("x".repeat(MAX_DASHBOARD_OUTPUT_BYTES - 1));
+        assert_eq!(
+            bounded_dashboard_output(excessive),
+            Err(Error::InvalidResponse)
+        );
+    }
+
+    fn dashboard_response_with_panels(panels: Vec<Value>) -> Value {
+        json!({
+            "meta":{},
+            "dashboard":{
+                "uid":"dash-1","title":"Overview","tags":[],"timezone":"utc",
+                "version":1,"schemaVersion":1,"templating":{"list":[]},"panels":panels
+            }
+        })
+    }
+
+    fn nested_panels(depth: usize) -> Vec<Value> {
+        let mut panel = json!({"id":depth,"title":"Panel","type":"timeseries"});
+        for id in (0..depth).rev() {
+            panel = json!({"id":id,"title":"Row","type":"row","panels":[panel]});
+        }
+        vec![panel]
+    }
+
+    #[tokio::test]
+    async fn dashboard_routes_and_render_query_are_exact_and_bearer_only() {
+        let record = Arc::new(Mutex::new(RequestRecord::default()));
+        let list_record = Arc::clone(&record);
+        let get_record = Arc::clone(&record);
+        let render_record = Arc::clone(&record);
+        let router = Router::new()
+            .route(
+                "/api/search",
+                get(move |OriginalUri(uri): OriginalUri, headers: HeaderMap| {
+                    let record = Arc::clone(&list_record);
+                    async move {
+                        *record.lock().unwrap() = RequestRecord {
+                            method: "GET".to_owned(),
+                            path: uri.path().to_owned(),
+                            authorization: headers["authorization"].to_str().unwrap().to_owned(),
+                            parameter_pairs: url::form_urlencoded::parse(
+                                uri.query().unwrap().as_bytes(),
+                            )
+                            .into_owned()
+                            .collect(),
+                            ..RequestRecord::default()
+                        };
+                        Json(json!([]))
+                    }
+                }),
+            )
+            .route(
+                "/api/dashboards/uid/dash-1",
+                get(move |OriginalUri(uri): OriginalUri, headers: HeaderMap| {
+                    let record = Arc::clone(&get_record);
+                    async move {
+                        *record.lock().unwrap() = RequestRecord {
+                            method: "GET".to_owned(),
+                            path: uri.path().to_owned(),
+                            authorization: headers["authorization"].to_str().unwrap().to_owned(),
+                            ..RequestRecord::default()
+                        };
+                        Json(json!({"meta":{},"dashboard":{
+                            "uid":"dash-1","title":"Overview","tags":[],"timezone":"utc",
+                            "version":1,"schemaVersion":1,"templating":{"list":[]},"panels":[]
+                        }}))
+                    }
+                }),
+            )
+            .route(
+                "/render/d-solo/dash-1",
+                get(move |OriginalUri(uri): OriginalUri, headers: HeaderMap| {
+                    let record = Arc::clone(&render_record);
+                    async move {
+                        *record.lock().unwrap() = RequestRecord {
+                            method: "GET".to_owned(),
+                            path: uri.path().to_owned(),
+                            authorization: headers["authorization"].to_str().unwrap().to_owned(),
+                            parameter_pairs: url::form_urlencoded::parse(
+                                uri.query().unwrap().as_bytes(),
+                            )
+                            .into_owned()
+                            .collect(),
+                            ..RequestRecord::default()
+                        };
+                        (
+                            [("content-type", "image/png; charset=binary")],
+                            b"\x89PNG\r\n\x1a\nbody".as_slice(),
+                        )
+                    }
+                }),
+            );
+        let (origin, task) = serve(router).await;
+        let client = GrafanaClient::for_test(origin, TIMEOUT);
+        client
+            .list_dashboards(
+                &ListDashboardsInput {
+                    query: Some("ops".to_owned()),
+                    tags: Some(vec!["z".to_owned(), "a".to_owned(), "a".to_owned()]),
+                    page: Some(2),
+                    limit: Some(10),
+                }
+                .validate()
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        {
+            let record = record.lock().unwrap();
+            assert_eq!(record.path, "/api/search");
+            assert_eq!(record.authorization, "Bearer grafana-secret");
+            assert_eq!(
+                record.parameter_pairs,
+                vec![
+                    ("type".to_owned(), "dash-db".to_owned()),
+                    ("query".to_owned(), "ops".to_owned()),
+                    ("tag".to_owned(), "a".to_owned()),
+                    ("tag".to_owned(), "z".to_owned()),
+                    ("page".to_owned(), "2".to_owned()),
+                    ("limit".to_owned(), "10".to_owned()),
+                ]
+            );
+        }
+
+        client
+            .get_dashboard(
+                &GetDashboardInput {
+                    uid: "dash-1".to_owned(),
+                }
+                .validate()
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        {
+            let record = record.lock().unwrap();
+            assert_eq!(record.path, "/api/dashboards/uid/dash-1");
+            assert_eq!(record.authorization, "Bearer grafana-secret");
+            assert!(record.parameter_pairs.is_empty());
+        }
+
+        let mut variables = std::collections::BTreeMap::new();
+        variables.insert("z".to_owned(), "two".to_owned());
+        variables.insert("a".to_owned(), "one".to_owned());
+        let image = client
+            .render_panel(
+                &RenderPanelInput {
+                    uid: "dash-1".to_owned(),
+                    panel_id: "panel-13".to_owned(),
+                    from: None,
+                    to: None,
+                    width: None,
+                    height: None,
+                    scale: None,
+                    theme: None,
+                    timezone: None,
+                    variables: Some(variables),
+                }
+                .validate()
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(image.decoded_bytes, 12);
+        assert!(!format!("{image:?}").contains("body"));
+        let record = record.lock().unwrap();
+        assert_eq!(record.path, "/render/d-solo/dash-1");
+        assert_eq!(record.authorization, "Bearer grafana-secret");
+        assert_eq!(
+            record
+                .parameter_pairs
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "panelId", "width", "height", "scale", "theme", "tz", "from", "to", "timeout",
+                "var-a", "var-z"
+            ]
+        );
+        assert!(!record.parameters.contains_key("orgId"));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn render_validates_status_mime_signature_size_timeout_and_capacity() {
+        let request = RenderDashboardInput {
+            uid: "dash-1".to_owned(),
+            from: None,
+            to: None,
+            width: None,
+            height: None,
+            scale: None,
+            theme: None,
+            timezone: None,
+            variables: None,
+        }
+        .validate()
+        .unwrap();
+        for (status, content_type, body, expected) in [
+            (
+                StatusCode::CREATED,
+                "image/png",
+                PNG_SIGNATURE.as_slice(),
+                Error::UpstreamUnavailable,
+            ),
+            (
+                StatusCode::FOUND,
+                "text/plain",
+                b"unsafe".as_slice(),
+                Error::UpstreamUnavailable,
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "text/plain",
+                b"unsafe".as_slice(),
+                Error::Unauthorized,
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                "text/plain",
+                b"unsafe".as_slice(),
+                Error::Unauthorized,
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "text/plain",
+                b"unsafe".as_slice(),
+                Error::RenderRejected,
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "text/plain",
+                b"unsafe".as_slice(),
+                Error::RenderRejected,
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "text/plain",
+                b"unsafe".as_slice(),
+                Error::UpstreamUnavailable,
+            ),
+            (
+                StatusCode::OK,
+                "image/jpeg",
+                PNG_SIGNATURE.as_slice(),
+                Error::RenderInvalidResponse,
+            ),
+            (
+                StatusCode::OK,
+                "image/png",
+                b"not png".as_slice(),
+                Error::RenderInvalidResponse,
+            ),
+        ] {
+            let body = body.to_vec();
+            let router = Router::new().route(
+                "/render/d/dash-1",
+                get(move || {
+                    let body = body.clone();
+                    async move { (status, [("content-type", content_type)], body) }
+                }),
+            );
+            let (origin, task) = serve(router).await;
+            let client = GrafanaClient::for_test(origin, TIMEOUT);
+            assert_eq!(client.render_dashboard(&request).await, Err(expected));
+            task.abort();
+        }
+
+        for body in [PNG_SIGNATURE.to_vec(), {
+            let mut body = vec![0; MAX_RESPONSE_BYTES];
+            body[..PNG_SIGNATURE.len()].copy_from_slice(PNG_SIGNATURE);
+            body
+        }] {
+            let expected_bytes = body.len();
+            let router = Router::new().route(
+                "/render/d/dash-1",
+                get(move || {
+                    let body = body.clone();
+                    async move { ([("content-type", "image/png")], body) }
+                }),
+            );
+            let (origin, task) = serve(router).await;
+            let client = GrafanaClient::for_test(origin, TIMEOUT);
+            assert_eq!(
+                client
+                    .render_dashboard(&request)
+                    .await
+                    .unwrap()
+                    .decoded_bytes,
+                expected_bytes
+            );
+            task.abort();
+        }
+
+        let oversized = Router::new().route(
+            "/render/d/dash-1",
+            get(|| async {
+                (
+                    [("content-type", "image/png")],
+                    vec![0_u8; MAX_RESPONSE_BYTES + 1],
+                )
+            }),
+        );
+        let (origin, task) = serve(oversized).await;
+        let client = GrafanaClient::for_test(origin, TIMEOUT);
+        assert_eq!(
+            client.render_dashboard(&request).await,
+            Err(Error::RenderInvalidResponse)
+        );
+        task.abort();
+
+        let slow = Router::new().route(
+            "/render/d/dash-1",
+            get(|| async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                ([("content-type", "image/png")], PNG_SIGNATURE.as_slice())
+            }),
+        );
+        let (origin, task) = serve(slow).await;
+        let client = GrafanaClient::for_test(origin, Duration::from_millis(10));
+        assert_eq!(
+            client.render_dashboard(&request).await,
+            Err(Error::RenderTimeout)
+        );
+        assert_eq!(client.permits.available_permits(), 4);
+        assert_eq!(client.render_permits.available_permits(), 2);
+        task.abort();
+
+        let permits = (0..2)
+            .map(|_| client.render_permits.clone().try_acquire_owned().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            client.render_dashboard(&request).await,
+            Err(Error::CapacityExhausted)
+        );
+        assert_eq!(client.permits.available_permits(), 4);
+        drop(permits);
+
+        let global = (0..4)
+            .map(|_| client.permits.clone().try_acquire_owned().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            client.render_dashboard(&request).await,
+            Err(Error::CapacityExhausted)
+        );
+        assert_eq!(client.render_permits.available_permits(), 2);
+        drop(global);
+    }
+
+    #[tokio::test]
+    async fn render_rejects_streamed_overflow_and_truncated_chunk_reads() {
+        let overflow_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let overflow_origin = Url::parse(&format!(
+            "http://{}/",
+            overflow_listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let overflow_task = tokio::spawn(async move {
+            let (mut connection, _) = overflow_listener.accept().await.unwrap();
+            let mut body = vec![0; MAX_RESPONSE_BYTES + 1];
+            body[..PNG_SIGNATURE.len()].copy_from_slice(PNG_SIGNATURE);
+            connection
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let _ = connection.write_all(&body).await;
+            let _ = connection.write_all(b"\r\n0\r\n\r\n").await;
+        });
+        let client = GrafanaClient::for_test(overflow_origin, TIMEOUT);
+        let request = RenderDashboardInput {
+            uid: "dash-1".to_owned(),
+            from: None,
+            to: None,
+            width: None,
+            height: None,
+            scale: None,
+            theme: None,
+            timezone: None,
+            variables: None,
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(
+            client.render_dashboard(&request).await,
+            Err(Error::RenderInvalidResponse)
+        );
+        overflow_task.await.unwrap();
+
+        let truncated_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let truncated_origin = Url::parse(&format!(
+            "http://{}/",
+            truncated_listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let truncated_task = tokio::spawn(async move {
+            let (mut connection, _) = truncated_listener.accept().await.unwrap();
+            connection
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n64\r\n\x89PNG\r\n\x1a\n",
+                )
+                .await
+                .unwrap();
+        });
+        let client = GrafanaClient::for_test(truncated_origin, TIMEOUT);
+        assert_eq!(
+            client.render_dashboard(&request).await,
+            Err(Error::RenderInvalidResponse)
+        );
+        truncated_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_an_inflight_render_releases_both_permits() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let started_probe = Arc::clone(&started);
+        let router = Router::new().route(
+            "/render/d/dash-1",
+            get(move || {
+                let started = Arc::clone(&started_probe);
+                async move {
+                    started.notify_one();
+                    std::future::pending::<([(&str, &str); 1], &[u8])>().await
+                }
+            }),
+        );
+        let (origin, task) = serve(router).await;
+        let client = GrafanaClient::for_test(origin, TIMEOUT);
+        let request = RenderDashboardInput {
+            uid: "dash-1".to_owned(),
+            from: None,
+            to: None,
+            width: None,
+            height: None,
+            scale: None,
+            theme: None,
+            timezone: None,
+            variables: None,
+        }
+        .validate()
+        .unwrap();
+        let request_client = client.clone();
+        let request_task =
+            tokio::spawn(async move { request_client.render_dashboard(&request).await });
+        started.notified().await;
+        assert_eq!(client.permits.available_permits(), 3);
+        assert_eq!(client.render_permits.available_permits(), 1);
+        request_task.abort();
+        request_task.await.unwrap_err();
+        tokio::task::yield_now().await;
+        assert_eq!(client.permits.available_permits(), 4);
+        assert_eq!(client.render_permits.available_permits(), 2);
+        task.abort();
     }
 }

@@ -1,9 +1,7 @@
 use std::{sync::OnceLock, time::Instant};
 
-use opentelemetry::{KeyValue, global};
-use serde_json::Value;
-
 use super::Error;
+use opentelemetry::{KeyValue, global};
 
 struct GrafanaMetrics {
     requests: opentelemetry::metrics::Counter<u64>,
@@ -99,6 +97,10 @@ fn metric_action(action: &'static str) -> &'static str {
         "alert-instance.list" => "alert-instance.list",
         "silence.list" => "silence.list",
         "silence.create" => "silence.create",
+        "dashboard.list" => "dashboard.list",
+        "dashboard.get" => "dashboard.get",
+        "dashboard" => "dashboard",
+        "panel" => "panel",
         _ => "unknown",
     }
 }
@@ -110,6 +112,8 @@ fn metric_mode(mode: &'static str) -> &'static str {
         "search" => "search",
         "list" => "list",
         "create" => "create",
+        "get" => "get",
+        "render" => "render",
         _ => "unknown",
     }
 }
@@ -121,6 +125,8 @@ fn metric_datasource_uid(datasource_uid: &'static str) -> &'static str {
         "tempo" => "tempo",
         "pyroscope" => "pyroscope",
         "grafana_alerting" => "grafana_alerting",
+        "grafana_dashboards" => "grafana_dashboards",
+        "grafana_rendering" => "grafana_rendering",
         _ => "unknown",
     }
 }
@@ -137,12 +143,14 @@ fn metric_outcome(outcome: &'static str) -> &'static str {
         "mutation_outcome_unknown" => "mutation_outcome_unknown",
         "upstream_unavailable" => "upstream_unavailable",
         "invalid_response" => "invalid_response",
+        "render_rejected" => "render_rejected",
+        "render_invalid_response" => "render_invalid_response",
         "cancelled" => "cancelled",
         _ => "upstream_unavailable",
     }
 }
 
-pub(super) fn request_outcome(result: &Result<Value, Error>) -> &'static str {
+pub(super) fn request_outcome<T>(result: &Result<T, Error>) -> &'static str {
     match result {
         Ok(_) => "success",
         Err(Error::InvalidArguments) => "invalid_arguments",
@@ -154,6 +162,9 @@ pub(super) fn request_outcome(result: &Result<Value, Error>) -> &'static str {
         Err(Error::MutationOutcomeUnknown) => "mutation_outcome_unknown",
         Err(Error::UpstreamUnavailable) => "upstream_unavailable",
         Err(Error::InvalidResponse) => "invalid_response",
+        Err(Error::RenderTimeout) => "timeout",
+        Err(Error::RenderRejected) => "render_rejected",
+        Err(Error::RenderInvalidResponse) => "render_invalid_response",
     }
 }
 
@@ -174,16 +185,35 @@ mod tests {
         assert_eq!(metric_action("alert-instance.list"), "alert-instance.list");
         assert_eq!(metric_action("silence.list"), "silence.list");
         assert_eq!(metric_action("silence.create"), "silence.create");
+        assert_eq!(metric_action("dashboard.list"), "dashboard.list");
+        assert_eq!(metric_action("dashboard.get"), "dashboard.get");
+        assert_eq!(metric_action("dashboard"), "dashboard");
+        assert_eq!(metric_action("panel"), "panel");
         assert_eq!(metric_action("alert_rules"), "unknown");
         assert_eq!(metric_action("alert_instances"), "unknown");
         assert_eq!(metric_action("create_silence"), "unknown");
         assert_eq!(metric_mode("list"), "list");
         assert_eq!(metric_mode("create"), "create");
+        assert_eq!(metric_mode("get"), "get");
+        assert_eq!(metric_mode("render"), "render");
         assert_eq!(
             metric_datasource_uid("grafana_alerting"),
             "grafana_alerting"
         );
         assert_eq!(metric_outcome("mutation_rejected"), "mutation_rejected");
+        assert_eq!(
+            metric_datasource_uid("grafana_dashboards"),
+            "grafana_dashboards"
+        );
+        assert_eq!(
+            metric_datasource_uid("grafana_rendering"),
+            "grafana_rendering"
+        );
+        assert_eq!(metric_outcome("render_rejected"), "render_rejected");
+        assert_eq!(
+            metric_outcome("render_invalid_response"),
+            "render_invalid_response"
+        );
         assert_eq!(
             metric_outcome("mutation_outcome_unknown"),
             "mutation_outcome_unknown"

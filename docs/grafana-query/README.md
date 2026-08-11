@@ -1,8 +1,8 @@
 # Grafana Tools
 
-The repository implements two progressive tools on one authenticated MCP server. `grafana_query` owns seven bounded reads; `grafana_exec` advertises operationally consequential writes and owns only `silence.create`.
+The repository implements three Grafana progressive tools on one authenticated MCP server. `grafana_query` owns nine bounded reads; `grafana_render` owns two bounded image reads; `grafana_exec` advertises operationally consequential writes and owns only `silence.create`.
 
-Local tests cover generated schemas, annotations, dispatch, validation, limits, normalization, safe errors, and mock Grafana requests. The alerting revision has not been deployed or exercised against live Grafana.
+Local tests cover generated schemas, annotations, dispatch, validation, limits, normalization, safe errors, and mock Grafana requests. The dashboard, rendering, and alerting expansion has not been deployed or exercised against live Grafana.
 
 | Document | Covers |
 | --- | --- |
@@ -14,7 +14,10 @@ Local tests cover generated schemas, annotations, dispatch, validation, limits, 
 | [Alert-rule specification](spec/alert-rules.md) | Bounded normalized Grafana alert-rule reads. |
 | [Alert-instance specification](spec/alert-instances.md) | Matcher validation and bounded current-alert reads. |
 | [Silence-list specification](spec/list-silences.md) | Bounded silence reads, state filtering, and recovery inspection. |
+| [Dashboard-list specification](spec/list-dashboards.md) | Bounded dashboard search and normalized inventory. |
+| [Dashboard-get specification](spec/get-dashboard.md) | Bounded dashboard, variable, and flattened panel inventory. |
 | [Silence-creation specification](spec/create-silence.md) | Consequential silence creation, results, failure ambiguity, and operator guidance. |
+| [Grafana render specification](../grafana-render/README.md) | Dashboard and panel PNG rendering contracts. |
 | [Observability architecture](../architecture/observability.md) | Signal paths, identity, correlation, metrics, profiles, and data-safety boundaries. |
 | [Observability operations](../operations/observability.md) | Runtime configuration, lifecycle, validation, and troubleshooting. |
 | [Observability testing](../quality/observability-testing.md) | Local checks and required post-deployment evidence. |

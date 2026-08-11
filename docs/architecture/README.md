@@ -2,7 +2,7 @@
 
 These documents define the system boundary and access model. The implementation passes local tests against a reviewed immutable Kuri Git revision.
 
-The previously committed runtime is deployed to preview. Basic runtime and discovery boundaries are verified. The worktree alerting revision is not deployed; full browser OAuth, authenticated preview MCP calls, live Grafana behavior, and Editor permission operation remain unverified. Production remains excluded.
+The previously committed runtime is deployed to preview. Basic runtime and discovery boundaries are verified. The worktree Grafana query, rendering, and alerting expansion is not deployed; full browser OAuth, authenticated preview MCP calls, live Grafana behavior, renderer operation, and Editor permission operation remain unverified. Production remains excluded.
 
 | Document | Covers |
 | --- | --- |

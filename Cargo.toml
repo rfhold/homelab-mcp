@@ -8,6 +8,7 @@ rust-version = "1.96"
 axum = "0.8.9"
 base64 = "0.22.1"
 chrono = "0.4.45"
+chrono-tz = "0.10.4"
 getrandom = "0.4.3"
 http = "1.4.0"
 mcp = { git = "https://git.holdenitdown.net/rfhold/kuri.git", rev = "184ce47ba45537ccb310de48a9b918d9423f3460", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }

@@ -3,6 +3,7 @@
 use std::{future::Future, sync::Arc};
 
 use axum::Router;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use mcp::{
     McpProtectedResourceMetadata, McpToolResult, OAuthAuthorizationServer,
     server::{
@@ -15,10 +16,11 @@ use serde_json::json;
 use crate::{
     config::OAuthConfig,
     integrations::grafana::{
-        Error as GrafanaError,
+        Error as GrafanaError, RenderedImage,
         actions::{
             AlertInstancesInput, AlertRulesInput, CreateSilenceCommand, CreateSilenceInput,
-            ListSilencesInput, LogqlInput, ProfilesInput, PromqlInput, TraceqlInput,
+            GetDashboardInput, ListDashboardsInput, ListSilencesInput, LogqlInput, ProfilesInput,
+            PromqlInput, RenderDashboardInput, RenderPanelInput, TraceqlInput,
         },
     },
     integrations::tekton::{
@@ -36,6 +38,8 @@ use crate::{
 const QUERY_TOOL_NAME: &str = "grafana_query";
 #[cfg(test)]
 const EXEC_TOOL_NAME: &str = "grafana_exec";
+#[cfg(test)]
+const RENDER_TOOL_NAME: &str = "grafana_render";
 #[cfg(test)]
 const TEKTON_QUERY_TOOL_NAME: &str = "tekton_query";
 #[cfg(test)]
@@ -88,7 +92,18 @@ pub fn router(
         namespace(name = "profile", description = "Inspect Pyroscope profiles."),
         namespace(name = "alert-rule", description = "Inspect Grafana alert rules."),
         namespace(name = "alert-instance", description = "Inspect current Grafana alert instances."),
-        namespace(name = "silence", description = "Inspect Grafana alert silences.")
+        namespace(name = "silence", description = "Inspect Grafana alert silences."),
+        namespace(name = "dashboard", description = "Inspect Grafana dashboard inventory.")
+    ),
+    tool(
+        name = "grafana_render",
+        description = "Render bounded Grafana dashboard and panel images.",
+        annotations = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+        })
     ),
     tool(
         name = "grafana_exec",
@@ -288,6 +303,96 @@ impl HomelabMcp {
             Ok(output) => Ok(query_result(output)),
             Err(error) => Ok(tool_error("silence", error)),
         }
+    }
+
+    /// List bounded Grafana dashboard inventory.
+    #[action(tool = "grafana_query", name = "dashboard.list")]
+    async fn list_dashboards(
+        &self,
+        input: ListDashboardsInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tool_error("dashboard", GrafanaError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.grafana.list_dashboards(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => query_result(output),
+            Err(error) => tool_error("dashboard", error),
+        })
+    }
+
+    /// Get bounded inventory for one Grafana dashboard.
+    #[action(tool = "grafana_query", name = "dashboard.get")]
+    async fn get_dashboard(
+        &self,
+        input: GetDashboardInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => return Ok(tool_error("dashboard", GrafanaError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.grafana.get_dashboard(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(output) => query_result(output),
+            Err(error) => tool_error("dashboard", error),
+        })
+    }
+
+    /// Render one bounded dashboard PNG.
+    #[action(tool = "grafana_render", name = "dashboard")]
+    async fn render_dashboard(
+        &self,
+        input: RenderDashboardInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let request = match input.validate() {
+            Ok(request) => request,
+            Err(_) => return Ok(tool_error("render", GrafanaError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.grafana.render_dashboard(&request) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(image) => render_result("dashboard", &request.uid, None, &request.options, image),
+            Err(error) => tool_error("render", error),
+        })
+    }
+
+    /// Render one bounded panel PNG.
+    #[action(tool = "grafana_render", name = "panel")]
+    async fn render_panel(
+        &self,
+        input: RenderPanelInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let request = match input.validate() {
+            Ok(request) => request,
+            Err(_) => return Ok(tool_error("render", GrafanaError::InvalidArguments)),
+        };
+        let result = tokio::select! {
+            result = self.services.grafana.render_panel(&request) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(image) => render_result(
+                "panel",
+                &request.uid,
+                Some(&request.panel_id),
+                &request.options,
+                image,
+            ),
+            Err(error) => tool_error("render", error),
+        })
     }
 
     /// Create a bounded Grafana silence that suppresses matching alert notifications.
@@ -564,6 +669,38 @@ fn silence_result(output: serde_json::Value) -> McpToolResult {
     }))
 }
 
+fn render_result(
+    render_type: &str,
+    uid: &str,
+    panel_id: Option<&str>,
+    options: &crate::integrations::grafana::actions::RenderOptions,
+    image: RenderedImage,
+) -> McpToolResult {
+    let mut structured = json!({
+        "render_type": render_type,
+        "uid": uid,
+        "from": options.from,
+        "to": options.to,
+        "width": options.width,
+        "height": options.height,
+        "scale": options.scale,
+        "theme": options.theme.as_str(),
+        "timezone": options.timezone,
+        "bytes": image.decoded_bytes,
+        "sha256": image.sha256,
+    });
+    if let Some(panel_id) = panel_id {
+        structured["panel_id"] = json!(panel_id);
+    }
+    McpToolResult::new(json!({
+        "content": [
+            {"type":"text", "text":format!("Rendered Grafana {render_type} PNG ({} bytes).", image.decoded_bytes)},
+            {"type":"image", "data":STANDARD.encode(image.bytes), "mimeType":"image/png"}
+        ],
+        "structuredContent": structured,
+    }))
+}
+
 fn tool_error(query_name: &str, error: GrafanaError) -> McpToolResult {
     error.into_tool_error(query_name).into_mcp_result()
 }
@@ -625,6 +762,38 @@ mod tests {
     async fn test_handler() -> (Arc<HomelabMcp>, PropagatedRequests, JoinHandle<()>) {
         let propagated = Arc::new(Mutex::new(Vec::new()));
         let grafana = Router::new()
+            .route(
+                "/api/search",
+                get(|| async {
+                    Json(json!([{
+                        "id":1, "uid":"dash-1", "title":"Overview", "uri":"db/overview",
+                        "url":"/d/dash-1/overview", "slug":"overview", "type":"dash-db",
+                        "folderUid":"folder-1", "folderTitle":"Operations", "tags":["prod"]
+                    }]))
+                }),
+            )
+            .route(
+                "/api/dashboards/uid/dash-1",
+                get(|| async {
+                    Json(json!({
+                        "meta":{"folderUid":"folder-1","folderTitle":"Operations","url":"/d/dash-1/overview"},
+                        "dashboard":{
+                            "id":1,"uid":"dash-1","title":"Overview","tags":["prod"],
+                            "timezone":"browser","version":4,"schemaVersion":42,
+                            "templating":{"list":[{"name":"cluster","label":"Cluster","type":"query","query":"secret"}]},
+                            "panels":[{"id":13,"title":"CPU","type":"timeseries","targets":[{"expr":"secret"}]}]
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/render/d/dash-1",
+                get(|| async { ([("content-type", "image/png; charset=binary")], b"\x89PNG\r\n\x1a\nimage".as_slice()) }),
+            )
+            .route(
+                "/render/d-solo/dash-1",
+                get(|| async { ([("content-type", "image/png")], b"\x89PNG\r\n\x1a\npanel".as_slice()) }),
+            )
             .route(
                 "/api/datasources/proxy/uid/loki/loki/api/v1/query",
                 get(
@@ -1298,7 +1467,7 @@ mod tests {
 
         let (_, listed) = post_mcp(&endpoint, request("tools/list", "list", json!({}))).await;
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         let query_tool = tools
             .iter()
             .find(|tool| tool["name"] == QUERY_TOOL_NAME)
@@ -1306,6 +1475,10 @@ mod tests {
         let exec_tool = tools
             .iter()
             .find(|tool| tool["name"] == EXEC_TOOL_NAME)
+            .unwrap();
+        let render_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == RENDER_TOOL_NAME)
             .unwrap();
         let tekton_query_tool = tools
             .iter()
@@ -1376,6 +1549,15 @@ mod tests {
         );
         assert_eq!(query_tool["inputSchema"]["additionalProperties"], false);
         assert_eq!(exec_tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(render_tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(render_tool["annotations"], query_tool["annotations"]);
+        let render_actions = render_tool["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            render_actions,
+            json!(["help", "dashboard", "panel"]).as_array().unwrap()
+        );
         let query_action_enum = query_tool["inputSchema"]["properties"]["action"]["enum"]
             .as_array()
             .unwrap();
@@ -1388,6 +1570,7 @@ mod tests {
             "help.alert-rule",
             "help.alert-instance",
             "help.silence",
+            "help.dashboard",
             "logql.query",
             "promql.query",
             "traceql.search",
@@ -1395,6 +1578,8 @@ mod tests {
             "alert-rule.list",
             "alert-instance.list",
             "silence.list",
+            "dashboard.list",
+            "dashboard.get",
         ] {
             assert!(
                 query_action_enum.contains(&json!(action)),
@@ -1450,7 +1635,8 @@ mod tests {
                 "profile",
                 "alert-rule",
                 "alert-instance",
-                "silence"
+                "silence",
+                "dashboard"
             ]
         );
         let mut query_actions = Vec::new();
@@ -1462,6 +1648,7 @@ mod tests {
             "alert-rule",
             "alert-instance",
             "silence",
+            "dashboard",
         ] {
             let (_, namespace_help) = post_mcp(
                 &endpoint,
@@ -1495,7 +1682,9 @@ mod tests {
                 "profile.merge",
                 "alert-rule.list",
                 "alert-instance.list",
-                "silence.list"
+                "silence.list",
+                "dashboard.list",
+                "dashboard.get"
             ]
         );
         for (action, required, optional) in [
@@ -1517,6 +1706,12 @@ mod tests {
             ("alert-rule.list", vec![], vec!["limit"]),
             ("alert-instance.list", vec![], vec!["matchers", "limit"]),
             ("silence.list", vec![], vec!["state", "limit"]),
+            (
+                "dashboard.list",
+                vec![],
+                vec!["query", "tags", "page", "limit"],
+            ),
+            ("dashboard.get", vec!["uid"], vec![]),
         ] {
             let schema = &query_actions
                 .iter()
@@ -1563,6 +1758,7 @@ mod tests {
                 ("fingerprint", "abc123"),
             ),
             ("silence.list", "silences", ("silence_id", "silence-active")),
+            ("dashboard.list", "dashboards", ("title", "Overview")),
         ] {
             let (_, call) = post_mcp(
                 &endpoint,
@@ -1584,6 +1780,77 @@ mod tests {
                 expected_field.1
             );
         }
+
+        let (_, dashboard) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "dashboard-get",
+                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"dashboard.get","input":{"uid":"dash-1"}}}),
+            ),
+        )
+        .await;
+        let dashboard_result = &dashboard["result"]["structuredContent"]["result"];
+        assert_eq!(
+            dashboard_result["panels"][0],
+            json!({"id":"13","title":"CPU","type":"timeseries"})
+        );
+        assert_eq!(
+            dashboard_result["variables"][0],
+            json!({"name":"cluster","label":"Cluster","type":"query"})
+        );
+        for omitted in ["targets", "expr", "secret", "url", "\"id\":1"] {
+            assert!(!dashboard_result.to_string().contains(omitted));
+        }
+
+        let (_, rendered) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "render-dashboard",
+                json!({"name":RENDER_TOOL_NAME,"arguments":{"action":"dashboard","input":{"uid":"dash-1"}}}),
+            ),
+        )
+        .await;
+        assert_eq!(rendered["result"]["content"][1]["type"], "image");
+        assert_eq!(rendered["result"]["content"][1]["mimeType"], "image/png");
+        assert!(
+            rendered["result"]["content"][1]["data"]
+                .as_str()
+                .unwrap()
+                .ends_with('=')
+        );
+        assert_eq!(
+            rendered["result"]["structuredContent"]["render_type"],
+            "dashboard"
+        );
+        assert!(
+            rendered["result"]["structuredContent"]["sha256"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+
+        let (_, filtered_render) = post_mcp(
+            &endpoint,
+            request(
+                "tools/call",
+                "filtered-render",
+                json!({"name":RENDER_TOOL_NAME,"arguments":{"action":"dashboard","input":{"uid":"dash-1"},"filter":".sha256"}}),
+            ),
+        )
+        .await;
+        assert!(filtered_render["result"]["structuredContent"].is_string());
+        assert_eq!(filtered_render["result"]["content"][1]["type"], "image");
+        assert_eq!(
+            filtered_render["result"]["content"][1]["mimeType"],
+            rendered["result"]["content"][1]["mimeType"]
+        );
+        assert_eq!(
+            filtered_render["result"]["content"][1]["data"],
+            rendered["result"]["content"][1]["data"]
+        );
 
         let (_, silence) = post_mcp(
             &endpoint,
@@ -1932,6 +2199,24 @@ mod tests {
                 "Grafana returned an invalid response.",
                 false,
             ),
+            (
+                GrafanaError::RenderTimeout,
+                "render_timeout",
+                "The Grafana render timed out.",
+                true,
+            ),
+            (
+                GrafanaError::RenderRejected,
+                "render_rejected",
+                "Grafana rejected the render request.",
+                false,
+            ),
+            (
+                GrafanaError::RenderInvalidResponse,
+                "render_invalid_response",
+                "Grafana returned an invalid render response.",
+                false,
+            ),
         ];
         for (error, code, message, retryable) in cases {
             let result = tool_error("LogQL", error).raw;
@@ -1943,6 +2228,43 @@ mod tests {
             assert_eq!(result["content"][0]["text"], message);
             assert!(!result.to_string().contains("secret"));
         }
+    }
+
+    #[test]
+    fn pinned_mcp_parses_render_image_content_without_exposing_bytes_in_debug() {
+        let request = RenderDashboardInput {
+            uid: "dash-1".to_owned(),
+            from: None,
+            to: None,
+            width: None,
+            height: None,
+            scale: None,
+            theme: None,
+            timezone: None,
+            variables: None,
+        }
+        .validate()
+        .unwrap();
+        let result = render_result(
+            "dashboard",
+            &request.uid,
+            None,
+            &request.options,
+            RenderedImage {
+                bytes: b"\x89PNG\r\n\x1a\nbody".to_vec(),
+                decoded_bytes: 12,
+                sha256: "0".repeat(64),
+            },
+        );
+        let parsed = result.content().unwrap();
+        assert!(matches!(
+            parsed.content[1],
+            mcp::McpToolContent::Image {
+                mime_type: "image/png",
+                ..
+            }
+        ));
+        assert!(!format!("{parsed:?}").contains("iVBOR"));
     }
 
     #[tokio::test]

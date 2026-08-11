@@ -39,7 +39,7 @@ The global W3C Trace Context propagator extracts inbound HTTP `traceparent` and 
 
 The JSON formatter adds lowercase hexadecimal `trace_id` and `span_id` fields when an active OpenTelemetry span exists. Events outside a span omit both fields.
 
-HTTP spans record method, stable route, and outcome. Completed requests also record response status and error status for 5xx responses. Cancelled requests record error status without a response status. `/health` and `/ready` intentionally bypass this layer and emit no request spans, request metrics, or completion logs. Grafana-upstream `grafana.query` spans record bounded action, mode, destination, and outcome values for reads and writes.
+HTTP spans record method, stable route, and outcome. Completed requests also record response status and error status for 5xx responses. Cancelled requests record error status without a response status. `/health` and `/ready` intentionally bypass this layer and emit no request spans, request metrics, or completion logs. Grafana-upstream `grafana.query` spans record bounded action, mode, destination, and outcome values for queries, renders, and writes.
 
 OpenTelemetry trace admission is fixed. It accepts `ERROR`, `WARN`, and `INFO` spans and events only for `homelab_mcp`, `homelab_mcp::*`, `mcp`, and `mcp::*` targets. It rejects `DEBUG`, `TRACE`, dependency, and lookalike targets and does not consult `RUST_LOG`. The JSON layer applies the same target allowlist with `RUST_LOG`; invalid or absent configuration defaults both target trees to `INFO`.
 
@@ -59,7 +59,7 @@ OpenTelemetry trace admission is fixed. It accepts `ERROR`, `WARN`, and `INFO` s
 
 The pinned Kuri generic MCP revision provides the MCP metrics. Homelab does not provide substitute MCP action spans or metrics.
 
-HTTP route values use matched templates or bounded fallback classes. Action, mode, datasource, and outcome values pass through fixed allowlists. Alerting adds actions `alert-rule.list`, `alert-instance.list`, `silence.list`, and `silence.create`, modes `list` and `create`, destination `grafana_alerting`, and outcomes `mutation_rejected` and `mutation_outcome_unknown`. Probe routes are intentionally absent from all HTTP request telemetry.
+HTTP route values use matched templates or bounded fallback classes. Action, mode, datasource, and outcome values pass through fixed allowlists. Dashboard inventory uses actions `dashboard.list` and `dashboard.get`, destinations `grafana_dashboards`, and modes `list` and `get`. Rendering uses actions `dashboard` and `panel`, mode `render`, destination `grafana_rendering`, and outcomes `render_rejected` and `render_invalid_response`. Alerting retains its existing fixed values. Probe routes are intentionally absent from all HTTP request telemetry.
 
 HTTP methods use canonical uppercase values for `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `CONNECT`, and `TRACE`. Every extension method becomes `OTHER` before span, metric, or log creation.
 
@@ -81,7 +81,7 @@ The agent does not add pod names, pod UIDs, user values, query text, or a second
 
 ## Data Safety
 
-Instrumentation excludes authorization headers, tokens, request bodies, query strings, LogQL, PromQL, TraceQL, profile selectors, alert matchers, silence comments, alert data, internal URLs, upstream errors, and upstream response bodies.
+Instrumentation excludes authorization headers, tokens, request bodies, query strings, LogQL, PromQL, TraceQL, profile selectors, dashboard and panel UIDs, render ranges, timezones, dimensions, variables, image bytes and digests, alert matchers, silence comments, alert data, internal URLs, upstream errors, and upstream response bodies.
 
 Future Tekton integration-specific telemetry must use fixed action, destination, and outcome values. It must exclude repository file bodies, workflow parameters, Git references, task logs, Kubernetes objects, headers, internal routes, and secret values.
 
