@@ -22,6 +22,8 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const API_V1: &str = "application/vnd.ceph.api.v1.0+json";
 const API_V1_1: &str = "application/vnd.ceph.api.v1.1+json";
+const OSD_INVENTORY_PAGE_SIZE: usize = 100;
+const OSD_INVENTORY_MAX_PAGES: usize = 5;
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -145,10 +147,43 @@ impl CephClient {
     }
 
     pub async fn osd(&self, cluster: &str, osd_id: u32) -> Result<Value, Error> {
-        let value = self
+        let detail = self
             .query(Method::GET, &format!("api/osd/{osd_id}"), &[], None, API_V1)
             .await?;
-        normalize::osd(cluster, &value)
+        let mut inventory = None;
+        for page in 0..OSD_INVENTORY_MAX_PAGES {
+            let value = self
+                .query(
+                    Method::GET,
+                    "api/osd",
+                    &[
+                        ("offset", (page * OSD_INVENTORY_PAGE_SIZE).to_string()),
+                        ("limit", OSD_INVENTORY_PAGE_SIZE.to_string()),
+                    ],
+                    None,
+                    API_V1_1,
+                )
+                .await?;
+            let values = value.as_array().ok_or(Error::InvalidResponse)?;
+            if values.len() > OSD_INVENTORY_PAGE_SIZE {
+                return Err(Error::InvalidResponse);
+            }
+            if let Some(value) = values
+                .iter()
+                .find(|value| value.get("id").and_then(Value::as_u64) == Some(u64::from(osd_id)))
+            {
+                inventory = Some(value.clone());
+                break;
+            }
+            if values.len() < OSD_INVENTORY_PAGE_SIZE {
+                break;
+            }
+        }
+        normalize::osd(
+            cluster,
+            &detail,
+            inventory.as_ref().ok_or(Error::InvalidResponse)?,
+        )
     }
 
     pub async fn safe_to_destroy(&self, cluster: &str, osd_id: u32) -> Result<Value, Error> {
@@ -236,16 +271,7 @@ impl CephClient {
                 progress,
             )
             .await?;
-        if response.status != StatusCode::OK {
-            return self.mutation_result(cluster, "osd.mark", Some(osd_id), response, None);
-        }
-        self.mutation_result(
-            cluster,
-            "osd.mark",
-            Some(osd_id),
-            response,
-            self.read_back_osd(cluster, osd_id).await,
-        )
+        self.mutation_result(cluster, "osd.mark", Some(osd_id), response)
     }
 
     pub(crate) async fn reweight_with_progress(
@@ -264,16 +290,7 @@ impl CephClient {
                 progress,
             )
             .await?;
-        if response.status != StatusCode::OK {
-            return self.mutation_result(cluster, "osd.reweight", Some(osd_id), response, None);
-        }
-        self.mutation_result(
-            cluster,
-            "osd.reweight",
-            Some(osd_id),
-            response,
-            self.read_back_osd(cluster, osd_id).await,
-        )
+        self.mutation_result(cluster, "osd.reweight", Some(osd_id), response)
     }
 
     pub(crate) async fn scrub_with_progress(
@@ -293,7 +310,7 @@ impl CephClient {
                 progress,
             )
             .await?;
-        self.mutation_result(cluster, "osd.scrub", Some(osd_id), response, None)
+        self.mutation_result(cluster, "osd.scrub", Some(osd_id), response)
     }
 
     pub(crate) async fn destroy_with_progress(
@@ -312,7 +329,7 @@ impl CephClient {
                 progress,
             )
             .await?;
-        self.mutation_result(cluster, "osd.destroy", Some(osd_id), response, None)
+        self.mutation_result(cluster, "osd.destroy", Some(osd_id), response)
     }
 
     pub(crate) async fn purge_with_progress(
@@ -331,7 +348,7 @@ impl CephClient {
                 progress,
             )
             .await?;
-        self.mutation_result(cluster, "osd.purge", Some(osd_id), response, None)
+        self.mutation_result(cluster, "osd.purge", Some(osd_id), response)
     }
 
     async fn require_safe(&self, cluster: &str, osd_id: u32) -> Result<(), Error> {
@@ -342,19 +359,14 @@ impl CephClient {
         Ok(())
     }
 
-    async fn read_back_osd(&self, cluster: &str, osd_id: u32) -> Option<Value> {
-        self.osd(cluster, osd_id).await.ok()
-    }
-
     fn mutation_result(
         &self,
         cluster: &str,
         action: &str,
         osd_id: Option<u32>,
         response: UpstreamResponse,
-        read_back: Option<Value>,
     ) -> Result<Value, Error> {
-        let mut result = match response.status {
+        Ok(match response.status {
             StatusCode::OK => json!({
                 "cluster":cluster,"action":action,"osd_id":osd_id,"status":"completed",
             }),
@@ -364,11 +376,7 @@ impl CephClient {
                     .map_err(|_| Error::MutationOutcomeUnknown)?,
             }),
             _ => return Err(Error::MutationOutcomeUnknown),
-        };
-        if let Some(read_back) = read_back {
-            result["read_back"] = read_back;
-        }
-        Ok(result)
+        })
     }
 
     async fn query(
@@ -670,6 +678,8 @@ mod tests {
         auth_delay_millis: AtomicU64,
         safe_to_destroy_delay_millis: AtomicU64,
         task_response: StdMutex<Value>,
+        osd_detail_response: StdMutex<Value>,
+        osd_list_responses: StdMutex<VecDeque<Value>>,
         mutation_responses: StdMutex<VecDeque<(StatusCode, Value)>>,
     }
 
@@ -730,8 +740,15 @@ mod tests {
                 axum::Json(json!({"padding":"x".repeat(MAX_RESPONSE_BYTES)})).into_response()
             }
             ("GET", "/api/health/minimal") => axum::Json(health()).into_response(),
-            ("GET", "/api/osd") => axum::Json(json!([{"id":1,"up":1,"in":1,"state":["exists","up"],"host":{"name":"osd-host-a"},"tree":{"device_class":"ssd"},"operational_status":"working"},{"id":2,"up":0,"in":1,"state":["exists"],"host":{"name":"osd-host-b"},"tree":{"device_class":"hdd"},"operational_status":"working"}])).into_response(),
-            ("GET", "/api/osd/1") => axum::Json(json!({"osd_map":{"id":1,"up":1,"in":1,"state":["exists","up"],"weight":0.5},"osd_metadata":{"hostname":"osd-host-a","default_device_class":"ssd"},"operational_status":"working"})).into_response(),
+            ("GET", "/api/osd") => axum::Json(
+                state
+                    .osd_list_responses
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| json!([{"id":1,"up":1,"in":1,"state":["exists","up"],"host":{"name":"osd-host-a"},"tree":{"device_class":"ssd"},"operational_status":"working"},{"id":2,"up":0,"in":1,"state":["exists"],"host":{"name":"osd-host-b"},"tree":{"device_class":"hdd"},"operational_status":"working"}])),
+            )
+            .into_response(),
             ("GET", "/api/osd/safe_to_destroy") => {
                 let delay = state.safe_to_destroy_delay_millis.load(Ordering::SeqCst);
                 if delay > 0 {
@@ -743,6 +760,13 @@ mod tests {
             ("GET", "/api/osd/flags") => axum::Json(json!(["sortbitwise","noout"])).into_response(),
             ("GET", "/api/task") => {
                 axum::Json(state.task_response.lock().unwrap().clone()).into_response()
+            }
+            ("GET", path)
+                if path
+                    .strip_prefix("/api/osd/")
+                    .is_some_and(|id| id.bytes().all(|byte| byte.is_ascii_digit())) =>
+            {
+                axum::Json(state.osd_detail_response.lock().unwrap().clone()).into_response()
             }
             _ => axum::Json(Value::Null).into_response(),
         }
@@ -774,6 +798,10 @@ mod tests {
             auth_delay_millis: AtomicU64::new(0),
             safe_to_destroy_delay_millis: AtomicU64::new(0),
             task_response: StdMutex::new(json!({"executing_tasks":[],"finished_tasks":[]})),
+            osd_detail_response: StdMutex::new(
+                json!({"osd_map":{"id":1,"up":1,"in":1,"state":["exists","up"],"weight":0.5},"osd_metadata":{"hostname":"osd-host-a","default_device_class":"ssd"},"operational_status":"working"}),
+            ),
+            osd_list_responses: StdMutex::new(VecDeque::new()),
             mutation_responses: StdMutex::new(VecDeque::new()),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -833,7 +861,6 @@ mod tests {
             .unwrap();
         assert_eq!(mark["status"], "completed");
         assert!(mark.get("task").is_none());
-        assert_eq!(mark["read_back"]["osd_id"], 1);
         client
             .reweight_with_progress("romulus", 1, 0.5, &new_dispatch_progress())
             .await
@@ -873,6 +900,252 @@ mod tests {
                 .iter()
                 .any(|(method, uri, _, _)| method == "PUT" && uri == "/api/osd/flags")
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn osd_detail_is_enriched_from_bounded_paginated_inventory() {
+        let (client, state, server) = mock().await;
+        *state.osd_detail_response.lock().unwrap() = json!({
+            "osd_map":{"id":150,"up":1,"in":1,"state":["exists","up"]},
+            "osd_metadata":{"hostname":"detail-host","default_device_class":"ssd"}
+        });
+        let first_page = (0..100)
+            .map(|id| json!({"id":id,"tree":{"device_class":"hdd"}}))
+            .collect::<Vec<_>>();
+        *state.osd_list_responses.lock().unwrap() = VecDeque::from([
+            Value::Array(first_page),
+            json!([{"id":150,"host":{"name":"inventory-host"},"tree":{"device_class":"nvme"}}]),
+        ]);
+
+        let result = client.osd("romulus", 150).await.unwrap();
+        assert_eq!(result["osd_id"], 150);
+        assert_eq!(result["host"], "detail-host");
+        assert_eq!(result["device_class"], "nvme");
+        assert_eq!(result["default_device_class"], "ssd");
+        let requests = state.requests.lock().unwrap();
+        let osd_requests = requests
+            .iter()
+            .filter(|(_, uri, _, _)| uri.starts_with("/api/osd"))
+            .map(|(_, uri, _, _)| uri.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            osd_requests,
+            [
+                "/api/osd/150",
+                "/api/osd?offset=0&limit=100",
+                "/api/osd?offset=100&limit=100"
+            ]
+        );
+        assert!(osd_requests.iter().all(|uri| !uri.contains("search")));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn osd_inventory_enrichment_selects_only_an_exact_numeric_id() {
+        let (client, state, server) = mock().await;
+        *state.osd_detail_response.lock().unwrap() = json!({
+            "osd_map":{"id":2,"state":[]},
+            "osd_metadata":{"hostname":"detail-host","default_device_class":"ssd"}
+        });
+        state.osd_list_responses.lock().unwrap().push_back(json!([
+            {"id":"2","tree":{"device_class":"string-id"}},
+            {"id":20,"tree":{"device_class":"wrong-id"}},
+            {"id":2,"tree":{"device_class":"nvme"}}
+        ]));
+
+        let result = client.osd("romulus", 2).await.unwrap();
+        assert_eq!(result["device_class"], "nvme");
+        assert_eq!(result["default_device_class"], "ssd");
+        let requests = state.requests.lock().unwrap();
+        assert!(requests.iter().any(|(_, uri, _, _)| uri == "/api/osd/2"));
+        assert!(
+            requests
+                .iter()
+                .any(|(_, uri, _, _)| uri == "/api/osd?offset=0&limit=100")
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(_, uri, _, _)| !uri.contains("search"))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn osd_inventory_short_page_without_exact_id_fails_closed() {
+        let (client, state, server) = mock().await;
+        *state.osd_detail_response.lock().unwrap() =
+            json!({"osd_map":{"id":9,"state":[]},"osd_metadata":{}});
+        state
+            .osd_list_responses
+            .lock()
+            .unwrap()
+            .push_back(json!([{"id":8}]));
+
+        assert_eq!(client.osd("romulus", 9).await, Err(Error::InvalidResponse));
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, uri, _, _)| uri.starts_with("/api/osd?"))
+                .map(|(_, uri, _, _)| uri.as_str())
+                .collect::<Vec<_>>(),
+            ["/api/osd?offset=0&limit=100"]
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(_, uri, _, _)| !uri.contains("search"))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn osd_inventory_non_array_fails_closed_without_another_page() {
+        let (client, state, server) = mock().await;
+        *state.osd_detail_response.lock().unwrap() =
+            json!({"osd_map":{"id":9,"state":[]},"osd_metadata":{}});
+        state
+            .osd_list_responses
+            .lock()
+            .unwrap()
+            .push_back(json!({"id":9}));
+
+        assert_eq!(client.osd("romulus", 9).await, Err(Error::InvalidResponse));
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, uri, _, _)| uri.starts_with("/api/osd?"))
+                .map(|(_, uri, _, _)| uri.as_str())
+                .collect::<Vec<_>>(),
+            ["/api/osd?offset=0&limit=100"]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn osd_inventory_oversized_page_fails_closed_without_another_page() {
+        let (client, state, server) = mock().await;
+        *state.osd_detail_response.lock().unwrap() =
+            json!({"osd_map":{"id":999,"state":[]},"osd_metadata":{}});
+        state
+            .osd_list_responses
+            .lock()
+            .unwrap()
+            .push_back(Value::Array((0..101).map(|id| json!({"id":id})).collect()));
+
+        assert_eq!(
+            client.osd("romulus", 999).await,
+            Err(Error::InvalidResponse)
+        );
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, uri, _, _)| uri.starts_with("/api/osd?"))
+                .map(|(_, uri, _, _)| uri.as_str())
+                .collect::<Vec<_>>(),
+            ["/api/osd?offset=0&limit=100"]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn osd_inventory_five_full_pages_without_exact_id_fail_closed() {
+        let (client, state, server) = mock().await;
+        *state.osd_detail_response.lock().unwrap() =
+            json!({"osd_map":{"id":999,"state":[]},"osd_metadata":{}});
+        let pages = (0..5)
+            .map(|page| {
+                Value::Array(
+                    (0..100)
+                        .map(|index| json!({"id":page * 100 + index}))
+                        .collect(),
+                )
+            })
+            .collect();
+        *state.osd_list_responses.lock().unwrap() = pages;
+
+        assert_eq!(
+            client.osd("romulus", 999).await,
+            Err(Error::InvalidResponse)
+        );
+        let requests = state.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, uri, _, _)| uri.starts_with("/api/osd?"))
+                .map(|(_, uri, _, _)| uri.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "/api/osd?offset=0&limit=100",
+                "/api/osd?offset=100&limit=100",
+                "/api/osd?offset=200&limit=100",
+                "/api/osd?offset=300&limit=100",
+                "/api/osd?offset=400&limit=100"
+            ]
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|(_, uri, _, _)| !uri.contains("search"))
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn osd_inventory_finds_exact_id_as_five_hundredth_inspected_entry() {
+        let (client, state, server) = mock().await;
+        *state.osd_detail_response.lock().unwrap() = json!({
+            "osd_map":{"id":999,"state":[]},
+            "osd_metadata":{"default_device_class":"ssd"}
+        });
+        let mut pages = (0..4)
+            .map(|page| {
+                Value::Array(
+                    (0..100)
+                        .map(|index| json!({"id":page * 100 + index}))
+                        .collect(),
+                )
+            })
+            .collect::<VecDeque<_>>();
+        let mut fifth_page = (400..499).map(|id| json!({"id":id})).collect::<Vec<_>>();
+        fifth_page.push(json!({"id":999,"tree":{"device_class":"nvme"}}));
+        pages.push_back(Value::Array(fifth_page));
+        *state.osd_list_responses.lock().unwrap() = pages;
+
+        let result = client.osd("romulus", 999).await.unwrap();
+        assert_eq!(result["device_class"], "nvme");
+        assert_eq!(result["default_device_class"], "ssd");
+        let requests = state.requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|(_, uri, _, _)| uri == "/api/osd?offset=400&limit=100")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn successful_mark_and_reweight_do_not_issue_read_back_requests() {
+        let (client, state, server) = mock().await;
+
+        let mark = client
+            .mark_with_progress("romulus", 1, MarkState::Out, &new_dispatch_progress())
+            .await
+            .unwrap();
+        let reweight = client
+            .reweight_with_progress("romulus", 1, 0.5, &new_dispatch_progress())
+            .await
+            .unwrap();
+        assert_eq!(mark["status"], "completed");
+        assert_eq!(reweight["status"], "completed");
+        assert!(mark.get("read_back").is_none());
+        assert!(reweight.get("read_back").is_none());
+        let requests = state.requests.lock().unwrap();
+        assert!(requests.iter().all(|(method, _, _, _)| method != "GET"));
         server.abort();
     }
 

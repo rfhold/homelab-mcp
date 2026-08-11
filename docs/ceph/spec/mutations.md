@@ -26,7 +26,7 @@ Neither action exposes or uses force. `osd.destroy` retains the OSD identity for
 
 ## Completion and HTTP 202
 
-Ceph 19 Squid implements the five current OSD mutations as synchronous Dashboard controller operations. A successful synchronous response reports `status: completed`. It does not claim more than successful controller completion and the normalized read-back fields present in the result.
+Ceph 19 Squid implements the five current OSD mutations as synchronous Dashboard controller operations. A successful synchronous response reports `status: completed`. For `osd.mark` and `osd.reweight`, the service returns that result immediately after HTTP 200 without issuing a follow-up state query, so completion does not claim that the cluster has already converged on the requested state.
 
 If a Dashboard returns HTTP 202, the service accepts the response only when it contains a safe normalized task identity. The result reports accepted asynchronous status and that identity for `task.list` follow-up. HTTP 202 without a safe task identity returns non-retryable `mutation_outcome_unknown` because dispatch can already have occurred.
 

@@ -21,6 +21,14 @@ Every cluster-backed action requires one exact configured cluster selector. OSD 
 
 `osd.list`, `device.list`, and `task.list` accept an optional limit that defaults to 50 and ranges from 1 through 100. The task limit applies independently to executing and finished task groups. `status.get` returns at most 100 health checks. Truncation remains explicit.
 
+## OSD Classes and Exact Detail Enrichment
+
+Every normalized OSD has two distinct nullable class fields. `device_class` is the currently assigned CRUSH class from the inventory item's `/tree/device_class`. `default_device_class` is the hardware-derived default from detail metadata at `/osd_metadata/default_device_class` when that metadata is available. A default class is never substituted for an absent assigned class.
+
+`osd.list` reads inventory data, so it returns the assigned `device_class` and always returns `default_device_class: null`. List host values come from `/host/name`.
+
+`osd.get` first reads the exact OSD detail, preserving its host from `/osd_metadata/hostname` and its `default_device_class`. It then resolves the assigned class through `GET api/osd` using API v1.1, fixed pages of 100, offsets of 0 through 400, and exact numeric ID comparison. The lookup does not use Dashboard search. It stops after a short page and inspects at most five pages or 500 OSDs. If the detail exists but its exact inventory item is absent, a page exceeds the requested size, or the five-page bound is exhausted, the query fails with `invalid_response` rather than returning ambiguous class data.
+
 ## Current Metrics Only
 
 `metrics.summary` reads only the current snapshot available from the Ceph Dashboard API. It does not query Prometheus, Grafana, Mimir, or another historical store. It does not accept a query expression, time range, step, datasource, or arbitrary metric name.

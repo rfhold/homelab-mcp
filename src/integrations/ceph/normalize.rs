@@ -69,29 +69,23 @@ pub(crate) fn metrics(cluster: &str, value: &Value) -> Result<Value, Error> {
     }))
 }
 
-pub(crate) fn osd(cluster: &str, value: &Value) -> Result<Value, Error> {
+pub(crate) fn osd(cluster: &str, value: &Value, inventory: &Value) -> Result<Value, Error> {
     let map = value.get("osd_map").unwrap_or(value);
-    let id = map
-        .get("id")
-        .or_else(|| map.get("osd"))
-        .and_then(Value::as_u64)
-        .ok_or(Error::InvalidResponse)?;
+    let id = osd_id(map).ok_or(Error::InvalidResponse)?;
+    if osd_id(inventory) != Some(id) {
+        return Err(Error::InvalidResponse);
+    }
     Ok(json!({
         "cluster":cluster,"osd_id":id,
         "up":flag(map.get("up")),"in":flag(map.get("in")),
         "state":bounded_strings(map.get("state"), 16, 128)?,
         "weight":map.get("weight").and_then(Value::as_f64),
         "primary_affinity":map.get("primary_affinity").and_then(Value::as_f64),
-        "device_class":bounded_string(
-            value.pointer("/osd_metadata/default_device_class")
-                .or_else(|| value.pointer("/tree/device_class")),
-            128,
+        "device_class":bounded_string(inventory.pointer("/tree/device_class"), 128)?,
+        "default_device_class":bounded_string(
+            value.pointer("/osd_metadata/default_device_class"), 128
         )?,
-        "host":bounded_string(
-            value.pointer("/osd_metadata/hostname")
-                .or_else(|| value.pointer("/host/name")),
-            256,
-        )?,
+        "host":bounded_string(value.pointer("/osd_metadata/hostname"), 256)?,
         "operational_status":bounded_string(value.get("operational_status"), 128)?,
     }))
 }
@@ -101,9 +95,31 @@ pub(crate) fn osd_list(cluster: &str, value: &Value, limit: u16) -> Result<Value
     let result = values
         .iter()
         .take(usize::from(limit))
-        .map(|value| osd(cluster, value))
+        .map(|value| osd_summary(cluster, value))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(json!({"cluster":cluster,"result":result,"truncated":values.len()>usize::from(limit)}))
+}
+
+fn osd_summary(cluster: &str, value: &Value) -> Result<Value, Error> {
+    let id = osd_id(value).ok_or(Error::InvalidResponse)?;
+    Ok(json!({
+        "cluster":cluster,"osd_id":id,
+        "up":flag(value.get("up")),"in":flag(value.get("in")),
+        "state":bounded_strings(value.get("state"), 16, 128)?,
+        "weight":value.get("weight").and_then(Value::as_f64),
+        "primary_affinity":value.get("primary_affinity").and_then(Value::as_f64),
+        "device_class":bounded_string(value.pointer("/tree/device_class"), 128)?,
+        "default_device_class":Value::Null,
+        "host":bounded_string(value.pointer("/host/name"), 256)?,
+        "operational_status":bounded_string(value.get("operational_status"), 128)?,
+    }))
+}
+
+fn osd_id(value: &Value) -> Option<u64> {
+    value
+        .get("id")
+        .or_else(|| value.get("osd"))
+        .and_then(Value::as_u64)
 }
 
 pub(crate) fn safe_to_destroy(cluster: &str, osd_id: u32, value: &Value) -> Result<Value, Error> {
@@ -392,19 +408,20 @@ mod tests {
     }
 
     #[test]
-    fn squid_osd_list_and_detail_shapes_normalize_host_and_device_class() {
+    fn squid_osd_list_and_detail_class_meanings_never_alias() {
         let list = json!([{
             "id":2,
             "up":1,
             "in":1,
             "state":["exists","up"],
             "host":{"name":"osd-host-a"},
-            "tree":{"device_class":"ssd"},
+            "tree":{"device_class":"nvme"},
             "operational_status":"working"
         }]);
         let listed = osd_list("romulus", &list, 10).unwrap();
         assert_eq!(listed["result"][0]["host"], "osd-host-a");
-        assert_eq!(listed["result"][0]["device_class"], "ssd");
+        assert_eq!(listed["result"][0]["device_class"], "nvme");
+        assert_eq!(listed["result"][0]["default_device_class"], Value::Null);
 
         let detail = json!({
             "osd_map":{
@@ -420,10 +437,52 @@ mod tests {
             },
             "operational_status":"working"
         });
-        let detailed = osd("romulus", &detail).unwrap();
+        let detailed = osd("romulus", &detail, &list[0]).unwrap();
         assert_eq!(detailed["host"], "osd-host-a");
-        assert_eq!(detailed["device_class"], "ssd");
+        assert_eq!(detailed["device_class"], "nvme");
+        assert_eq!(detailed["default_device_class"], "ssd");
         assert_eq!(detailed["operational_status"], "working");
+    }
+
+    #[test]
+    fn osd_classes_are_nullable_and_independently_bounded() {
+        let detail = json!({
+            "osd_map":{"id":2,"state":[]},
+            "osd_metadata":{"hostname":"osd-host-a"}
+        });
+        let inventory = json!({"id":2,"tree":{"device_class":null}});
+        let result = osd("romulus", &detail, &inventory).unwrap();
+        assert_eq!(result["device_class"], Value::Null);
+        assert_eq!(result["default_device_class"], Value::Null);
+
+        for (assigned, default) in [
+            (json!(7), json!("ssd")),
+            (json!("nvme\n"), json!("ssd")),
+            (json!("x".repeat(129)), json!("ssd")),
+            (json!("nvme"), json!(7)),
+            (json!("nvme"), json!("ssd\n")),
+            (json!("nvme"), json!("x".repeat(129))),
+        ] {
+            let detail = json!({
+                "osd_map":{"id":2,"state":[]},
+                "osd_metadata":{"hostname":"osd-host-a","default_device_class":default}
+            });
+            let inventory = json!({"id":2,"tree":{"device_class":assigned}});
+            assert_eq!(
+                osd("romulus", &detail, &inventory),
+                Err(Error::InvalidResponse)
+            );
+        }
+    }
+
+    #[test]
+    fn osd_detail_and_inventory_ids_must_match() {
+        let detail = json!({"osd_map":{"id":2,"state":[]},"osd_metadata":{}});
+        let inventory = json!({"id":3,"tree":{"device_class":"nvme"}});
+        assert_eq!(
+            osd("romulus", &detail, &inventory),
+            Err(Error::InvalidResponse)
+        );
     }
 
     #[test]
