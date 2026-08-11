@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository runtime has 153 passing Rust tests under Rust 1.96: 151 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, Kubernetes actions, and cleanup control.
+The repository runtime has 157 passing Rust tests under Rust 1.96: 155 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana query, rendering, silence actions, Tekton actions, Kubernetes actions, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
@@ -10,7 +10,7 @@ Rust 1.95 cannot run the suite because the manifest and Kuri crates require Rust
 
 Pulumi has 20 passing mock tests for the declared runtime and deployment contract. The current container built and deployed successfully to preview; the Kubernetes worktree revision has not been deployed.
 
-PipelineRun `homelab-mcp-preview-tfd8k` completed all seven tasks and applied commit `4f2e192` to preview.
+The preview workflow completed successfully and applied commit `798dd92`.
 
 ## Verified Commands
 
@@ -62,11 +62,11 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Hosted OAuth integration | Run complete authorization-code and refresh paths, including local token issuance and validation, beyond local consent, challenge, and mocked generic components. |
 | Live Authentik integration | Exercise OIDC discovery, browser login, callback validation, and transaction completion against the configured provider. |
 | Kuri-client integration | Exercise DCR, CIMD, native loopback authorization, token refresh, exact resource binding, and calls to all advertised MCP tools. |
-| Live Grafana integration | Exercise controlled datasource and dashboard reads, rendering, alerting and recording-rule reads, and silence creation without exposing credentials. Verify the renderer prerequisites and intended Editor operations. |
+| Live Grafana integration | Alert listing succeeded with at least 100 entries on commit `798dd92`. Recording listing returned `invalid_response` with `limit: 1`. Verify the approved normalization fixes, controlled datasource and dashboard reads, rendering, silence creation, renderer prerequisites, and intended Editor operations. |
 | Container runtime | Basic deployed startup is verified; complete the full browser OAuth and Grafana path in the deployed container. |
 | Preview end-to-end | Prove browser login, local token issuance and refresh, authenticated `/mcp`, and controlled Grafana datasource, alerting, and recording-rule reads and silence creation on preview. |
 
-The Rust suite supplies local and mock evidence. Deployed evidence additionally covers startup, readiness, metadata, and challenge behavior, but not browser OAuth, authenticated MCP, live alert APIs, recording-rule behavior, or Editor permission operation. No deployment or live operation occurred for the alerting and recording-rule revision.
+The Rust suite supplies local and mock evidence. Deployed commit `798dd92` adds authenticated rule-list evidence: alert listing succeeded with at least 100 entries, while recording listing returned `invalid_response` with `limit: 1`. The approved normalization fixes remain undeployed and lack live verification. Browser OAuth, the rest of the authenticated MCP and Grafana paths, and silence creation remain open.
 
 The Tekton feature has worktree implementation, Rust unit and MCP discovery tests, and passing Pulumi declaration tests. It has no deployment or live evidence. Existing preview evidence does not cover `tekton_query`, `tekton_exec`, Forgejo, PAC, effective Kubernetes RBAC, or task logs.
 
@@ -129,6 +129,8 @@ Alerting tests must additionally cover:
 - classification by the shared provisioning response's `record` field, category filtering before limits, and opposite-category exclusion;
 - strict normalization only for selected entries up to each limit, with malformed `record` discriminators rejected;
 - bounded alert and recording summaries, nullable target datasource UIDs, and documented conservative URL-field exclusions;
+- null `rule_group` for exact-prefix `no_group_for_rule_` synthetic names in both rule outputs, with real bounded group names preserved;
+- recording `labels` normalization from missing or null to an empty map, with strict bounded URL-filtered objects and rejection of other shapes;
 - alert-instance matcher grammar and byte limits, repeated server-built filters, list limits, status booleans, and safe normalized maps;
 - silence-list state and limit bounds, fixed route without caller-controlled parameters, filtering before truncation, strict response validation, and normalized recovery fields;
 - required silence matchers, duration and comment bounds, immediate start, fixed `createdBy`, and exact three-field success output;
@@ -214,6 +216,6 @@ Current preview evidence does not cover `kubernetes_query`, `kubernetes_exec`, t
 
 The successful main pipeline and applied preview stack provide foundation preview evidence. Public health checks prove only the current health host.
 
-Before full OAuth and Grafana preview approval, record the local/mock, PostgreSQL, hosted OAuth, Authentik, Kuri-client, Grafana, and container-runtime results. This must include live alert and recording-rule API behavior and Editor permission operation. Then obtain explicit approval for the preview end-to-end check and any silence creation.
+Before full OAuth and Grafana preview approval, record the local/mock, PostgreSQL, hosted OAuth, Authentik, Kuri-client, Grafana, and container-runtime results. Preserve the deployed alert success and recording failure as partial evidence. Verify the approved rule normalization after deployment, plus the rest of the live Grafana and Editor operations. Then obtain explicit approval for any additional preview checks and silence creation.
 
 Before production approval, record all prior evidence plus image inspection, stack-specific preview review, rotation exercises, and recovery validation. Production remains outside the current target.

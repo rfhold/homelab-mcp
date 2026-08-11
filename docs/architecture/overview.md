@@ -4,7 +4,7 @@
 
 The repository implements hosted OAuth, generic OIDC, PostgreSQL persistence, authenticated MCP, ten bounded Grafana query reads, two bounded Grafana image renders, bounded silence creation, and bounded Tekton and PAC tools in the current worktree.
 
-Preview runs the authenticated runtime from commit `4f2e192`. Health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge are verified. The worktree dashboard inventory, rendering, alerting, recording-rule, and Tekton revisions have not been deployed or operated live. Full browser OAuth, authenticated preview MCP calls, live integration behavior, renderer operation, and permission operation remain unverified; production remains excluded.
+Preview runs the authenticated runtime from commit `798dd92`. Health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge are verified. An authenticated `alert-rule.list` call returned at least 100 entries; `recording-rule.list` returned `invalid_response` with `limit: 1`. The approved rule-normalization fixes and the worktree Tekton and Kubernetes changes remain undeployed. Full browser OAuth, other authenticated MCP and Grafana behavior, rendering, silence creation, effective Kubernetes RBAC, and permission operation remain unverified; production remains excluded.
 
 ## Purpose
 
@@ -47,11 +47,11 @@ The [Kubernetes tool specifications](../kubernetes/README.md) own implemented Ku
 | --- | --- | --- |
 | Axum host | Deployed to preview | Initialize dependencies, serve health/runtime routes, and handle graceful shutdown. |
 | Container declaration | Applied to preview | Build release and runtime images; Rust tests run through Cargo outside the image build. |
-| Deployment declarations | Previous revision applied; worktree update pending | Supply the runtime variables, Secrets, mounts, identity, database, Grafana, workload, and route. |
-| MCP endpoint | Worktree updated; previous revision deployed | Negotiate stateless Streamable HTTP and dispatch authenticated tool calls; the deployed unauthenticated challenge is verified. |
+| Deployment declarations | Commit `798dd92` applied; worktree update pending | Supply the runtime variables, Secrets, mounts, identity, database, Grafana, workload, and route. |
+| MCP endpoint | Commit `798dd92` deployed; worktree update pending | Negotiate stateless Streamable HTTP and dispatch authenticated tool calls; the deployed unauthenticated challenge and partial authenticated rule-list behavior are verified. |
 | Hosted OAuth issuer | Deployed to preview | Publish metadata, issue local access tokens, and manage durable OAuth client and token state; metadata is verified. |
 | Generic OIDC integration | Deployed, flow unverified | Use MCP-owned one-shot OIDC transactions and hosted continuation with Authentik. |
-| Grafana integration | Worktree implemented; deployment pending | Own fixed-destination datasource, dashboard, rendering, and alerting requests, validation, normalization, safe errors, and bounded telemetry. Rendering has local/mock evidence only. |
+| Grafana integration | Commit `798dd92` deployed; normalization fixes pending | Own fixed-destination datasource, dashboard, rendering, and alerting requests, validation, normalization, safe errors, and bounded telemetry. Live evidence covers only the two rule-list calls described above. |
 | Tekton integration | Worktree implemented; deployment pending | Own PAC repository authority, fixed Forgejo and PAC access, Kubernetes run and task access, normalized results, and bounded mutations. |
 | Kubernetes integration | Worktree implemented; deployment pending | Own the configured cluster catalog, typed reads, normalized results, fixed mutations, process bounds, and safe errors. |
 | PostgreSQL use | Deployed to preview | Store generic OAuth state and encrypted signing material through migrations V1-V3, with one-shot OIDC attempts added by V4. |

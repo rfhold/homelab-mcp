@@ -757,7 +757,7 @@ fn normalize_alert_rules(limit: u16, wrapper: Value) -> Result<Value, Error> {
                 "uid": bounded_string(object, "uid", MAX_SAFE_KEY_BYTES)?,
                 "title": bounded_string(object, "title", MAX_SUMMARY_BYTES)?,
                 "folder_uid": bounded_string(object, "folderUID", MAX_SAFE_KEY_BYTES)?,
-                "rule_group": bounded_string(object, "ruleGroup", MAX_SUMMARY_BYTES)?,
+                "rule_group": normalized_rule_group(object)?,
                 "condition": bounded_string(object, "condition", MAX_SAFE_KEY_BYTES)?,
                 "no_data_state": bounded_string(object, "noDataState", MAX_SAFE_KEY_BYTES)?,
                 "exec_err_state": bounded_string(object, "execErrState", MAX_SAFE_KEY_BYTES)?,
@@ -788,7 +788,7 @@ fn normalize_recording_rules(limit: u16, wrapper: Value) -> Result<Value, Error>
                 "uid": bounded_string(object, "uid", MAX_SAFE_KEY_BYTES)?,
                 "title": bounded_string(object, "title", MAX_SUMMARY_BYTES)?,
                 "folder_uid": bounded_string(object, "folderUID", MAX_SAFE_KEY_BYTES)?,
-                "rule_group": bounded_string(object, "ruleGroup", MAX_SUMMARY_BYTES)?,
+                "rule_group": normalized_rule_group(object)?,
                 "metric": bounded_string(record, "metric", MAX_SUMMARY_BYTES)?,
                 "source_ref": bounded_string(record, "from", MAX_SAFE_KEY_BYTES)?,
                 "target_datasource_uid": optional_nonempty_bounded_string(
@@ -797,7 +797,7 @@ fn normalize_recording_rules(limit: u16, wrapper: Value) -> Result<Value, Error>
                     MAX_SAFE_KEY_BYTES,
                 )?,
                 "is_paused": object.get("isPaused").and_then(Value::as_bool).ok_or(Error::InvalidResponse)?,
-                "labels": safe_string_map(object.get("labels").ok_or(Error::InvalidResponse)?)?,
+                "labels": recording_rule_labels(object)?,
             }))
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -994,6 +994,18 @@ fn bounded_string<'a>(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && value.len() <= maximum_bytes)
         .ok_or(Error::InvalidResponse)
+}
+
+fn normalized_rule_group(object: &Map<String, Value>) -> Result<Option<&str>, Error> {
+    let group = bounded_string(object, "ruleGroup", MAX_SUMMARY_BYTES)?;
+    Ok((!group.starts_with("no_group_for_rule_")).then_some(group))
+}
+
+fn recording_rule_labels(object: &Map<String, Value>) -> Result<Map<String, Value>, Error> {
+    match object.get("labels") {
+        None | Some(Value::Null) => Ok(Map::new()),
+        Some(labels) => safe_string_map(labels),
+    }
 }
 
 fn normalized_timestamp(object: &Map<String, Value>, key: &str) -> Result<String, Error> {
@@ -1919,6 +1931,7 @@ mod tests {
         assert_eq!(rules["mode"], "list");
         assert_eq!(rules["result_type"], "alert_rules");
         assert_eq!(rules["result"][0]["uid"], "rule-1");
+        assert_eq!(rules["result"][0]["rule_group"], "api");
         assert_eq!(rules["result"][0]["labels"]["severity"], "critical");
         assert!(!rules.to_string().contains("datasource"));
         assert!(!rules.to_string().contains("orgID"));
@@ -1963,6 +1976,99 @@ mod tests {
         assert!(!alerts.to_string().contains("grafana.internal"));
         assert!(!alerts.to_string().contains("secret-silence-id"));
         assert!(!alerts.to_string().contains("internal-receiver"));
+    }
+
+    #[test]
+    fn normalizes_recording_rule_labels_and_synthetic_rule_groups() {
+        for labels in [None, Some(Value::Null)] {
+            let mut recording = mixed_rules_response()[0].clone();
+            match labels {
+                Some(labels) => recording["labels"] = labels,
+                None => {
+                    recording.as_object_mut().unwrap().remove("labels");
+                }
+            }
+            assert_eq!(
+                normalize_recording_rules(1, json!([recording])).unwrap()["result"][0]["labels"],
+                json!({})
+            );
+        }
+
+        let mut too_many_labels = Map::new();
+        for index in 0..=MAX_SAFE_MAP_ENTRIES {
+            too_many_labels.insert(format!("label_{index}"), json!("value"));
+        }
+        for labels in [
+            json!("invalid"),
+            json!([]),
+            json!({"team": 7}),
+            Value::Object(too_many_labels),
+            Value::Object(
+                [("x".repeat(MAX_SAFE_KEY_BYTES + 1), json!("value"))]
+                    .into_iter()
+                    .collect(),
+            ),
+            json!({"team": "x".repeat(MAX_SAFE_VALUE_BYTES + 1)}),
+        ] {
+            let mut recording = mixed_rules_response()[0].clone();
+            recording["labels"] = labels;
+            assert_eq!(
+                normalize_recording_rules(1, json!([recording])),
+                Err(Error::InvalidResponse)
+            );
+        }
+
+        for (group, expected) in [
+            ("no_group_for_rule_uid", Value::Null),
+            (
+                "no_group_for_rule_ar-123********************************",
+                Value::Null,
+            ),
+            ("No_group_for_rule_uid", json!("No_group_for_rule_uid")),
+        ] {
+            for (mut rule, normalize) in [
+                (
+                    alert_rules_response()[0].clone(),
+                    normalize_alert_rules as fn(u16, Value) -> Result<Value, Error>,
+                ),
+                (mixed_rules_response()[0].clone(), normalize_recording_rules),
+            ] {
+                rule["ruleGroup"] = json!(group);
+                assert_eq!(
+                    normalize(1, json!([rule])).unwrap()["result"][0]["rule_group"],
+                    expected
+                );
+            }
+        }
+
+        for group in [
+            None,
+            Some(Value::Null),
+            Some(json!(7)),
+            Some(json!("")),
+            Some(json!("x".repeat(MAX_SUMMARY_BYTES + 1))),
+        ] {
+            for (mut rule, normalize) in [
+                (
+                    alert_rules_response()[0].clone(),
+                    normalize_alert_rules as fn(u16, Value) -> Result<Value, Error>,
+                ),
+                (mixed_rules_response()[0].clone(), normalize_recording_rules),
+            ] {
+                match &group {
+                    Some(group) => rule["ruleGroup"] = group.clone(),
+                    None => {
+                        rule.as_object_mut().unwrap().remove("ruleGroup");
+                    }
+                }
+                assert_eq!(normalize(1, json!([rule])), Err(Error::InvalidResponse));
+            }
+        }
+
+        assert_eq!(
+            normalize_recording_rules(1, mixed_rules_response()).unwrap()["result"][0]["rule_group"],
+            "api"
+        );
     }
 
     #[test]

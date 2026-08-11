@@ -4,13 +4,13 @@
 
 The repository implements container, Pulumi, and preview-pipeline foundations. The `preview` stack is deployed by the main pipeline and serves its health endpoints through the default gateway. The `prod` stack is initialized with zero resources and has not been previewed or applied.
 
-Pulumi has applied the previously deployed revision's resources to preview. The alerting, recording-rule, and Editor changes remain worktree-only. Production remains declaration-only.
+Pulumi has applied commit `798dd92` to preview. The approved recording-label and synthetic-group normalization fixes remain undeployed. Production remains declaration-only.
 
 The deployed preview serves health, readiness, hosted OAuth/OIDC routes, authenticated `/mcp`, PostgreSQL-backed runtime state, and the Grafana adapter.
 
 The repository implements the OAuth and LogQL contracts at a reviewed immutable Kuri Git revision.
 
-PipelineRun `homelab-mcp-preview-tfd8k` deployed commit `4f2e192` successfully.
+The preview workflow deployed commit `798dd92` successfully.
 
 ## Stack Targets
 
@@ -53,7 +53,7 @@ Cargo uses CLI Git for the private Kuri dependency. The release build stages ret
 
 ## Credential Boundaries
 
-The deployed preview revision created the Grafana service account with Viewer access. The worktree promotes it to Editor and places the same account's token in the application Secret so one server-held credential can read alerting state and create silences. This security expansion has not been applied or verified live.
+The deployed preview uses one server-held Grafana Editor service-account token for alerting reads and silence creation. An authenticated alert-rule read succeeded. Recording-rule normalization and silence creation remain unverified live.
 
 Pulumi places runtime credentials in the application Secret. It keeps the wrapping-key file in a separate Secret and read-only mount.
 
@@ -117,7 +117,7 @@ The pipeline clones the requested revision and scans Cargo, container, Tekton, a
 
 The final `general-ci:latest` step maps Grafana provider credentials and runs `pulumi up --stack preview --skip-preview`. It relies on the separately reviewed local preview and repository checks for pre-apply evidence.
 
-The main pipeline completed successfully for commit `4f2e192` and applied the preview stack. The current image digest is `sha256:9a9a5a9aacf508494f904a208c6c91d972ea8e568cd61f98eaa077a761c3b7fe`.
+The main preview workflow completed successfully for commit `798dd92` and applied the preview stack.
 
 That run proves image delivery, runtime startup, PostgreSQL-backed readiness, public health/readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge. It does not prove browser login, token issuance or refresh, authenticated MCP calls, or live LogQL behavior.
 
@@ -131,11 +131,11 @@ It requires locally issued `mcp:use` tokens and configures DCR, CIMD, and native
 
 Generic Kuri owns strict OIDC login, callback, one-shot transaction state, ID-token verification, the mapper seam, and hosted continuation. Homelab supplies Authentik configuration and stable issuer-plus-subject mapping.
 
-The current worktree exposes ten read-only actions through `grafana_query`, two image actions through `grafana_render`, and only `silence.create` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes all three Grafana tools. Their canonical limits, results, and errors are defined by the [Grafana query](../grafana-query/README.md) and [render](../grafana-render/README.md) specifications. The deployed preview revision predates this expansion and does not expose `recording-rule.list`.
+The current runtime exposes ten read-only actions through `grafana_query`, two image actions through `grafana_render`, and only `silence.create` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes all three Grafana tools. Their canonical limits, results, and errors are defined by the [Grafana query](../grafana-query/README.md) and [render](../grafana-render/README.md) specifications. Preview commit `798dd92` exposes both `alert-rule.list` and `recording-rule.list`.
 
 Silence creation performs no automatic retry. If it returns `mutation_outcome_unknown`, use `silence.list` to inspect current silences before deciding whether to retry because Grafana may already have applied the request. A silence suppresses matching notifications; it does not stop rule evaluation or delete alert data.
 
-Commit `4f2e192` is deployed to preview. No deployment or live operation occurred for the dashboard, rendering, alerting, and recording-rule expansion. Full browser OAuth, authenticated preview MCP calls, live Grafana behavior, renderer operation, and Editor permission operation still require the layered evidence from the [testing document](../quality/testing.md) and explicit approval for each external action; basic public endpoint checks do not satisfy that boundary.
+Commit `798dd92` is deployed to preview. An authenticated `alert-rule.list` call returned at least 100 entries. An authenticated `recording-rule.list` call returned `invalid_response` with `limit: 1`. The approved normalization fixes are not deployed or verified live. The rest of the browser OAuth, Grafana, renderer, and Editor operation evidence still requires the layers from the [testing document](../quality/testing.md) and explicit approval for each external action.
 
 ## Delivery Inputs
 

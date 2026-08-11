@@ -2,7 +2,7 @@
 
 The repository implements three Grafana progressive tools on one authenticated MCP server. `grafana_query` owns ten bounded reads; `grafana_render` owns two bounded image reads; `grafana_exec` advertises operationally consequential writes and owns only `silence.create`.
 
-Local tests cover generated schemas, annotations, dispatch, validation, limits, normalization, safe errors, and mock Grafana requests. The dashboard, rendering, alerting, and recording-rule expansion has not been deployed or exercised against live Grafana.
+Local tests cover generated schemas, annotations, dispatch, validation, limits, normalization, safe errors, and mock Grafana requests. Preview commit `798dd92` exposes the Grafana expansion. An authenticated `alert-rule.list` call returned at least 100 entries; `recording-rule.list` returned `invalid_response` with `limit: 1`. The raw Grafana body was not captured. The authoritative Grafana DTO and strict normalizer support an omitted-label mismatch as the likely cause, not an observed cause. The approved normalization fixes remain undeployed. Other authenticated Grafana behavior, rendering, and silence creation remain unverified.
 
 | Document | Covers |
 | --- | --- |

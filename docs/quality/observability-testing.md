@@ -2,7 +2,7 @@
 
 ## Current Evidence
 
-The current worktree has local unit, schema, mock HTTP, and Pulumi mock coverage. This document does not claim that the observability revision reached preview.
+The current worktree has local unit, schema, mock HTTP, and Pulumi mock coverage. Preview commit `798dd92` deployed successfully. An authenticated `alert-rule.list` call returned at least 100 entries. An authenticated `recording-rule.list` call returned `invalid_response` with `limit: 1`. The approved label and synthetic-group normalization fixes have not been deployed or verified live.
 
 ## Local Commands
 
@@ -73,8 +73,8 @@ After an authorized deployment, record evidence for each row. Use timestamps, no
 | PromQL | Authenticated instant and range calls return normalized data through UID `mimir`. |
 | TraceQL | An authenticated search returns bounded traces through UID `tempo`. |
 | Profiles action | An authenticated merge returns one top-level flamegraph with arrays `names` and `levels` plus string fields `total` and `maxSelf`. Other 200 JSON objects return `invalid_response`. |
-| Alert rules | An authenticated list returns bounded normalized summaries without internal URLs, raw wrappers, or query models. |
-| Recording rules | An authenticated list returns only bounded recording summaries from the shared provisioning route, without expressions, query models, annotations, datasource internals, or raw responses. |
+| Alert rules | Confirm that real groups remain bounded strings and exact-prefix `no_group_for_rule_` synthetic groups normalize to null. The deployed action already returned at least 100 entries before this fix. |
+| Recording rules | Confirm that missing or null labels normalize to an empty map, bounded object labels retain URL filtering, and other shapes fail. Confirm the same synthetic-group normalization. Commit `798dd92` still returned `invalid_response` with `limit: 1`. |
 | Alert instances | An authenticated matcher-filtered list returns bounded normalized current alerts without internal URLs or raw wrappers. |
 | Dashboard inventory | Authenticated list and get calls return only bounded dashboard, variable, and flattened panel inventory. |
 | Rendering | With Grafana 13.1.1 and separately deployed renderer 5.7.1, authenticated dashboard and panel calls return validated PNG image blocks to a Kuri `6eebdb0+` consumer and an image-capable selected model. This is required future evidence, not a live-validation claim. |

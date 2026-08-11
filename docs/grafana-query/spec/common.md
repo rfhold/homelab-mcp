@@ -2,7 +2,7 @@
 
 ## Status
 
-This document defines implemented worktree behavior. Local tests cover all three generated Grafana tool surfaces and mock Grafana integration. The dashboard, rendering, alerting, and recording-rule expansion has not been deployed or exercised against live Grafana.
+This document defines the canonical Grafana tool behavior. Local tests cover all three generated Grafana tool surfaces and mock Grafana integration. Preview commit `798dd92` exposed both rule-list actions: `alert-rule.list` succeeded with at least 100 entries, while `recording-rule.list` returned `invalid_response` with `limit: 1`. The approved rule-normalization fixes have not been deployed or verified live.
 
 ## Tool Surfaces
 
@@ -44,6 +44,8 @@ The client releases its permit after success, failure, timeout, or cancellation.
 ## Read Results and Errors
 
 Every unfiltered `grafana_query` success returns one text item containing the complete normalized JSON and the same object-shaped value in `structuredContent`. Each focused action specification owns its normalized result contract. Reads never expose Grafana headers, credentials, datasource configuration, raw response wrappers, or unapproved upstream models.
+
+Alert-rule and recording-rule summaries share `rule_group` normalization. A real group remains a bounded string. An internal ungrouped identifier that begins with the exact case-sensitive prefix `no_group_for_rule_` becomes null. This includes Grafana's fixed-width internal values padded with `*`. Other group names remain unchanged.
 
 Alert-rule, recording-rule, and alert-instance label and annotation maps apply a conservative URL-field exclusion policy. After trimming surrounding whitespace, an entry is omitted when its case-insensitive key ends in `url`, or its value starts with `/` (including `//`), starts with an absolute URI scheme of the form `[A-Za-z][A-Za-z0-9+.-]*:`, or contains a non-empty Markdown link target of the form `](...)`. This deterministic policy applies equally to labels and annotations; ordinary text such as `API is failing` remains. Recording-rule results contain labels but no annotations. The policy does not attempt to recognize every hostname or every possible URL representation.
 

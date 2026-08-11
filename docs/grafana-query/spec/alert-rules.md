@@ -2,7 +2,7 @@
 
 ## Status
 
-This specification defines implemented worktree behavior for the read-only `grafana_query` action `alert-rule.list`. Local validation and mock Grafana tests exist; authenticated preview calls and live alert-rule API behavior remain unverified.
+This specification defines the canonical behavior for the read-only `grafana_query` action `alert-rule.list`. Local validation and mock Grafana tests exist. An authenticated call against preview commit `798dd92` succeeded with at least 100 entries. The approved synthetic-group normalization fix has not been deployed or verified live.
 
 The [shared contract](common.md) owns authorization, tool annotations, fixed-destination transport, limits, errors, filtering, and telemetry.
 
@@ -39,6 +39,8 @@ An unfiltered success has this envelope:
 ```
 
 Each result is a summary containing only `uid`, `title`, `folder_uid`, `rule_group`, `condition`, `no_data_state`, `exec_err_state`, `for`, `is_paused`, `labels`, and `annotations`. Recording rules never enter the result. The list preserves upstream category order and contains at most the validated limit.
+
+`rule_group` follows the [shared rule-summary normalization](common.md#read-results-and-errors).
 
 Identifiers and state strings are bounded to 128 UTF-8 bytes; titles and rule groups are bounded to 512 bytes. Labels and annotations must be string maps with at most 64 entries, non-empty keys of at most 128 bytes, and values of at most 4096 bytes. Both maps use the exact conservative [URL-field exclusion policy](common.md#read-results-and-errors).
 
