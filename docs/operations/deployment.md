@@ -79,7 +79,7 @@ The [Tekton tool specifications](../tekton/README.md) own action behavior, autho
 
 Pulumi declares separate env-backed Stashes for Tekton credentials. `FORGEJO_HOLDENITDOWN_TOKEN` seeds the Forgejo Stash. `PAC_INCOMING_SECRET` seeds the PAC Stash. Pulumi projects both outputs into `homelab-mcp-app` without placing values in stack configuration or rendered documentation.
 
-The runtime uses fixed Forgejo origin `https://git.holdenitdown.net`. It sends PAC dispatches only to `http://pipelines-as-code-controller.pipelines-as-code.svc.cluster.local:8080/incoming`.
+The runtime uses fixed Forgejo origin `https://git.holdenitdown.net`. It sends PAC dispatches only to `http://pipelines-as-code-controller.pipelines-as-code.svc.cluster.local:8080/incoming`. The Kubernetes Service forwards that port to controller pod port `8082`, so the runtime NetworkPolicy permits the target port rather than the Service port.
 
 The Deployment declares a dedicated ServiceAccount and an explicit one-hour projected Kubernetes token that the runtime reloads from disk for each Kubernetes request. It does not use the default automatic token mount.
 

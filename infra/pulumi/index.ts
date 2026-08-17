@@ -163,6 +163,7 @@ const tektonNamespace = "pipelines-as-code";
 const forgejoOrigin = "https://git.holdenitdown.net";
 const pacUrl =
   "http://pipelines-as-code-controller.pipelines-as-code.svc.cluster.local:8080";
+const pacTargetPort = 8082;
 const publicUrl = `https://${hostname}`;
 const browserCallback = `${publicUrl}/oidc/callback`;
 const mcpIssuer = `${publicUrl}/oauth`;
@@ -1227,7 +1228,7 @@ new k8s.networking.v1.NetworkPolicy(
               },
             },
           ],
-          ports: [{ port: 8080, protocol: "TCP" }],
+          ports: [{ port: pacTargetPort, protocol: "TCP" }],
         },
       ],
     },

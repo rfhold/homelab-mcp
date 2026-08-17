@@ -1176,7 +1176,7 @@ describe("standalone resource topology", () => {
             },
           },
         ],
-        ports: [{ port: 8080, protocol: "TCP" }],
+        ports: [{ port: 8082, protocol: "TCP" }],
       },
     ]);
     const generalHttps = spec.egress.find((rule: any) =>
