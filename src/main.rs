@@ -2,6 +2,7 @@ use std::{error::Error, sync::Arc, time::Duration};
 
 use ::mcp::server::BoxFuture;
 use homelab_mcp::{app, config, mcp, oauth, observability, profiling, services::Services};
+use sqlx::postgres::PgPoolOptions;
 use tokio::{
     net::TcpListener,
     sync::watch,
@@ -22,12 +23,20 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let profiling = profiling::init(&telemetry_config)?;
     tracing::info!(listen.address = LISTEN_ADDR, "service startup started");
     let config = config::Config::from_env().map_err(std::io::Error::other)?;
-    let services = Arc::new(Services::production(&config).map_err(std::io::Error::other)?);
+    let pool = PgPoolOptions::new()
+        .max_connections(config.database.max_connections)
+        .connect(&config.database.url)
+        .await
+        .map_err(|_| std::io::Error::other("failed to connect to PostgreSQL"))?;
+    homelab_mcp::database::migrate(&pool)
+        .await
+        .map_err(|_| std::io::Error::other("failed to run application database migrations"))?;
     let runtime = Arc::new(
-        oauth::initialize(&config.database, &config.oidc, &config.oauth)
+        oauth::initialize(pool.clone(), &config.oidc, &config.oauth)
             .await
             .map_err(std::io::Error::other)?,
     );
+    let services = Arc::new(Services::production(&config, pool).map_err(std::io::Error::other)?);
     let mcp =
         mcp::router(&config.oauth, services, &runtime.server).map_err(std::io::Error::other)?;
     let router = app::router(

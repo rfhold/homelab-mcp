@@ -2,13 +2,13 @@
 
 ## Status
 
-The repository runtime has 194 passing Rust tests under Rust 1.96: 192 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, Grafana, Tekton, Kubernetes, Ceph Dashboard, and cleanup control.
+The repository runtime has 213 passing Rust tests under Rust 1.96: 211 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, integrations, inventory, deploys, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
 Rust 1.95 cannot run the suite because the manifest and Kuri crates require Rust 1.96.
 
-Pulumi has 21 passing mock tests for the declared runtime and deployment contract. The current container built and deployed successfully to preview; the Kubernetes and Ceph worktree revisions have not been deployed.
+Pulumi has 26 passing mock tests for the declared runtime and deployment contract. The current container built and deployed successfully to preview; later integration and deploy worktree revisions have not been deployed.
 
 The preview workflow completed successfully and applied commit `798dd92`.
 
@@ -36,6 +36,16 @@ bun run build
 bun test index.test.ts
 ```
 
+Run locked Python and fixture declaration checks from the repository root:
+
+```bash
+uv lock --check
+PYTHONDONTWRITEBYTECODE=1 uv run --locked python -m unittest discover -s deploys/tests
+docker compose -f deploys/fixtures/compose.yaml config --quiet
+```
+
+The Compose command validates fixture configuration. It does not pull or execute Debian or Arch images.
+
 Do not use the old standalone `docker run` smoke sequence for the new binary. Startup requires PostgreSQL, a mounted OAuth wrapping keyring, Authentik OIDC and local OAuth configuration, and Grafana credentials. A meaningful process smoke test needs those controlled dependencies; a full hosted flow needs stronger evidence still.
 
 ## Current Coverage
@@ -46,7 +56,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Generic Kuri `mcp` | 111 standard all-feature tests pass; both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly. |
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
-| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, nine-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
+| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, eleven-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
 | Grafana actions | Datasource queries, dashboard inventory and PNG rendering, alerting and recording-rule reads, silence creation, bounds, normalization, fixed routes, redirects, semantic errors, timeout, capacity, and permit release against mock HTTP servers. |
 | Kubernetes actions | Exact typed action schemas, all 36 resource kinds, namespace scope, fixed API paths and mutations, normalization, limits, safe errors, process supervision, and uncertain mutation outcomes. |
 | Ceph Dashboard actions | Ten query and five OSD exec schemas, fixed Squid routes, normalization, bounds, safe-to-destroy checks, destructive confirmations, synchronous completion, safe HTTP 202 task identities, and uncertain mutation outcomes. |
@@ -84,7 +94,7 @@ Tests must cover the [access contract](../architecture/access-authentication.md)
 - absence of MCP session identifiers and protocol session state;
 - Bearer challenges for absent, invalid, and insufficient-scope tokens;
 - direct Authentik access-token and ID-token rejection;
-- required `mcp:use` enforcement;
+- exact eight-scope global enforcement through `Config::REQUIRED_OAUTH_SCOPES`;
 - DCR, hardened CIMD, and native loopback redirects;
 - authorization code PKCE S256 and redirect binding;
 - Authentik OIDC state, nonce, PKCE, signature, issuer, and audience checks;
@@ -125,7 +135,7 @@ Dashboard and render tests additionally cover:
 Alerting tests must additionally cover:
 
 - all three Grafana tool annotations, ten query actions, two render actions, and the single exec action;
-- the all-`mcp:use` authorization boundary and rejection of actions sent to the wrong tool;
+- the eight-scope global authorization boundary, lack of Grafana-specific enforcement, and rejection of actions sent to the wrong tool;
 - separate alert-rule and recording-rule schemas, limits, and action-specific safe messages;
 - classification by the shared provisioning response's `record` field, category filtering before limits, and opposite-category exclusion;
 - strict normalization only for selected entries up to each limit, with malformed `record` discriminators rejected;
@@ -153,7 +163,7 @@ For actions whose upstream API accepts a limit, tests must prove that Grafana re
 Tests must cover the [Tekton tool specifications](../tekton/README.md), including:
 
 - generated help, schemas, filters, action separation, and exact MCP annotations;
-- all-`mcp:use` authorization, including access by every current MCP principal;
+- the eight-scope global authorization boundary, lack of Tekton-specific enforcement, and access by every principal that passes the global gate;
 - PAC `Repository` authority in fixed namespace `pipelines-as-code`;
 - canonical `org/repo` keys from valid fixed-origin Forgejo URLs for all repository selectors and relationships, including safe unreserved percent-decoding and encoded-separator rejection;
 - internal-only PAC custom-resource names, no legacy aliases, and fail-closed duplicate canonical keys;
@@ -187,8 +197,8 @@ The [Kubernetes tool specifications](../kubernetes/README.md) define locally imp
 Tests must cover:
 
 - progressive help, typed action schemas, optional jq-compatible filters, action separation, and exact MCP annotations;
-- the global `mcp:use kubernetes:read kubernetes:write` requirement for `/mcp`, automatic Kuri requests, and current-grant reauthorization;
-- proof that OAuth scopes do not enforce per-action access;
+- the global `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` requirement for `/mcp`, automatic Kuri requests, and historical-grant reauthorization;
+- proof that the entire global scope set gates every tool and does not enforce per-action access;
 - a unique one-through-32 cluster catalog, exact cluster selection, and initial Pantheon and Romulus entries;
 - rejection of caller-controlled executables, kubeconfigs, contexts, API servers, arguments, verbs, resources, API paths, selectors, and output templates;
 - `cluster_list`, `capability_list`, `resource_list`, and `resource_get` validation and normalized output, including schema-visible namespace requirements and disjoint kind subsets;
@@ -215,7 +225,7 @@ Current preview evidence does not cover `kubernetes_query`, `kubernetes_exec`, t
 
 ## Ceph Dashboard Contract Coverage
 
-The [Ceph Dashboard specifications](../ceph/README.md) define locally implemented behavior. Coordinator evidence records successful `cargo fmt --check`, `cargo check`, `cargo clippy -- -D warnings`, and sequential `cargo test` with 192 library tests and two binary tests. It also records successful Pulumi `bun run build`, `bun test index.test.ts` with 21 tests, and `git diff --check`.
+The [Ceph Dashboard specifications](../ceph/README.md) define locally implemented behavior. Current repository evidence records successful formatting and sequential Rust tests with 211 library tests and two binary tests. It also records successful Pulumi build and 26 mock tests.
 
 Local runtime tests cover:
 
@@ -238,6 +248,31 @@ Pulumi mock and policy tests cover two preview cluster entries, strict HTTPS ori
 Evidence gates remain independent. The targeted preview apply seeded four Stashes from shared administrator credentials and updated two provider state records; it did not update a Kubernetes resource. Record future dedicated Dashboard account creation separately for each cluster. Record a full preview apply separately from authenticated live reads. Authorize and record every individual representative live mutation with its cluster, target, requested state, completion or task identity, post-mutation observation, and uncertain-outcome recovery where exercised. Destroy and purge evidence also requires a fresh safe-to-destroy result and the exact confirmation string.
 
 No Dashboard account creation, full preview apply, authenticated Ceph read, live Ceph mutation, preview rollout, production Ceph resource, or production apply occurred. Production configuration explicitly disables Ceph through an empty catalog. No Ceph live check is authorized by this document.
+
+## Machine Deploy Contract Coverage
+
+The [machine deploy documentation](../deploys/README.md) defines locally implemented behavior. Local Rust tests cover inventory validation, progressive MCP schemas, catalog confinement, OpenBao request shape, strict host pins, process bounds, cancellation, cleanup, and normalized system information.
+
+The locked Python tests cover the exact two-entry catalog, Debian/Ubuntu/Arch metadata, strict inventory shape, existing credential files, CA public-key rejection, fixed sudoers and sshd policy, and bounded system-information commands.
+
+Pulumi mocks cover preview-only OpenBao enablement, the Ed25519 user CA, user-certificate-only role, 15-minute limits, sign-only workload policy, projected workload JWT, memory-backed credential volume, runtime environment, egress declaration, locked image content, and CI identity isolation. Pipeline source-shape regex assertions cover deploy-only selection and timeout for `openbao-pulumi-admin-v1`, the projected 600-second JWT volume, exact shared StepAction parameters, memory-only session handoff, bounded `VAULT_TOKEN` loading and cleanup, retained kubeconfig, and absence of inline login, static OpenBao credentials, or pyinfra execution. Provider mocks confirm CI token-file configuration is not embedded in the application program, preserving ordinary local `VAULT_TOKEN` authentication. These assertions do not execute the StepAction or an OpenBao login.
+
+The evidence layers remain distinct:
+
+| Layer | Current evidence |
+| --- | --- |
+| Rust and Python | Local unit, mock HTTP, fixed-process, and contract tests. |
+| Platform OpenBao and Tekton identity | Live and positive/negative canary-verified outside this repository: Kubernetes auth, exact CI ServiceAccount binding, audience, and policy are established. |
+| Consumer pipeline identity | Shared StepAction consumption and same-pod `VAULT_TOKEN` handoff are source-declared and locally shape-tested; this revision has not run. |
+| Application Pulumi | Declaration-only mock tests for the SSH resources and workload identity; no apply evidence for this subsystem. |
+| Compose fixtures | Configuration validation only; images were not pulled or executed. |
+| Container deploy runtime | Image declarations and package checks; no pyinfra container execution evidence. |
+| OpenBao and SSH | No live application workload login, signing request, certificate authentication, or host connection evidence. |
+| Machine operations | No bootstrap, inventory-backed deploy, sudo change, sshd change, or live machine action. |
+
+Before a preview apply, verify the exact OpenBao egress CIDRs. Vault provider `7.11.0` is platform-tested, while this repository's apply remains unverified. Before a machine run, bootstrap through separately authorized operator access and verify the host key out of band.
+
+Live evidence requires separate authority for each target and action. Production keeps OpenBao disabled and remains unapplied.
 
 ## Preview Evidence
 

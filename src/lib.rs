@@ -1,7 +1,9 @@
 pub mod app;
 pub mod config;
+pub mod database;
 mod http_client;
 mod integrations;
+pub mod inventory;
 pub mod mcp;
 pub mod oauth;
 pub mod observability;

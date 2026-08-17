@@ -36,4 +36,15 @@ config:
     - https://preview-kuri.holdenitdown.net
   homelab-mcp:mcpOAuthWrappingKeyVersions: [v1]
   homelab-mcp:mcpOAuthActiveWrappingKeyVersion: v1
+  homelab-mcp:openbaoEnabled: true
+  homelab-mcp:openbaoUrl: https://openbao.holdenitdown.net
+  homelab-mcp:openbaoCreateSshMount: true
+  homelab-mcp:openbaoKubernetesAuthMount: kubernetes
+  homelab-mcp:openbaoKubernetesRole: homelab-mcp-preview
+  homelab-mcp:openbaoSshMount: homelab-ssh-client
+  homelab-mcp:openbaoSshRole: homelab
+  homelab-mcp:openbaoAudience: https://openbao.holdenitdown.net
+  homelab-mcp:openbaoEndpointCidrs: [172.16.3.0/24]
+  homelab-mcp:openbaoPort: 443
+  homelab-mcp:deployMachineSshEgressCidrs: [172.16.0.0/16]
 encryptionsalt: v1:JpursO2VfUY=:v1:b36ZTkbO7H7FZE0d:kQRTPgYHEdvYZTV5kFmLRAlYatccPg==

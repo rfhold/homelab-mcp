@@ -13,11 +13,11 @@ use mcp::{
     TrustedPrivateOAuthCimdDestinationPolicy, server::BoxFuture,
 };
 use sha2::{Digest as _, Sha256};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 
 use crate::{
     app::ReadinessCheck,
-    config::{DatabaseConfig, OAuthConfig, OidcConfig},
+    config::{OAuthConfig, OidcConfig},
 };
 
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -29,15 +29,10 @@ pub struct OAuthRuntime {
 }
 
 pub async fn initialize(
-    database: &DatabaseConfig,
+    pool: PgPool,
     oidc_config: &OidcConfig,
     oauth: &OAuthConfig,
 ) -> Result<OAuthRuntime, String> {
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .connect(&database.url)
-        .await
-        .map_err(|_| "failed to connect to PostgreSQL".to_owned())?;
     let store = Arc::new(
         PostgresOAuthAuthorizationStore::from_pool(pool.clone())
             .await
@@ -270,9 +265,18 @@ mod tests {
     async fn consent_only_approves_the_exact_resource_and_scope_set() {
         let consent = AutoApproveConsent {
             resource: "https://mcp.example/mcp".to_owned(),
-            scopes: ["mcp:use", "kubernetes:read", "kubernetes:write"]
-                .map(str::to_owned)
-                .to_vec(),
+            scopes: [
+                "mcp:use",
+                "kubernetes:read",
+                "kubernetes:write",
+                "inventory:read",
+                "inventory:write",
+                "inventory:host-trust",
+                "deploy:read",
+                "deploy:run",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
         };
         let model = |resource: &str, scopes: &[&str]| OAuthConsentModel {
             client_id: "client".to_owned(),
@@ -287,7 +291,16 @@ mod tests {
             consent
                 .present(model(
                     "https://mcp.example/mcp",
-                    &["kubernetes:write", "mcp:use", "kubernetes:read"],
+                    &[
+                        "deploy:run",
+                        "inventory:write",
+                        "kubernetes:write",
+                        "mcp:use",
+                        "deploy:read",
+                        "inventory:host-trust",
+                        "kubernetes:read",
+                        "inventory:read",
+                    ],
                 ))
                 .await,
             OAuthConsentPresentation::Approved

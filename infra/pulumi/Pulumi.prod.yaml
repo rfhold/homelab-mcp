@@ -28,4 +28,15 @@ config:
   homelab-mcp:mcpOAuthCodeTtl: "300"
   homelab-mcp:mcpOAuthWrappingKeyVersions: [v1]
   homelab-mcp:mcpOAuthActiveWrappingKeyVersion: v1
+  homelab-mcp:openbaoEnabled: false
+  homelab-mcp:openbaoUrl: https://openbao.holdenitdown.net
+  homelab-mcp:openbaoCreateSshMount: false
+  homelab-mcp:openbaoKubernetesAuthMount: kubernetes
+  homelab-mcp:openbaoKubernetesRole: homelab-mcp
+  homelab-mcp:openbaoSshMount: homelab-ssh-client
+  homelab-mcp:openbaoSshRole: homelab
+  homelab-mcp:openbaoAudience: https://openbao.holdenitdown.net
+  homelab-mcp:openbaoEndpointCidrs: [172.16.3.0/24]
+  homelab-mcp:openbaoPort: 443
+  homelab-mcp:deployMachineSshEgressCidrs: []
 encryptionsalt: v1:fIjtsgeazsQ=:v1:LHkgKsoC2To5QJ9j:lb3s2CCIYFbNFol+BYaLzfwSHZ2s3g==

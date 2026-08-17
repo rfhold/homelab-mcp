@@ -2,7 +2,7 @@
 
 ## Shared Mutation Contract
 
-`tekton_exec` will advertise every action as non-read-only, destructive, non-idempotent, and open-world. The current `mcp:use` scope will authorize all three actions.
+`tekton_exec` will advertise every action as non-read-only, destructive, non-idempotent, and open-world. The complete global set `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` gates all three actions. No Tekton-specific scope is enforced per action.
 
 Every call requires an explicit user decision. The service will make one upstream attempt and will never retry automatically.
 

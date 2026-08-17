@@ -4,7 +4,7 @@
 
 This specification defines implemented behavior for `grafana_exec` action `silence.create`. Local validation and mock Grafana tests exist, and commit `798dd92` exposes the action in preview. Authenticated preview evidence covers rule-list calls only. Silence creation, live silence API behavior, and operation of the promoted Editor permission remain unverified.
 
-`grafana_exec` advertises this action as non-read-only, non-destructive, non-idempotent, open-world, and operationally consequential. The [shared contract](common.md) owns the all-`mcp:use` authorization boundary, fixed destination, resource limits, filtering, errors, and telemetry.
+`grafana_exec` advertises this action as non-read-only, non-destructive, non-idempotent, open-world, and operationally consequential. The [shared contract](common.md) owns the eight-scope global authorization boundary, fixed destination, resource limits, filtering, errors, and telemetry.
 
 ## Effect
 

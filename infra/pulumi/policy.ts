@@ -41,6 +41,77 @@ export function validateHttpsOrigin(value: string, name: string): string {
   return normalized;
 }
 
+export function validateOpenBaoSegment(value: string, name: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) {
+    throw new Error(`${name} must be a single safe OpenBao path segment`);
+  }
+  return value;
+}
+
+export function validateCidrs(values: unknown, name: string): string[] {
+  if (!Array.isArray(values) || values.length === 0 || values.length > 16) {
+    throw new Error(`${name} must contain between 1 and 16 CIDRs`);
+  }
+  for (const value of values) {
+    if (typeof value !== "string") throw new Error(`${name} must contain CIDRs`);
+    const [address, prefix, extra] = value.split("/");
+    const family = isIP(address);
+    const bits = Number(prefix);
+    if (
+      extra !== undefined ||
+      family !== 4 ||
+      !/^\d+$/.test(prefix ?? "") ||
+      bits > 32
+    ) {
+      throw new Error(`${name} must contain valid IPv4 CIDRs`);
+    }
+  }
+  return [...values];
+}
+
+export function validatePort(value: number, name: string): number {
+  if (!Number.isInteger(value) || value < 1 || value > 65_535) {
+    throw new Error(`${name} must be between 1 and 65535`);
+  }
+  return value;
+}
+
+export function validateOpenBaoStack(
+  stack: string,
+  enabled: boolean,
+  createSshMount: boolean,
+): boolean {
+  const preview = stack === "preview" || stack === "test";
+  if (enabled !== preview || (!enabled && createSshMount)) {
+    throw new Error("OpenBao resources are preview-only and must be disabled in production");
+  }
+  return enabled;
+}
+
+export function openBaoHttpsEgressRules(
+  enabled: boolean,
+  endpointCidrs: string[],
+  port: number,
+) {
+  return [
+    {
+      to: [{
+        ipBlock: {
+          cidr: "0.0.0.0/0",
+          ...(enabled ? { except: endpointCidrs } : {}),
+        },
+      }],
+      ports: [{ port: 443, protocol: "TCP" as const }],
+    },
+    ...(enabled
+      ? endpointCidrs.map((cidr) => ({
+          to: [{ ipBlock: { cidr } }],
+          ports: [{ port, protocol: "TCP" as const }],
+        }))
+      : []),
+  ];
+}
+
 export interface CephClusterConfig {
   name: string;
   origin: string;

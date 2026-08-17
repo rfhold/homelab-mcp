@@ -22,7 +22,7 @@ For a schema-valid action that returns a successful semantic `McpToolResult`, `f
 
 ## Authorization and Destination
 
-The existing `mcp:use` scope authorizes every action on all three tools. There is no narrower read, render, or mutation scope, so every principal allowed to query can also render images and request silence creation.
+The global set `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` gates every action on all three tools. There is no narrower Grafana enforcement, so every authorized principal can query, render images, and request silence creation.
 
 All actions share one `GrafanaClient`, one configured Grafana origin, and one server-held Editor service-account token. The same credential reads dashboards, requests rendering, reads alerting state, and creates silences. The caller cannot choose the origin, token, API path, datasource, headers, or HTTP method.
 

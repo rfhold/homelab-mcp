@@ -11,7 +11,10 @@ use mcp::{
         StreamableHttpOptions, streamable_http_router_with_options,
     },
 };
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::{
     config::OAuthConfig,
@@ -29,6 +32,7 @@ use crate::{
             TaskListInput as CephTaskListInput, ValidationError as CephValidationError,
         },
     },
+    integrations::deploys::DeployError,
     integrations::grafana::{
         Error as GrafanaError, RenderedImage,
         actions::{
@@ -54,7 +58,9 @@ use crate::{
             TaskLogsInput, WorkflowDispatchCommand, WorkflowDispatchInput, WorkflowListInput,
         },
     },
+    inventory::{CreateMachine, Machine, RepositoryError, UpdateMachine},
     services::Services,
+    tool_error::ToolError,
 };
 
 // Progressive schemas reject unsupported actions before handler dispatch.
@@ -78,6 +84,90 @@ const KUBERNETES_EXEC_TOOL_NAME: &str = "kubernetes_exec";
 const CEPH_QUERY_TOOL_NAME: &str = "ceph_query";
 #[cfg(test)]
 const CEPH_EXEC_TOOL_NAME: &str = "ceph_exec";
+#[cfg(test)]
+const MACHINES_TOOL_NAME: &str = "machines";
+#[cfg(test)]
+const DEPLOYS_TOOL_NAME: &str = "deploys";
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MachineListInput {
+    #[serde(default = "default_machine_limit")]
+    #[schemars(range(min = 1, max = 100))]
+    limit: u16,
+}
+
+fn default_machine_limit() -> u16 {
+    100
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MachineCreateInput {
+    #[schemars(length(min = 1, max = 100))]
+    display_name: String,
+    #[schemars(length(min = 1, max = 253))]
+    ssh_host: String,
+    #[serde(default = "default_ssh_port")]
+    #[schemars(range(min = 22, max = 22))]
+    ssh_port: u16,
+    #[serde(default = "default_ssh_username")]
+    #[schemars(length(min = 7, max = 7), regex(pattern = "^homelab$"))]
+    ssh_username: String,
+    #[schemars(length(min = 1, max = 256))]
+    pinned_host_public_key: Option<String>,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+fn default_ssh_username() -> String {
+    "homelab".to_owned()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MachineUpdateInput {
+    #[schemars(length(min = 36, max = 36))]
+    machine_id: String,
+    #[schemars(length(min = 1, max = 100))]
+    display_name: String,
+    #[schemars(length(min = 1, max = 253))]
+    ssh_host: String,
+    #[schemars(range(min = 22, max = 22))]
+    ssh_port: u16,
+    #[schemars(length(min = 7, max = 7), regex(pattern = "^homelab$"))]
+    ssh_username: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MachineIdInput {
+    #[schemars(length(min = 36, max = 36))]
+    machine_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MachineHostKeyInput {
+    #[schemars(length(min = 36, max = 36))]
+    machine_id: String,
+    #[schemars(length(min = 1, max = 256))]
+    host_public_key: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeployListInput {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeployRunInput {
+    #[schemars(length(min = 1, max = 64))]
+    deploy_id: String,
+    #[schemars(length(min = 36, max = 36))]
+    machine_id: String,
+}
 
 #[derive(Clone)]
 pub struct HomelabMcp {
@@ -224,6 +314,27 @@ pub fn router(
             "openWorldHint": true
         }),
         namespace(name = "osd", description = "Mutate exact Ceph OSD state.")
+    ),
+    tool(
+        name = "machines",
+        description = "List and manage exact machine inventory records and explicit SSH host trust.",
+        annotations = json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": false
+        }),
+        namespace(name = "host-key", description = "Explicitly clear or replace SSH host trust.")
+    ),
+    tool(
+        name = "deploys",
+        description = "List approved deploys or run one deploy on one exact machine UUID.",
+        annotations = json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+        })
     )
 )]
 impl HomelabMcp {
@@ -1163,6 +1274,273 @@ impl HomelabMcp {
             Err(error) => ceph_tool_error(subject, error),
         }
     }
+
+    /// List bounded machine inventory including explicit public host pins.
+    #[action(tool = "machines", name = "list")]
+    async fn machine_list(
+        &self,
+        input: MachineListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let result = tokio::select! {
+            result = self.services.inventory.list(input.limit) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(match result {
+            Ok(machines) => json_result(
+                json!({"machines": machines.iter().map(machine_json).collect::<Vec<_>>() }),
+            ),
+            Err(error) => inventory_tool_error(error),
+        })
+    }
+
+    /// Create one exact machine inventory record.
+    #[action(tool = "machines", name = "create")]
+    async fn machine_create(
+        &self,
+        input: MachineCreateInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let command = CreateMachine {
+            display_name: input.display_name,
+            ssh_host: input.ssh_host,
+            ssh_port: input.ssh_port,
+            ssh_username: input.ssh_username,
+            pinned_host_public_key: input.pinned_host_public_key,
+        };
+        let result = tokio::select! {
+            result = self.services.inventory.create(command) => result,
+            () = context.cancelled() => return Ok(inventory_outcome_unknown()),
+        };
+        Ok(match result {
+            Ok(machine) => json_result(machine_json(&machine)),
+            Err(error) => inventory_tool_error(error),
+        })
+    }
+
+    /// Update the connection fields of one exact machine UUID without changing host trust.
+    #[action(tool = "machines", name = "update")]
+    async fn machine_update(
+        &self,
+        input: MachineUpdateInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let Some(id) = parse_machine_id(&input.machine_id) else {
+            return Ok(invalid_machine_arguments());
+        };
+        let command = UpdateMachine {
+            display_name: input.display_name,
+            ssh_host: input.ssh_host,
+            ssh_port: input.ssh_port,
+            ssh_username: input.ssh_username,
+        };
+        let result = tokio::select! {
+            result = self.services.inventory.update(id, command) => result,
+            () = context.cancelled() => return Ok(inventory_outcome_unknown()),
+        };
+        Ok(match result {
+            Ok(machine) => json_result(machine_json(&machine)),
+            Err(error) => inventory_tool_error(error),
+        })
+    }
+
+    /// Delete one exact machine UUID.
+    #[action(tool = "machines", name = "delete")]
+    async fn machine_delete(
+        &self,
+        input: MachineIdInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let Some(id) = parse_machine_id(&input.machine_id) else {
+            return Ok(invalid_machine_arguments());
+        };
+        let result = tokio::select! {
+            result = self.services.inventory.delete(id) => result,
+            () = context.cancelled() => return Ok(inventory_outcome_unknown()),
+        };
+        Ok(match result {
+            Ok(()) => json_result(json!({"machine_id": id.to_string(), "deleted": true})),
+            Err(error) => inventory_tool_error(error),
+        })
+    }
+
+    /// Clear the public host pin for one exact machine, immediately making it untrusted.
+    #[action(tool = "machines", name = "host-key.clear")]
+    async fn machine_host_key_clear(
+        &self,
+        input: MachineIdInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let Some(id) = parse_machine_id(&input.machine_id) else {
+            return Ok(invalid_machine_arguments());
+        };
+        let result = tokio::select! {
+            result = self.services.inventory.clear_host_key(id) => result,
+            () = context.cancelled() => return Ok(inventory_outcome_unknown()),
+        };
+        Ok(match result {
+            Ok(machine) => json_result(machine_json(&machine)),
+            Err(error) => inventory_tool_error(error),
+        })
+    }
+
+    /// Replace the public host pin for one exact machine with the supplied key.
+    #[action(tool = "machines", name = "host-key.replace")]
+    async fn machine_host_key_replace(
+        &self,
+        input: MachineHostKeyInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let Some(id) = parse_machine_id(&input.machine_id) else {
+            return Ok(invalid_machine_arguments());
+        };
+        let result = tokio::select! {
+            result = self.services.inventory.replace_host_key(id, input.host_public_key) => result,
+            () = context.cancelled() => return Ok(inventory_outcome_unknown()),
+        };
+        Ok(match result {
+            Ok(machine) => json_result(machine_json(&machine)),
+            Err(error) => inventory_tool_error(error),
+        })
+    }
+
+    /// List configured deploy metadata without contacting a machine or OpenBao.
+    #[action(tool = "deploys", name = "list")]
+    async fn deploy_list(
+        &self,
+        _: DeployListInput,
+        _: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        Ok(json_result(
+            json!({"deploys": self.services.deploys.list()}),
+        ))
+    }
+
+    /// Run one approved deploy on one exact machine UUID.
+    #[action(tool = "deploys", name = "run")]
+    async fn deploy_run(
+        &self,
+        input: DeployRunInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let Some(id) = parse_machine_id(&input.machine_id) else {
+            return Ok(invalid_deploy_arguments());
+        };
+        let machine = tokio::select! {
+            result = self.services.inventory.get(id) => match result { Ok(machine) => machine, Err(error) => return Ok(inventory_tool_error(error)) },
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        Ok(self
+            .dispatch_deploy_run(&input.deploy_id, machine, context.cancelled())
+            .await)
+    }
+
+    async fn dispatch_deploy_run(
+        &self,
+        deploy_id: &str,
+        machine: Machine,
+        cancellation: impl Future<Output = ()> + Send,
+    ) -> McpToolResult {
+        let mut cancellation = Box::pin(cancellation);
+        let result = self
+            .services
+            .deploys
+            .run_cancelled(deploy_id, machine, cancellation.as_mut())
+            .await;
+        match result {
+            Ok(output) => {
+                json_result(serde_json::to_value(output).expect("deploy result must serialize"))
+            }
+            Err(error) => deploy_tool_error(error),
+        }
+    }
+}
+
+fn parse_machine_id(value: &str) -> Option<Uuid> {
+    Uuid::parse_str(value).ok()
+}
+
+fn machine_json(machine: &Machine) -> serde_json::Value {
+    json!({
+        "id": machine.id.to_string(),
+        "display_name": machine.display_name,
+        "ssh_host": machine.ssh_host,
+        "ssh_port": machine.ssh_port,
+        "ssh_username": machine.ssh_username,
+        "host_key_pinned": machine.pinned_host_public_key.is_some(),
+        "pinned_host_public_key": machine.pinned_host_public_key,
+        "created_at": machine.created_at.to_rfc3339(),
+        "updated_at": machine.updated_at.to_rfc3339(),
+    })
+}
+
+fn invalid_machine_arguments() -> McpToolResult {
+    ToolError::new("invalid_arguments", "Invalid machine arguments.", false).into_mcp_result()
+}
+fn invalid_deploy_arguments() -> McpToolResult {
+    ToolError::new("invalid_arguments", "Invalid deploy arguments.", false).into_mcp_result()
+}
+fn inventory_outcome_unknown() -> McpToolResult {
+    ToolError::new(
+        "mutation_outcome_unknown",
+        "Machine mutation outcome is unknown.",
+        true,
+    )
+    .into_mcp_result()
+}
+
+fn inventory_tool_error(error: RepositoryError) -> McpToolResult {
+    let (code, message, retryable) = match error {
+        RepositoryError::Validation(_) => {
+            ("invalid_arguments", "Invalid machine arguments.", false)
+        }
+        RepositoryError::NotFound => ("machine_not_found", "Machine not found.", false),
+        RepositoryError::Conflict => (
+            "machine_conflict",
+            "Machine conflicts with existing inventory.",
+            false,
+        ),
+        RepositoryError::Database => (
+            "inventory_unavailable",
+            "Machine inventory is unavailable.",
+            true,
+        ),
+    };
+    ToolError::new(code, message, retryable).into_mcp_result()
+}
+
+fn deploy_tool_error(error: DeployError) -> McpToolResult {
+    let retryable = matches!(
+        error,
+        DeployError::Busy
+            | DeployError::CredentialUnavailable
+            | DeployError::ExecutionOutcomeUnknown
+            | DeployError::TimeoutOutcomeUnknown
+            | DeployError::CancelledOutcomeUnknown
+            | DeployError::OutputTooLargeOutcomeUnknown
+    );
+    let message = match error {
+        DeployError::DeployNotFound => "Deploy not found.",
+        DeployError::DeployUnavailable => "Deploy is not available through MCP.",
+        DeployError::MissingHostPin => "Machine has no trusted host key pin.",
+        DeployError::Busy => "Another deploy is already active.",
+        DeployError::Cancelled => "Deploy was cancelled before execution.",
+        DeployError::ExecutionOutcomeUnknown | DeployError::CancelledOutcomeUnknown => {
+            "Deploy execution outcome is unknown."
+        }
+        DeployError::TimeoutOutcomeUnknown => "Deploy timed out and its outcome is unknown.",
+        DeployError::OutputTooLargeOutcomeUnknown => {
+            "Deploy output exceeded its bound and the outcome is unknown."
+        }
+        DeployError::CredentialUnavailable => "Deploy credential service is unavailable.",
+        DeployError::CredentialInvalid => "Deploy credential response was invalid.",
+        DeployError::InvalidOutput => "Deploy returned invalid structured output.",
+        DeployError::ExecutionRejected => "Deploy execution failed.",
+        DeployError::InvalidConfiguration | DeployError::InvalidCatalog => {
+            "Deploy service is unavailable."
+        }
+    };
+    ToolError::new(error.code(), message, retryable).into_mcp_result()
 }
 
 fn json_result(output: serde_json::Value) -> McpToolResult {
@@ -1254,12 +1632,53 @@ mod tests {
     };
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::{io::AsyncWriteExt as _, net::TcpListener, sync::Notify, task::JoinHandle};
     use tracing_subscriber::{Layer as _, layer::SubscriberExt as _};
 
     use super::*;
 
+    #[test]
+    fn machine_input_schemas_match_the_fixed_ssh_identity() {
+        for schema in [
+            schemars::schema_for!(MachineCreateInput),
+            schemars::schema_for!(MachineUpdateInput),
+        ] {
+            let schema = serde_json::to_value(schema).unwrap();
+            let properties = &schema["properties"];
+            assert_eq!(properties["ssh_port"]["minimum"], 22);
+            assert_eq!(properties["ssh_port"]["maximum"], 22);
+            assert_eq!(properties["ssh_username"]["minLength"], 7);
+            assert_eq!(properties["ssh_username"]["maxLength"], 7);
+            assert_eq!(properties["ssh_username"]["pattern"], "^homelab$");
+        }
+    }
+
     type PropagatedRequests = Arc<Mutex<Vec<(String, String)>>>;
+
+    struct CancellingDeploys(Arc<AtomicBool>);
+
+    impl crate::services::DeployService for CancellingDeploys {
+        fn list(&self) -> Vec<crate::integrations::deploys::DeployMetadata> {
+            Vec::new()
+        }
+
+        fn run_cancelled<'a>(
+            &'a self,
+            _: &'a str,
+            _: Machine,
+            mut cancellation: std::pin::Pin<&'a mut (dyn Future<Output = ()> + Send)>,
+        ) -> crate::services::ServiceFuture<
+            'a,
+            Result<crate::integrations::deploys::DeployResult, DeployError>,
+        > {
+            Box::pin(async move {
+                cancellation.as_mut().await;
+                self.0.store(true, Ordering::Relaxed);
+                Err(DeployError::CancelledOutcomeUnknown)
+            })
+        }
+    }
 
     async fn serve(router: Router) -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2005,7 +2424,7 @@ mod tests {
 
         let (_, listed) = post_mcp(&endpoint, request("tools/list", "list", json!({}))).await;
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 11);
         let query_tool = tools
             .iter()
             .find(|tool| tool["name"] == QUERY_TOOL_NAME)
@@ -2042,6 +2461,52 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == CEPH_EXEC_TOOL_NAME)
             .unwrap();
+        let machines_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == MACHINES_TOOL_NAME)
+            .unwrap();
+        let deploys_tool = tools
+            .iter()
+            .find(|tool| tool["name"] == DEPLOYS_TOOL_NAME)
+            .unwrap();
+        assert_eq!(machines_tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(deploys_tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(
+            machines_tool["inputSchema"]["properties"]["action"]["enum"],
+            json!([
+                "help",
+                "help.host-key",
+                "list",
+                "create",
+                "update",
+                "delete",
+                "host-key.clear",
+                "host-key.replace"
+            ])
+        );
+        assert_eq!(
+            deploys_tool["inputSchema"]["properties"]["action"]["enum"],
+            json!(["help", "list", "run"])
+        );
+        assert_eq!(machines_tool["annotations"]["destructiveHint"], true);
+        assert_eq!(deploys_tool["annotations"]["idempotentHint"], false);
+
+        for (name, action, expected_field) in [
+            (MACHINES_TOOL_NAME, "list", "machines"),
+            (DEPLOYS_TOOL_NAME, "list", "deploys"),
+        ] {
+            let (_, response) = post_mcp(
+                &endpoint,
+                request(
+                    "tools/call",
+                    name,
+                    json!({"name":name,"arguments":{"action":action,"input":{}}}),
+                ),
+            )
+            .await;
+            assert_eq!(response["result"]["isError"], Value::Null, "{response}");
+            assert!(response["result"]["structuredContent"][expected_field].is_array());
+        }
         assert_eq!(ceph_query_tool["annotations"], query_tool["annotations"]);
         assert_eq!(
             ceph_exec_tool["annotations"],
@@ -2882,6 +3347,8 @@ mod tests {
                 ),
                 kubernetes: crate::integrations::kubernetes::KubernetesCatalog::inert_for_test(),
                 ceph: crate::integrations::ceph::CephCatalog::disabled_for_test(),
+                inventory: Arc::new(crate::services::InertInventory),
+                deploys: Arc::new(crate::services::InertDeploys),
             }),
         });
         let (mcp_origin, mcp_task) = serve(streamable_http_router(handler)).await;
@@ -3405,12 +3872,30 @@ mod tests {
             "http://127.0.0.1/mcp",
             ["https://auth.example.com/oauth"],
         )
-        .with_scopes(["mcp:use", "kubernetes:read", "kubernetes:write"]);
+        .with_scopes([
+            "mcp:use",
+            "kubernetes:read",
+            "kubernetes:write",
+            "inventory:read",
+            "inventory:write",
+            "inventory:host-trust",
+            "deploy:read",
+            "deploy:run",
+        ]);
         let authorization = StreamableHttpAuthorization::hosted(metadata, |_, _| {
             Box::pin(async { McpHostedTokenValidation::Unavailable })
         })
         .unwrap()
-        .with_required_scopes(["mcp:use", "kubernetes:read", "kubernetes:write"]);
+        .with_required_scopes([
+            "mcp:use",
+            "kubernetes:read",
+            "kubernetes:write",
+            "inventory:read",
+            "inventory:write",
+            "inventory:host-trust",
+            "deploy:read",
+            "deploy:run",
+        ]);
         let router = streamable_http_router_with_options(
             handler,
             StreamableHttpOptions::default().with_authorization(authorization),
@@ -3432,7 +3917,16 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
         let challenge = missing.headers()["www-authenticate"].to_str().unwrap();
         assert!(challenge.starts_with("Bearer "));
-        for scope in ["mcp:use", "kubernetes:read", "kubernetes:write"] {
+        for scope in [
+            "mcp:use",
+            "kubernetes:read",
+            "kubernetes:write",
+            "inventory:read",
+            "inventory:write",
+            "inventory:host-trust",
+            "deploy:read",
+            "deploy:run",
+        ] {
             assert!(
                 challenge.contains(scope),
                 "challenge omitted {scope}: {challenge}"
@@ -3462,5 +3956,42 @@ mod tests {
 
         grafana_task.abort();
         mcp_task.abort();
+    }
+
+    #[tokio::test]
+    async fn deploy_cancellation_preserves_outcome_unknown_error() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut services = Services::new(GrafanaClient::for_test(
+            url::Url::parse("http://127.0.0.1/").unwrap(),
+            std::time::Duration::from_secs(1),
+        ));
+        services.deploys = Arc::new(CancellingDeploys(cancelled.clone()));
+        let handler = HomelabMcp {
+            services: Arc::new(services),
+        };
+        let now = chrono::Utc::now();
+        let machine = Machine {
+            id: Uuid::new_v4(),
+            display_name: "test".to_owned(),
+            ssh_host: "test.example".to_owned(),
+            ssh_port: 22,
+            ssh_username: "homelab".to_owned(),
+            pinned_host_public_key: Some("ssh-ed25519 public".to_owned()),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let result = handler
+            .dispatch_deploy_run("system-info", machine, async {})
+            .await
+            .raw;
+
+        assert!(cancelled.load(Ordering::Relaxed));
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "cancelled_outcome_unknown"
+        );
+        assert_eq!(result["structuredContent"]["error"]["retryable"], true);
+        assert_eq!(result["isError"], true);
     }
 }

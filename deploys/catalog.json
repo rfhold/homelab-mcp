@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "deploys": [
+    {
+      "id": "bootstrap-homelab",
+      "description": "Create the homelab administrator and trust an operator-supplied OpenBao SSH user CA public key.",
+      "entrypoint": "deploys/entrypoints/bootstrap_homelab.py",
+      "inventory": "deploys/inventory_bootstrap.py",
+      "risk": "high",
+      "local_available": true,
+      "mcp_available": false,
+      "supported_distributions": ["debian", "ubuntu", "arch"],
+      "timeout_seconds": 300,
+      "requires_sudo": true,
+      "mutating": true
+    },
+    {
+      "id": "system-info",
+      "description": "Read a bounded set of operating system, capacity, storage, and network facts.",
+      "entrypoint": "deploys/entrypoints/system_info.py",
+      "inventory": "deploys/inventory_system_info.py",
+      "risk": "low",
+      "local_available": true,
+      "mcp_available": true,
+      "supported_distributions": ["debian", "ubuntu", "arch"],
+      "timeout_seconds": 30,
+      "requires_sudo": false,
+      "mutating": false
+    }
+  ]
+}

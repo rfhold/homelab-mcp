@@ -4,10 +4,19 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import * as pulumi from "@pulumi/pulumi";
 import {
+  allConfig,
+  setAllConfig,
+} from "@pulumi/pulumi/runtime/config";
+import {
+  openBaoHttpsEgressRules,
   requireImmutableImage,
   validateCephClusters,
+  validateCidrs,
   validateHttpsOrigin,
   validateKubernetesClusters,
+  validateOpenBaoSegment,
+  validateOpenBaoStack,
+  validatePort,
   validateWrappingKeyVersions,
 } from "./policy";
 
@@ -85,6 +94,17 @@ before(async () => {
       '["https://kuri.internal.example"]',
     "homelab-mcp:mcpOAuthWrappingKeyVersions": '["v1"]',
     "homelab-mcp:mcpOAuthActiveWrappingKeyVersion": "v1",
+    "homelab-mcp:openbaoEnabled": "true",
+    "homelab-mcp:openbaoUrl": "https://openbao.example.test",
+    "homelab-mcp:openbaoCreateSshMount": "true",
+    "homelab-mcp:openbaoKubernetesAuthMount": "kubernetes",
+    "homelab-mcp:openbaoKubernetesRole": "homelab-mcp-test",
+    "homelab-mcp:openbaoSshMount": "homelab-ssh-client",
+    "homelab-mcp:openbaoSshRole": "homelab",
+    "homelab-mcp:openbaoAudience": "https://openbao.example.test",
+    "homelab-mcp:openbaoEndpointCidrs": '["172.16.5.10/32"]',
+    "homelab-mcp:openbaoPort": "8200",
+    "homelab-mcp:deployMachineSshEgressCidrs": '["172.16.0.0/16"]',
   });
   process.env.GRAFANA_URL = "https://grafana.example.test";
   process.env.GRAFANA_AUTH = "bootstrap:test-password";
@@ -198,6 +218,26 @@ describe("configuration policy", () => {
     assert.throws(() => validateWrappingKeyVersions([], "v1"));
     assert.throws(() => validateWrappingKeyVersions(["v1", "v1"], "v1"));
     assert.throws(() => validateWrappingKeyVersions(["v1"], "v2"));
+  });
+
+  test("validates bounded OpenBao path and network configuration", () => {
+    assert.equal(validateOpenBaoSegment("ssh-client", "mount"), "ssh-client");
+    assert.throws(() => validateOpenBaoSegment("ssh/client", "mount"));
+    assert.deepEqual(validateCidrs(["10.0.0.1/32", "10.0.0.0/24"], "cidrs"), ["10.0.0.1/32", "10.0.0.0/24"]);
+    assert.throws(() => validateCidrs(["0.0.0.0/0x"], "cidrs"));
+    assert.throws(() => validateCidrs(["fd00::/64"], "cidrs"));
+    assert.equal(validatePort(8200, "port"), 8200);
+    assert.throws(() => validatePort(0, "port"));
+    assert.equal(validateOpenBaoStack("prod", false, false), false);
+    assert.equal(validateOpenBaoStack("preview", true, true), true);
+    assert.throws(() => validateOpenBaoStack("prod", true, false));
+    assert.throws(() => validateOpenBaoStack("prod", false, true));
+    assert.deepEqual(openBaoHttpsEgressRules(false, ["172.16.5.10/32"], 8200), [
+      {
+        to: [{ ipBlock: { cidr: "0.0.0.0/0" } }],
+        ports: [{ port: 443, protocol: "TCP" }],
+      },
+    ]);
   });
 
   test("validates a bounded, unique, reviewed Kubernetes cluster catalog", () => {
@@ -322,6 +362,17 @@ describe("configuration policy", () => {
     assert.match(preview, /^\s*homelab-mcp:protectData: (?:"false"|false)$/m);
     assert.match(production, /^\s*homelab-mcp:protectData: (?:"true"|true)$/m);
     assert.match(production, /^\s*homelab-mcp:cephClusters: \[\]$/m);
+    assert.match(preview, /^\s*homelab-mcp:openbaoEnabled: true$/m);
+    assert.match(production, /^\s*homelab-mcp:openbaoEnabled: false$/m);
+    assert.match(production, /^\s*homelab-mcp:openbaoCreateSshMount: false$/m);
+    assert.match(
+      preview,
+      /^\s*homelab-mcp:deployMachineSshEgressCidrs: \[172\.16\.0\.0\/16\]$/m,
+    );
+    assert.match(
+      production,
+      /^\s*homelab-mcp:deployMachineSshEgressCidrs: \[\]$/m,
+    );
     assert.doesNotMatch(production, /https:\/\/ceph\./);
     assert.match(preview, /^\s*homelab-mcp:cephClusters:$/m);
     const cephCatalog = preview.slice(
@@ -487,9 +538,22 @@ describe("standalone resource topology", () => {
     assert.equal(app.HOMELAB_MCP_OAUTH_RESOURCE, "https://homelab-mcp.example.test/mcp");
     assert.equal(
       app.HOMELAB_MCP_OAUTH_REQUIRED_SCOPES,
-      "mcp:use kubernetes:read kubernetes:write",
+      "mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run",
     );
     assert.equal(app.HOMELAB_MCP_KUBECTL_PATH, "/usr/local/bin/kubectl");
+    assert.equal(app.HOMELAB_MCP_DATABASE_MAX_CONNECTIONS, "10");
+    assert.equal(app.HOMELAB_MCP_DEPLOY_ROOT, "/opt/homelab-mcp");
+    assert.equal(app.HOMELAB_MCP_DEPLOY_CATALOG, "/opt/homelab-mcp/deploys/catalog.json");
+    assert.equal(app.HOMELAB_MCP_DEPLOY_UV_EXECUTABLE, "/usr/local/bin/uv");
+    assert.equal(app.HOMELAB_MCP_DEPLOY_SSH_KEYGEN_EXECUTABLE, "/usr/bin/ssh-keygen");
+    assert.equal(app.HOMELAB_MCP_DEPLOY_TEMP_ROOT, "/var/run/homelab-mcp/deploy");
+    assert.equal(app.HOMELAB_MCP_OPENBAO_URL, "https://openbao.example.test");
+    assert.equal(app.HOMELAB_MCP_OPENBAO_KUBERNETES_AUTH_MOUNT, "kubernetes");
+    assert.equal(app.HOMELAB_MCP_OPENBAO_KUBERNETES_ROLE, "homelab-mcp-test");
+    assert.equal(app.HOMELAB_MCP_OPENBAO_SSH_MOUNT, "homelab-ssh-client");
+    assert.equal(app.HOMELAB_MCP_OPENBAO_SSH_ROLE, "homelab");
+    assert.equal(app.HOMELAB_MCP_OPENBAO_JWT_PATH, "/var/run/secrets/homelab-mcp/openbao/token");
+    assert.equal(app.HOMELAB_MCP_OPENBAO_REQUEST_TIMEOUT_MS, "5000");
     assert.deepEqual(JSON.parse(app.HOMELAB_MCP_KUBERNETES_CLUSTERS as string), [
       {
         name: "pantheon",
@@ -698,6 +762,39 @@ describe("standalone resource topology", () => {
         },
       },
     );
+  });
+
+  test("creates least-privilege OpenBao preview resources", () => {
+    const provider = resource("pulumi:providers:vault", "homelab-mcp-openbao");
+    assert.equal(provider.inputs.address, "https://openbao.example.test");
+    assert.equal(provider.inputs.authLoginTokenFile, undefined);
+    assert.equal(provider.inputs.authLogin, undefined);
+    assert.equal(provider.inputs.skipChildToken, "true");
+    assert.equal(provider.inputs.token, undefined);
+    assert.equal(resources.some((entry) => entry.type === "vault:index/authBackend:AuthBackend"), false);
+    const mount = resource("vault:index/mount:Mount", "homelab-mcp-openbao-ssh");
+    assert.deepEqual({ type: mount.inputs.type, path: mount.inputs.path, defaultLeaseTtlSeconds: mount.inputs.defaultLeaseTtlSeconds, maxLeaseTtlSeconds: mount.inputs.maxLeaseTtlSeconds }, { type: "ssh", path: "homelab-ssh-client", defaultLeaseTtlSeconds: 900, maxLeaseTtlSeconds: 900 });
+    const ca = resource("vault:ssh/secretBackendCa:SecretBackendCa", "homelab-mcp-openbao-ssh-ca");
+    assert.equal(ca.inputs.generateSigningKey, true);
+    assert.equal(ca.inputs.privateKey, undefined);
+    const sshRole = resource("vault:ssh/secretBackendRole:SecretBackendRole", "homelab-mcp-openbao-ssh-role");
+    assert.deepEqual({ keyType: sshRole.inputs.keyType, allowUserCertificates: sshRole.inputs.allowUserCertificates, allowHostCertificates: sshRole.inputs.allowHostCertificates, allowedUsers: sshRole.inputs.allowedUsers, defaultUser: sshRole.inputs.defaultUser, ttl: sshRole.inputs.ttl, maxTtl: sshRole.inputs.maxTtl }, { keyType: "ca", allowUserCertificates: true, allowHostCertificates: false, allowedUsers: "homelab", defaultUser: "homelab", ttl: "15m", maxTtl: "15m" });
+    const policy = resource("vault:index/policy:Policy", "homelab-mcp-openbao");
+    assert.equal(policy.inputs.policy, 'path "homelab-ssh-client/sign/homelab" {\n  capabilities = ["update"]\n}\n');
+    const role = resource("vault:kubernetes/authBackendRole:AuthBackendRole", "homelab-mcp-openbao-kubernetes-role");
+    assert.deepEqual({ audience: role.inputs.audience, boundServiceAccountNames: role.inputs.boundServiceAccountNames, boundServiceAccountNamespaces: role.inputs.boundServiceAccountNamespaces, tokenPolicies: role.inputs.tokenPolicies, tokenNoDefaultPolicy: role.inputs.tokenNoDefaultPolicy, tokenTtl: role.inputs.tokenTtl, tokenMaxTtl: role.inputs.tokenMaxTtl }, { audience: "https://openbao.example.test", boundServiceAccountNames: ["homelab-mcp"], boundServiceAccountNamespaces: ["homelab-mcp-test"], tokenPolicies: ["homelab-mcp-test"], tokenNoDefaultPolicy: true, tokenTtl: 900, tokenMaxTtl: 900 });
+  });
+
+  test("projects an audience-bound OpenBao JWT and memory-only credential directory", () => {
+    const deployment = resource("kubernetes:apps/v1:Deployment", "homelab-mcp");
+    const pod = (unwrapSecrets(deployment.inputs.spec) as any).template.spec;
+    assert.deepEqual(pod.containers[0].volumeMounts.find((mount: any) => mount.name === "openbao-jwt"), { name: "openbao-jwt", mountPath: "/var/run/secrets/homelab-mcp/openbao", readOnly: true });
+    assert.deepEqual(pod.volumes.find((volume: any) => volume.name === "openbao-jwt"), { name: "openbao-jwt", projected: { defaultMode: 0o440, sources: [{ serviceAccountToken: { audience: "https://openbao.example.test", expirationSeconds: 600, path: "token" } }] } });
+    assert.deepEqual(pod.containers[0].volumeMounts.find((mount: any) => mount.name === "deploy-credentials"), { name: "deploy-credentials", mountPath: "/var/run/homelab-mcp/deploy" });
+    assert.deepEqual(pod.volumes.find((volume: any) => volume.name === "deploy-credentials"), { name: "deploy-credentials", emptyDir: { medium: "Memory", sizeLimit: "16Mi" } });
+    assert.equal(pod.securityContext.runAsUser, 65532);
+    const allRules = resources.filter((entry) => entry.type.includes("Role")).flatMap((entry) => (entry.inputs.rules as any[]) ?? []);
+    assert.equal(allRules.some((rule) => rule.resources?.includes("secrets")), false);
   });
 
   test("grants exact namespace-scoped Tekton and PAC permissions", () => {
@@ -1012,8 +1109,24 @@ describe("standalone resource topology", () => {
         ],
       },
       {
+        to: [{
+          ipBlock: {
+            cidr: "0.0.0.0/0",
+            except: ["172.16.5.10/32"],
+          },
+        }],
+        ports: [{ port: 443, protocol: "TCP" }],
+      },
+      {
+        to: [{ ipBlock: { cidr: "172.16.5.10/32" } }],
+        ports: [{ port: 8200, protocol: "TCP" }],
+      },
+      {
+        to: [{ ipBlock: { cidr: "172.16.0.0/16" } }],
+        ports: [{ port: 22, protocol: "TCP" }],
+      },
+      {
         ports: [
-          { port: 443, protocol: "TCP" },
           { port: 4040, protocol: "TCP" },
           { port: 4318, protocol: "TCP" },
         ],
@@ -1066,6 +1179,40 @@ describe("standalone resource topology", () => {
         ports: [{ port: 8080, protocol: "TCP" }],
       },
     ]);
+    const generalHttps = spec.egress.find((rule: any) =>
+      rule.ports?.some((port: any) => port.port === 443) &&
+      rule.to?.[0]?.ipBlock?.cidr === "0.0.0.0/0",
+    );
+    const openbao = spec.egress.find((rule: any) =>
+      rule.ports?.some((port: any) => port.port === 8200) &&
+      rule.to?.[0]?.ipBlock?.cidr === "172.16.5.10/32",
+    );
+    assert.deepEqual(generalHttps.to[0].ipBlock.except, ["172.16.5.10/32"]);
+    assert.ok(openbao);
+    const machineSsh = spec.egress.filter((rule: any) =>
+      rule.ports?.some((port: any) => port.port === 22),
+    );
+    assert.deepEqual(machineSsh, [
+      {
+        to: [{ ipBlock: { cidr: "172.16.0.0/16" } }],
+        ports: [{ port: 22, protocol: "TCP" }],
+      },
+    ]);
+    assert.equal(
+      spec.egress.some((rule: any) =>
+        rule.ports?.some(
+          (port: any) => port.port === 22 && port.endPort !== undefined,
+        ) ||
+        (rule.ports?.some((port: any) => port.port === 22) && !rule.to),
+      ),
+      false,
+    );
+    assert.equal(
+      spec.egress.some((rule: any) =>
+        rule.ports?.some((port: any) => port.port === 443) && !rule.to,
+      ),
+      false,
+    );
   });
 
   test("creates the ClusterIP service and streaming Gateway API route", () => {
@@ -1124,6 +1271,7 @@ describe("standalone resource topology", () => {
       "utf8",
     );
     assert.match(dockerfile, /ARG KUBECTL_VERSION=v1\.33\.5/);
+    assert.match(dockerfile, /COPY migrations migrations\n[\s\S]*cargo build --locked --release/);
     assert.match(
       dockerfile,
       /6a12d6c39e4a611a3687ee24d8c733961bb4bae1ae975f5204400c0a6930c6fc/,
@@ -1142,6 +1290,101 @@ describe("standalone resource topology", () => {
       /COPY --from=kubectl \/usr\/local\/bin\/kubectl \/usr\/local\/bin\/kubectl/,
     );
     assert.doesNotMatch(dockerfile, /(?:stable\.txt|latest|apt-get install[^\n]*kubectl)/);
+  });
+
+  test("packages a locked offline deploy runtime and isolates the CI OpenBao identity", () => {
+    const dockerfile = readFileSync(join(__dirname, "..", "..", "Dockerfile"), "utf8");
+    assert.match(dockerfile, /ARG UV_VERSION=0\.11\.15/);
+    assert.match(dockerfile, /uv-\$\{UV_VERSION\}\.data\/scripts\/uv \/usr\/local\/bin\/uv/);
+    assert.match(dockerfile, /uv sync --locked --no-dev --no-install-project/);
+    assert.match(dockerfile, /UV_OFFLINE=1/);
+    assert.match(dockerfile, /UV_NO_SYNC=1/);
+    assert.match(dockerfile, /COPY deploys deploys/);
+    assert.match(dockerfile, /openssh-client/);
+    const pipeline = readFileSync(join(__dirname, "..", "..", ".tekton", "homelab-mcp-preview.yaml"), "utf8");
+    const taskRunSpecs = pipeline.slice(
+      pipeline.indexOf("  taskRunSpecs:"),
+      pipeline.indexOf("  timeouts:"),
+    );
+    assert.match(taskRunSpecs, /pipelineTaskName: deploy-preview\n\s+serviceAccountName: openbao-pulumi-admin-v1/);
+    assert.equal((pipeline.match(/serviceAccountName: openbao-pulumi-admin-v1/g) ?? []).length, 1);
+    assert.match(taskRunSpecs, /serviceAccountName: openbao-pulumi-admin-v1\n\s+timeout: 25m0s/);
+    assert.equal((pipeline.match(/timeout: 25m0s/g) ?? []).length, 1);
+    assert.match(taskRunSpecs, /serviceAccountName: openbao-pulumi-admin-v1[\s\S]*kubernetes\.io\/arch: amd64/);
+
+    const deployStart = pipeline.indexOf("      - name: deploy-preview");
+    const deployEnd = pipeline.indexOf("\n        params:", deployStart);
+    assert.ok(deployStart >= 0 && deployEnd > deployStart);
+    const deployTask = pipeline.slice(deployStart, deployEnd);
+    const outsideDeployTask = pipeline.slice(0, deployStart) + pipeline.slice(deployEnd);
+    assert.match(deployTask, /name: openbao-ci-jwt[\s\S]*defaultMode: 256[\s\S]*serviceAccountToken:[\s\S]*path: token[\s\S]*audience: openbao-pulumi-admin-v1[\s\S]*expirationSeconds: 600/);
+    assert.match(deployTask, /name: openbao-ci-session\n\s+emptyDir:\n\s+medium: Memory\n\s+sizeLimit: 64Ki/);
+    assert.match(deployTask, /name: openbao-login\n\s+ref:\n\s+name: openbao-kubernetes-login/);
+    assert.match(deployTask, /name: role\n\s+value: openbao-pulumi-admin-v1\n\s+- name: expected-policy\n\s+value: openbao-pulumi-admin\n\s+- name: max-lease-seconds\n\s+value: "1800"/);
+    assert.doesNotMatch(deployTask, /name: (?:jwt-volume-name|session-volume-name)/);
+    assert.match(deployTask, /secretName: tekton-cluster-kubeconfig/);
+    assert.match(deployTask, /name: KUBECONFIG\n\s+value: \/etc\/kubeconfig\/kubeconfig/);
+    assert.match(deployTask, /name: pulumi-credentials/);
+    assert.match(deployTask, /name: authentik-credentials/);
+    assert.match(deployTask, /name: grafana-credentials/);
+    const applyStart = deployTask.indexOf("            - name: apply-preview");
+    assert.ok(applyStart >= 0);
+    const applyStep = deployTask.slice(applyStart);
+    assert.match(applyStep, /name: openbao-ci-session\n\s+mountPath: \/var\/run\/secrets\/openbao-ci\/session/);
+    assert.doesNotMatch(applyStep, /(?:openbao-ci-jwt|\/var\/run\/secrets\/openbao-ci\/jwt)/);
+    assert.match(applyStep, /\$\{VAULT_TOKEN\+x\}/);
+    assert.match(applyStep, /\$\{BAO_TOKEN\+x\}/);
+    assert.match(applyStep, /token_file=\/var\/run\/secrets\/openbao-ci\/session\/token/);
+    assert.match(applyStep, /test -f "\$token_file"[\s\S]*test -s "\$token_file"/);
+    assert.match(applyStep, /stat -c '%a' "\$token_file"`" = 400/);
+    assert.match(applyStep, /VAULT_TOKEN="`cat "\$token_file"`"/);
+    assert.match(applyStep, /test -n "\$VAULT_TOKEN"[\s\S]*test "\$\{#VAULT_TOKEN\}" -le 4096/);
+    assert.match(applyStep, /export VAULT_TOKEN/);
+    assert.match(applyStep, /unset VAULT_TOKEN/);
+    assert.match(applyStep, /rm -f "\$token_file"/);
+    assert.match(applyStep, /trap cleanup EXIT/);
+    assert.match(applyStep, /bun install --frozen-lockfile/);
+    assert.match(applyStep, /pulumi up --stack preview --yes --skip-preview --config "image=\$\(params\.image\)"/);
+    assert.doesNotMatch(applyStep, /(?:curl|jq|jwt|auth\/kubernetes\/login|export BAO_TOKEN)/i);
+    assert.doesNotMatch(outsideDeployTask, /(?:openbao-ci-jwt|openbao-ci-session|openbao-kubernetes-login|audience: openbao-pulumi-admin-v1)/);
+    assert.doesNotMatch(pipeline, /openbao-pulumi-credentials/);
+    assert.doesNotMatch(pipeline, /(?:uv lock --check|python -m unittest discover)/);
+    assert.doesNotMatch(deployTask, /(?:results\.|\$\(results\.|secretName: openbao)/);
+    assert.doesNotMatch(pipeline, /(?:ssh-keyscan|ssh-keygen|pyinfra\s|deploys\/entrypoints)/);
+  });
+
+  test("defaults machine SSH egress to empty and rejects invalid CIDRs", async () => {
+    const baseConfig = allConfig();
+    try {
+      setAllConfig({
+        ...baseConfig,
+        "homelab-mcp:deployMachineSshEgressCidrs": "[]",
+      });
+      const resourceStart = resources.length;
+      await import(`./index.ts?empty-machine-ssh-egress=${Date.now()}`);
+      await pulumi.runtime.disconnect();
+      const emptyPolicy = resources
+        .slice(resourceStart)
+        .find((candidate) => candidate.name === "homelab-mcp-egress");
+      assert.ok(emptyPolicy);
+      assert.equal(
+        (emptyPolicy.inputs.spec as any).egress.some((rule: any) =>
+          rule.ports?.some((port: any) => port.port === 22),
+        ),
+        false,
+      );
+
+      setAllConfig({
+        ...baseConfig,
+        "homelab-mcp:deployMachineSshEgressCidrs": '["172.16.0.0/16x"]',
+      });
+      await assert.rejects(
+        import(`./index.ts?invalid-machine-ssh-egress=${Date.now()}`),
+        /deployMachineSshEgressCidrs must contain valid IPv4 CIDRs/,
+      );
+    } finally {
+      setAllConfig(baseConfig);
+    }
   });
 });
 

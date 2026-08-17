@@ -9,6 +9,8 @@ metadata:
 spec:
   taskRunSpecs:
     - pipelineTaskName: deploy-preview
+      serviceAccountName: openbao-pulumi-admin-v1
+      timeout: 25m0s
       podTemplate:
         nodeSelector:
           kubernetes.io/arch: amd64
@@ -83,7 +85,7 @@ spec:
               script: |
                 #!/bin/sh
                 set -eu
-                if git grep -q -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}' -- infra/pulumi Dockerfile .tekton Cargo.toml Cargo.lock; then
+                if git grep -q -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}' -- infra/pulumi Dockerfile .tekton Cargo.toml Cargo.lock pyproject.toml uv.lock deploys '*.py'; then
                   echo "private credential material is tracked in deployment inputs" >&2
                   exit 1
                 fi
@@ -283,7 +285,29 @@ spec:
             - name: kubeconfig
               secret:
                 secretName: tekton-cluster-kubeconfig
+            - name: openbao-ci-jwt
+              projected:
+                defaultMode: 256
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      audience: openbao-pulumi-admin-v1
+                      expirationSeconds: 600
+            - name: openbao-ci-session
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Ki
           steps:
+            - name: openbao-login
+              ref:
+                name: openbao-kubernetes-login
+              params:
+                - name: role
+                  value: openbao-pulumi-admin-v1
+                - name: expected-policy
+                  value: openbao-pulumi-admin
+                - name: max-lease-seconds
+                  value: "1800"
             - name: apply-preview
               image: cr.holdenitdown.net/rfhold/general-ci:latest
               imagePullPolicy: Always
@@ -312,9 +336,39 @@ spec:
                 - name: kubeconfig
                   mountPath: /etc/kubeconfig
                   readOnly: true
+                - name: openbao-ci-session
+                  mountPath: /var/run/secrets/openbao-ci/session
               script: |
                 #!/bin/sh
                 set -eu
+                if [ "${VAULT_TOKEN+x}" = x ] || [ "${BAO_TOKEN+x}" = x ]; then
+                  echo "unexpected inherited OpenBao token environment" >&2
+                  exit 1
+                fi
+
+                token_file=/var/run/secrets/openbao-ci/session/token
+                test -f "$token_file"
+                test -s "$token_file"
+                token_size="`wc -c < "$token_file"`"
+                case "$token_size" in *[!0-9]*|'') exit 1 ;; esac
+                test "$token_size" -le 4097
+                test "`stat -c '%a' "$token_file"`" = 400
+
+                cleanup() {
+                  unset VAULT_TOKEN
+                  rm -f "$token_file"
+                }
+                trap cleanup EXIT
+                trap 'exit 129' HUP
+                trap 'exit 130' INT
+                trap 'exit 143' TERM
+
+                VAULT_TOKEN="`cat "$token_file"`"
+                test -n "$VAULT_TOKEN"
+                test "${#VAULT_TOKEN}" -le 4096
+                case "$VAULT_TOKEN" in *[[:space:]]*) exit 1 ;; esac
+                export VAULT_TOKEN
+
                 test "`bun --version`" = "1.3.5"
                 test "`pulumi version`" = "v3.253.0"
                 bun install --frozen-lockfile

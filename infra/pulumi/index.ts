@@ -3,14 +3,20 @@ import * as k8s from "@pulumi/kubernetes";
 import * as pulumi from "@pulumi/pulumi";
 import * as random from "@pulumi/random";
 import * as tls from "@pulumi/tls";
+import * as vault from "@pulumi/vault";
 import * as grafana from "@pulumiverse/grafana";
 import { createHash } from "node:crypto";
 import { OAuthApplication } from "./authentik";
 import {
+  openBaoHttpsEgressRules,
   requireImmutableImage,
   validateCephClusters,
   validateHttpsOrigin,
+  validateCidrs,
   validateKubernetesClusters,
+  validateOpenBaoSegment,
+  validateOpenBaoStack,
+  validatePort,
   validateWrappingKeyVersions,
 } from "./policy";
 
@@ -67,6 +73,27 @@ const activeWrappingKeyVersion = config.require(
   "mcpOAuthActiveWrappingKeyVersion",
 );
 validateWrappingKeyVersions(wrappingKeyVersions, activeWrappingKeyVersion);
+const openbaoEnabled = config.requireBoolean("openbaoEnabled");
+const openbaoUrl = validateHttpsOrigin(config.require("openbaoUrl"), "openbaoUrl");
+const openbaoCreateSshMount = config.requireBoolean("openbaoCreateSshMount");
+const openbaoKubernetesAuthMount = validateOpenBaoSegment(config.require("openbaoKubernetesAuthMount"), "openbaoKubernetesAuthMount");
+const openbaoKubernetesRole = validateOpenBaoSegment(config.require("openbaoKubernetesRole"), "openbaoKubernetesRole");
+const openbaoSshMount = validateOpenBaoSegment(config.require("openbaoSshMount"), "openbaoSshMount");
+const openbaoSshRole = validateOpenBaoSegment(config.require("openbaoSshRole"), "openbaoSshRole");
+const openbaoAudience = validateHttpsOrigin(config.require("openbaoAudience"), "openbaoAudience");
+const openbaoEndpointCidrs = validateCidrs(config.requireObject<unknown>("openbaoEndpointCidrs"), "openbaoEndpointCidrs");
+const openbaoPort = validatePort(config.requireNumber("openbaoPort"), "openbaoPort");
+const configuredDeployMachineSshEgressCidrs =
+  config.getObject<unknown>("deployMachineSshEgressCidrs") ?? [];
+const deployMachineSshEgressCidrs =
+  Array.isArray(configuredDeployMachineSshEgressCidrs) &&
+  configuredDeployMachineSshEgressCidrs.length === 0
+    ? []
+    : validateCidrs(
+        configuredDeployMachineSshEgressCidrs,
+        "deployMachineSshEgressCidrs",
+      );
+validateOpenBaoStack(pulumi.getStack(), openbaoEnabled, openbaoCreateSshMount);
 
 const kubernetesProviders = new Map(
   kubernetesClusters.map((cluster) => [
@@ -144,6 +171,61 @@ const wrappingKeyMountPath = "/var/run/secrets/homelab-mcp/oauth";
 const wrappingKeyFile = `${wrappingKeyMountPath}/keyring.json`;
 const postgresTrustMountPath = "/var/run/secrets/homelab-mcp/postgres";
 const postgresCaFile = `${postgresTrustMountPath}/ca.crt`;
+const openbaoJwtMountPath = "/var/run/secrets/homelab-mcp/openbao";
+const openbaoJwtFile = `${openbaoJwtMountPath}/token`;
+const deployRoot = "/opt/homelab-mcp";
+const deployTempRoot = "/var/run/homelab-mcp/deploy";
+
+const openbaoResources: pulumi.Resource[] = [];
+if (openbaoEnabled) {
+  const provider = new vault.Provider("homelab-mcp-openbao", {
+    address: openbaoUrl,
+    skipChildToken: true,
+  });
+  const sshMount = openbaoCreateSshMount
+    ? new vault.Mount("homelab-mcp-openbao-ssh", {
+        type: "ssh",
+        path: openbaoSshMount,
+        defaultLeaseTtlSeconds: 900,
+        maxLeaseTtlSeconds: 900,
+      }, { provider })
+    : undefined;
+  const ca = new vault.ssh.SecretBackendCa("homelab-mcp-openbao-ssh-ca", {
+    backend: openbaoSshMount,
+    generateSigningKey: true,
+    keyType: "ed25519",
+  }, { dependsOn: sshMount ? [sshMount] : [], provider });
+  const sshRole = new vault.ssh.SecretBackendRole("homelab-mcp-openbao-ssh-role", {
+    backend: openbaoSshMount,
+    name: openbaoSshRole,
+    keyType: "ca",
+    allowUserCertificates: true,
+    allowHostCertificates: false,
+    allowUserKeyIds: false,
+    allowedUsers: "homelab",
+    defaultUser: "homelab",
+    ttl: "15m",
+    maxTtl: "15m",
+  }, { dependsOn: [ca], provider });
+  const policy = new vault.Policy("homelab-mcp-openbao", {
+    name: openbaoKubernetesRole,
+    policy: `path "${openbaoSshMount}/sign/${openbaoSshRole}" {\n  capabilities = ["update"]\n}\n`,
+  }, { provider });
+  const role = new vault.kubernetes.AuthBackendRole("homelab-mcp-openbao-kubernetes-role", {
+    backend: openbaoKubernetesAuthMount,
+    roleName: openbaoKubernetesRole,
+    audience: openbaoAudience,
+    boundServiceAccountNames: ["homelab-mcp"],
+    boundServiceAccountNamespaces: [namespaceName],
+    tokenPolicies: [policy.name],
+    tokenNoDefaultPolicy: true,
+    tokenTtl: 900,
+    tokenMaxTtl: 900,
+    tokenExplicitMaxTtl: 900,
+    tokenType: "service",
+  }, { dependsOn: [policy], provider });
+  openbaoResources.push(provider, ...(sshMount ? [sshMount] : []), ca, sshRole, policy, role);
+}
 
 const namespace = new k8s.core.v1.Namespace(
   "homelab-mcp-namespace",
@@ -745,6 +827,7 @@ const appSecret = new k8s.core.v1.Secret(
     },
     stringData: {
       HOMELAB_MCP_DATABASE_URL: databaseUrl,
+      HOMELAB_MCP_DATABASE_MAX_CONNECTIONS: "10",
       HOMELAB_MCP_PUBLIC_URL: publicUrl,
       HOMELAB_MCP_OIDC_ISSUER: browserApp.issuer,
       HOMELAB_MCP_OIDC_CLIENT_ID: browserApp.clientId,
@@ -754,7 +837,7 @@ const appSecret = new k8s.core.v1.Secret(
       HOMELAB_MCP_OAUTH_ISSUER: mcpIssuer,
       HOMELAB_MCP_OAUTH_RESOURCE: mcpResource,
       HOMELAB_MCP_OAUTH_REQUIRED_SCOPES:
-        "mcp:use kubernetes:read kubernetes:write",
+        "mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run",
       HOMELAB_MCP_OAUTH_ACCESS_TOKEN_TTL: accessTokenTtl,
       HOMELAB_MCP_OAUTH_REFRESH_TOKEN_TTL: refreshTokenTtl,
       HOMELAB_MCP_OAUTH_REFRESH_FAMILY_TTL: refreshFamilyTtl,
@@ -796,6 +879,18 @@ const appSecret = new k8s.core.v1.Secret(
           }),
         ),
       ),
+      HOMELAB_MCP_DEPLOY_ROOT: deployRoot,
+      HOMELAB_MCP_DEPLOY_CATALOG: `${deployRoot}/deploys/catalog.json`,
+      HOMELAB_MCP_DEPLOY_UV_EXECUTABLE: "/usr/local/bin/uv",
+      HOMELAB_MCP_DEPLOY_SSH_KEYGEN_EXECUTABLE: "/usr/bin/ssh-keygen",
+      HOMELAB_MCP_DEPLOY_TEMP_ROOT: deployTempRoot,
+      HOMELAB_MCP_OPENBAO_URL: openbaoUrl,
+      HOMELAB_MCP_OPENBAO_KUBERNETES_AUTH_MOUNT: openbaoKubernetesAuthMount,
+      HOMELAB_MCP_OPENBAO_KUBERNETES_ROLE: openbaoKubernetesRole,
+      HOMELAB_MCP_OPENBAO_SSH_MOUNT: openbaoSshMount,
+      HOMELAB_MCP_OPENBAO_SSH_ROLE: openbaoSshRole,
+      HOMELAB_MCP_OPENBAO_JWT_PATH: openbaoJwtFile,
+      HOMELAB_MCP_OPENBAO_REQUEST_TIMEOUT_MS: "5000",
       ...Object.fromEntries(
         cephCredentials.flatMap(
           ({ username, password, usernameKey, passwordKey }) => [
@@ -936,6 +1031,15 @@ new k8s.apps.v1.Deployment(
                   readOnly: true,
                 },
                 {
+                  name: "openbao-jwt",
+                  mountPath: openbaoJwtMountPath,
+                  readOnly: true,
+                },
+                {
+                  name: "deploy-credentials",
+                  mountPath: deployTempRoot,
+                },
+                {
                   name: "kube-api-access",
                   mountPath: "/var/run/secrets/kubernetes.io/serviceaccount",
                   readOnly: true,
@@ -945,6 +1049,23 @@ new k8s.apps.v1.Deployment(
           ],
           volumes: [
             { name: "tmp", emptyDir: { sizeLimit: "64Mi" } },
+            {
+              name: "deploy-credentials",
+              emptyDir: { medium: "Memory", sizeLimit: "16Mi" },
+            },
+            {
+              name: "openbao-jwt",
+              projected: {
+                defaultMode: 0o440,
+                sources: [{
+                  serviceAccountToken: {
+                    audience: openbaoAudience,
+                    expirationSeconds: 600,
+                    path: "token",
+                  },
+                }],
+              },
+            },
             {
               name: "oauth-wrapping-keys",
               secret: {
@@ -1017,6 +1138,7 @@ new k8s.apps.v1.Deployment(
       wrappingKeySecret,
       runtimeKubeconfigSecret,
       appServiceAccount,
+      ...openbaoResources,
     ],
     provider: pantheonProvider,
   },
@@ -1047,9 +1169,17 @@ new k8s.networking.v1.NetworkPolicy(
             { port: 53, protocol: "TCP" },
           ],
         },
+        ...openBaoHttpsEgressRules(
+          openbaoEnabled,
+          openbaoEndpointCidrs,
+          openbaoPort,
+        ),
+        ...deployMachineSshEgressCidrs.map((cidr) => ({
+          to: [{ ipBlock: { cidr } }],
+          ports: [{ port: 22, protocol: "TCP" as const }],
+        })),
         {
           ports: [
-            { port: 443, protocol: "TCP" },
             { port: 4040, protocol: "TCP" },
             { port: 4318, protocol: "TCP" },
           ],

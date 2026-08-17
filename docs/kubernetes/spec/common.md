@@ -19,11 +19,11 @@ The implementation uses fixed `kubectl` command construction behind these typed 
 
 ## Authorization
 
-The `/mcp` protected resource requires all three global OAuth scopes: `mcp:use kubernetes:read kubernetes:write`. Kuri requests this exact set automatically during authorization.
+The `/mcp` protected resource requires the exact global OAuth set: `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. Kuri requests all eight scopes automatically during authorization.
 
-These scopes gate the complete `/mcp` resource. They do not enforce permissions per action. Every authorized MCP principal can use both Kubernetes tools and all other MCP tools.
+The entire set gates the complete `/mcp` resource. It does not enforce permissions per tool or action. Every authorized MCP principal can use both Kubernetes tools and all other MCP tools.
 
-Current grants lack the Kubernetes scopes. Each current client and user must complete browser authorization again before the client can call `/mcp`.
+Historical preview grants lack the seven expanded scopes. Each client and user from that revision must complete browser authorization again before the client can call the updated `/mcp`.
 
 The [access contract](../../architecture/access-authentication.md) owns token validation, consent, challenge, and reauthorization behavior. Kubernetes ServiceAccount RBAC remains an independent upstream enforcement boundary.
 

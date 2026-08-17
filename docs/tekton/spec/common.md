@@ -19,7 +19,7 @@ Read actions exist only on `tekton_query`. Mutation actions exist only on `tekto
 
 ## Authorization
 
-The current `mcp:use` scope authorizes every action on both tools. No narrower Tekton read or mutation scope exists.
+The global set `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` gates every action on both tools. No narrower Tekton read or mutation enforcement exists.
 
 This choice lets every current MCP principal dispatch workflows, rerun runs, and cancel active runs. Each caller must make an explicit user decision before an exec call.
 

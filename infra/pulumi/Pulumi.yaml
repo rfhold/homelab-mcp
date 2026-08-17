@@ -5,6 +5,37 @@ runtime:
     packagemanager: bun
 description: Pantheon-hosted homelab-mcp deployment with bounded multi-cluster Kubernetes access
 config:
+  openbaoUrl:
+    description: Credential-free HTTPS origin used by both the provider and preview workload
+    type: string
+  openbaoEnabled:
+    description: Enables preview-only OpenBao declarations; must remain false in production
+    type: boolean
+  openbaoCreateSshMount:
+    description: Create the SSH secrets mount instead of using a pre-existing mount
+    type: boolean
+  openbaoKubernetesAuthMount:
+    type: string
+  openbaoKubernetesRole:
+    type: string
+  openbaoSshMount:
+    type: string
+  openbaoSshRole:
+    type: string
+  openbaoAudience:
+    type: string
+  openbaoEndpointCidrs:
+    description: Explicit IPv4 CIDRs excluded from general HTTPS and allowed only on the OpenBao port
+    type: array
+    items:
+      type: string
+  openbaoPort:
+    type: integer
+  deployMachineSshEgressCidrs:
+    description: Explicit IPv4 CIDRs allowed as machine deployment targets on TCP port 22
+    type: array
+    items:
+      type: string
   kubernetesClusters:
     description: Reviewed runtime cluster catalog with contexts, HTTPS API servers, and endpoint CIDRs
     type: array

@@ -19,7 +19,7 @@ The service constructs requests to fixed Ceph Dashboard API operations. A caller
 
 ## Authorization Risk
 
-The [global OAuth contract](../../architecture/access-authentication.md#protocol-boundary) protects the complete `/mcp` resource. It has no per-tool or per-action enforcement. No Ceph-specific OAuth scope separates reads from mutations.
+The [global OAuth contract](../../architecture/access-authentication.md#protocol-boundary) requires `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` for the complete `/mcp` resource. It has no per-tool or per-action enforcement. No Ceph-specific OAuth scope separates reads from mutations.
 
 Every principal that passes the global `/mcp` authorization boundary can call both `ceph_query` and `ceph_exec`. This grants every authenticated MCP principal authority to mark, reweight, scrub, destroy, and purge OSDs in either configured cluster. Preview uses each cluster's Rook-generated shared Dashboard administrator account, so the upstream credential has broader authority than the fixed MCP action catalog. This user-approved exception and the global authorization model are production blockers. Dedicated least-privilege Dashboard accounts remain required before production approval.
 

@@ -6,6 +6,8 @@ Preview runs this runtime and has verified health, readiness, OAuth metadata, an
 
 Use [docs/README.md](docs/README.md) to locate canonical contracts and current validation boundaries.
 
+Use [machine deploy documentation](docs/deploys/README.md) for inventory, bootstrap, SSH trust, OpenBao identity, and deploy safety.
+
 ## Local Commands
 
 Rust commands require Rust 1.96 because `Cargo.toml` sets `rust-version = "1.96"`. Rust 1.95 rejects the project before tests run.
@@ -20,6 +22,15 @@ cargo +1.96.0 test --locked --all-features
 ```
 
 These commands pass against the exact Kuri Git pin.
+
+If the installed Cargo does not resolve the toolchain shorthand, use the environment-compatible form:
+
+```bash
+rustup run 1.96.0 cargo fmt --all -- --check
+rustup run 1.96.0 cargo check --locked --all-targets --all-features
+rustup run 1.96.0 cargo clippy --locked --all-targets --all-features -- -D warnings
+rustup run 1.96.0 cargo test --locked --all-features
+```
 
 Build the private-dependency runtime image with BuildKit secret handling:
 
@@ -42,6 +53,18 @@ bun install --frozen-lockfile
 bun run build
 bun test index.test.ts
 ```
+
+Run deploy project checks without contacting a machine:
+
+```bash
+uv lock --check
+PYTHONDONTWRITEBYTECODE=1 uv run --locked python -m unittest discover -s deploys/tests
+docker compose -f deploys/fixtures/compose.yaml config --quiet
+```
+
+The Compose command validates fixture configuration only. It does not pull or run images.
+
+Do not run `bootstrap-homelab` during routine validation. It mutates sudo and sshd configuration on one exact target. Follow [the operator procedure](docs/deploys/deploy-workflow.md#operator-bootstrap) only with target-specific authority.
 
 Do not treat a standalone `docker run` as a runtime smoke test. Startup requires PostgreSQL, an OAuth wrapping keyring, OIDC configuration, local OAuth settings, and Grafana credentials. See [the testing guide](docs/quality/testing.md) for current coverage.
 

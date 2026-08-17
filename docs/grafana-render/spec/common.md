@@ -2,7 +2,7 @@
 
 ## Request Boundary
 
-The existing `mcp:use` scope and shared Grafana Editor token authorize rendering. Requests use only the configured Grafana origin, Bearer header, fixed GET routes, and server-built parameters. Redirects and environment proxies are disabled. Callers cannot set an origin, slug, organization ID, header, method, callback, URL, or arbitrary parameter.
+The global set `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` gates rendering. No Grafana-specific scope is enforced per action. The shared Grafana Editor token authorizes the upstream request. Requests use only the configured Grafana origin, Bearer header, fixed GET routes, and server-built parameters. Redirects and environment proxies are disabled. Callers cannot set an origin, slug, organization ID, header, method, callback, URL, or arbitrary parameter.
 
 Both actions accept validated width 320 through 2000, height 200 through 2000, scale 1 through 2, light or dark theme, IANA timezone, and at most 20 sorted template variables. Variable names are 1 through 64 bytes and values at most 1024 bytes. Effective `width * height * scale^2` cannot exceed 4,000,000 pixels.
 

@@ -12,3 +12,4 @@ Preview runs commit `798dd92`. Basic runtime and discovery boundaries are verifi
 | [Tekton tools](../tekton/README.md) | Planned integration behavior and evidence boundaries. |
 | [Kubernetes tools](../kubernetes/README.md) | Locally implemented multi-cluster tool, authority, and safety contracts. |
 | [Ceph Dashboard tools](../ceph/README.md) | Locally implemented native Ceph tool, authority, and safety contracts. |
+| [Machine deploys](../deploys/README.md) | Machine inventory, deploy execution, SSH trust, and OpenBao workload identity. |

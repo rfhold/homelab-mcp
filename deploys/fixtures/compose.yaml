@@ -1,0 +1,13 @@
+services:
+  debian:
+    image: debian:bookworm-slim
+    command: ["sleep", "infinity"]
+    network_mode: none
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+  arch:
+    image: archlinux:base
+    command: ["sleep", "infinity"]
+    network_mode: none
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]

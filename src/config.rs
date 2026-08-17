@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     env, fs,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -12,7 +12,16 @@ use serde::Deserialize;
 use url::Url;
 
 const PREFIX: &str = "HOMELAB_MCP_";
-const REQUIRED_OAUTH_SCOPES: [&str; 3] = ["mcp:use", "kubernetes:read", "kubernetes:write"];
+const REQUIRED_OAUTH_SCOPES: [&str; 8] = [
+    "mcp:use",
+    "kubernetes:read",
+    "kubernetes:write",
+    "inventory:read",
+    "inventory:write",
+    "inventory:host-trust",
+    "deploy:read",
+    "deploy:run",
+];
 const MAX_KUBERNETES_CLUSTERS_JSON_BYTES: usize = 64 * 1024;
 const MAX_CEPH_CLUSTERS_JSON_BYTES: usize = 64 * 1024;
 const MAX_CEPH_CLUSTERS: usize = 32;
@@ -52,6 +61,7 @@ pub struct Config {
 #[derive(Clone)]
 pub struct DatabaseConfig {
     pub url: String,
+    pub max_connections: u32,
 }
 
 #[derive(Clone)]
@@ -86,6 +96,23 @@ pub struct IntegrationsConfig {
     pub tekton: TektonConfig,
     pub kubernetes: KubernetesIntegrationConfig,
     pub ceph: CephIntegrationConfig,
+    pub deploys: DeployIntegrationConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct DeployIntegrationConfig {
+    pub root: PathBuf,
+    pub catalog: PathBuf,
+    pub uv_executable: PathBuf,
+    pub ssh_keygen_executable: PathBuf,
+    pub temp_root: PathBuf,
+    pub openbao_origin: Url,
+    pub openbao_kubernetes_auth_mount: String,
+    pub openbao_kubernetes_role: String,
+    pub openbao_ssh_mount: String,
+    pub openbao_ssh_role: String,
+    pub openbao_jwt_path: PathBuf,
+    pub openbao_request_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -180,6 +207,7 @@ impl Config {
         let config = Self {
             database: DatabaseConfig {
                 url: required("DATABASE_URL")?,
+                max_connections: bounded_u32("DATABASE_MAX_CONNECTIONS", 1, 32)?,
             },
             oidc: OidcConfig {
                 public_url: required("PUBLIC_URL")?,
@@ -223,6 +251,24 @@ impl Config {
                     clusters: parse_kubernetes_clusters(&required("KUBERNETES_CLUSTERS")?)?,
                 },
                 ceph,
+                deploys: DeployIntegrationConfig {
+                    root: absolute_path("DEPLOY_ROOT")?,
+                    catalog: absolute_path("DEPLOY_CATALOG")?,
+                    uv_executable: absolute_path("DEPLOY_UV_EXECUTABLE")?,
+                    ssh_keygen_executable: absolute_path("DEPLOY_SSH_KEYGEN_EXECUTABLE")?,
+                    temp_root: absolute_path("DEPLOY_TEMP_ROOT")?,
+                    openbao_origin: secure_origin("OPENBAO_URL", &required("OPENBAO_URL")?)?,
+                    openbao_kubernetes_auth_mount: segment("OPENBAO_KUBERNETES_AUTH_MOUNT")?,
+                    openbao_kubernetes_role: segment("OPENBAO_KUBERNETES_ROLE")?,
+                    openbao_ssh_mount: segment("OPENBAO_SSH_MOUNT")?,
+                    openbao_ssh_role: segment("OPENBAO_SSH_ROLE")?,
+                    openbao_jwt_path: absolute_path("OPENBAO_JWT_PATH")?,
+                    openbao_request_timeout: Duration::from_millis(bounded_u64(
+                        "OPENBAO_REQUEST_TIMEOUT_MS",
+                        100,
+                        30_000,
+                    )?),
+                },
             },
         };
         config.validate()?;
@@ -323,6 +369,40 @@ fn seconds(name: &str) -> Result<Duration, String> {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .ok_or_else(|| format!("invalid {PREFIX}{name}"))
+}
+
+fn bounded_u32(name: &str, minimum: u32, maximum: u32) -> Result<u32, String> {
+    required(name)?
+        .parse::<u32>()
+        .ok()
+        .filter(|value| (minimum..=maximum).contains(value))
+        .ok_or_else(|| format!("invalid {PREFIX}{name}"))
+}
+
+fn bounded_u64(name: &str, minimum: u64, maximum: u64) -> Result<u64, String> {
+    required(name)?
+        .parse::<u64>()
+        .ok()
+        .filter(|value| (minimum..=maximum).contains(value))
+        .ok_or_else(|| format!("invalid {PREFIX}{name}"))
+}
+
+fn absolute_path(name: &str) -> Result<PathBuf, String> {
+    let value = required(name)?;
+    safe_absolute_path(&value)
+        .then(|| PathBuf::from(value))
+        .ok_or_else(|| format!("invalid {PREFIX}{name}"))
+}
+
+fn segment(name: &str) -> Result<String, String> {
+    let value = required(name)?;
+    (!value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')))
+    .then_some(value)
+    .ok_or_else(|| format!("invalid {PREFIX}{name}"))
 }
 
 fn boolean(name: &str) -> Result<bool, String> {
@@ -624,6 +704,7 @@ mod tests {
         let mut config = Config {
             database: DatabaseConfig {
                 url: "postgres://localhost/test".to_owned(),
+                max_connections: 10,
             },
             oidc: OidcConfig {
                 public_url: "https://mcp.example/".to_owned(),
@@ -675,6 +756,20 @@ mod tests {
                 ceph: CephIntegrationConfig {
                     clusters: Vec::new(),
                 },
+                deploys: DeployIntegrationConfig {
+                    root: "/inert/root".into(),
+                    catalog: "/inert/catalog.json".into(),
+                    uv_executable: "/inert/uv".into(),
+                    ssh_keygen_executable: "/inert/ssh-keygen".into(),
+                    temp_root: "/inert/tmp".into(),
+                    openbao_origin: Url::parse("https://openbao.example/").unwrap(),
+                    openbao_kubernetes_auth_mount: "kubernetes".into(),
+                    openbao_kubernetes_role: "homelab-mcp".into(),
+                    openbao_ssh_mount: "ssh-client-signer".into(),
+                    openbao_ssh_role: "homelab".into(),
+                    openbao_jwt_path: "/inert/jwt".into(),
+                    openbao_request_timeout: Duration::from_secs(2),
+                },
             },
         };
 
@@ -696,7 +791,7 @@ mod tests {
 
     #[test]
     fn required_oauth_scopes_are_exact_ordered_and_unique() {
-        let canonical = "mcp:use kubernetes:read kubernetes:write";
+        let canonical = "mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run";
         assert_eq!(
             parse_required_scopes(canonical).unwrap(),
             REQUIRED_OAUTH_SCOPES.map(str::to_owned)
@@ -713,6 +808,38 @@ mod tests {
                 "accepted {invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn deploy_configuration_values_are_strictly_bounded() {
+        assert!(safe_absolute_path("/srv/deploys"));
+        for invalid in ["relative", "/srv/../secret", ""] {
+            assert!(!safe_absolute_path(invalid), "accepted {invalid:?}");
+        }
+
+        for valid in ["kubernetes", "homelab_mcp", "ssh-client-signer"] {
+            let value = valid.to_owned();
+            assert!(
+                !value.is_empty()
+                    && value.len() <= 128
+                    && value
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric()
+                            || matches!(character, '-' | '_'))
+            );
+        }
+        for invalid in ["", "auth/mount", "role name", "role.secret"] {
+            assert!(
+                invalid.is_empty()
+                    || invalid.len() > 128
+                    || invalid
+                        .chars()
+                        .any(|character| !character.is_ascii_alphanumeric()
+                            && !matches!(character, '-' | '_'))
+            );
+        }
+        assert!(secure_origin("OPENBAO_URL", "https://openbao.example/").is_ok());
+        assert!(secure_origin("OPENBAO_URL", "http://openbao.example/").is_err());
     }
 
     #[test]

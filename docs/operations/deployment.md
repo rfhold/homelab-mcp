@@ -43,9 +43,11 @@ The deployed `/health` remains unconditional. `/ready` performs bounded live Pos
 
 ## Container Image
 
-`Dockerfile` follows the Kuri Rust 1.96 and Debian bookworm pattern. It builds the release binary and copies it into the minimal runtime image; Rust tests run directly through Cargo outside the image build.
+`Dockerfile` uses Rust 1.96 build stages and a Python 3.13 Debian bookworm runtime. It builds the release binary; Rust tests run directly through Cargo outside the image build.
 
-The generic `mcp` dependency embeds its PostgreSQL migrations. No application migration directory enters the image. The runtime installs only CA certificates and runs as UID/GID 65532.
+The generic `mcp` dependency embeds its PostgreSQL migrations. The application binary also embeds migrations from `migrations/`, including `homelab.machines`, through `sqlx::migrate!` in `src/database.rs`.
+
+The runtime contains Python 3.13, uv, the locked pyinfra environment, OpenSSH client tools, `kubectl`, CA certificates, the fixed deploy sources, and the Rust service binary. It runs as UID/GID 65532.
 
 The image includes OCI source and revision labels. It has no Docker `HEALTHCHECK`; Kubernetes owns health checks.
 
@@ -119,13 +121,35 @@ No new inbound service or OAuth route is required. Existing authenticated Ceph D
 
 Dedicated Dashboard account creation, a full preview Pulumi apply, authenticated live reads, and every individual representative live mutation remain separate gates. Production Ceph declarations remain disabled and unapplied.
 
+## Machine Deploy Access
+
+The worktree implements the machine inventory and deploy runtime. [Machine deploy documentation](../deploys/README.md) owns inventory, bootstrap, host trust, and execution contracts.
+
+`infra/pulumi/index.ts` declares OpenBao resources only when `openbaoEnabled` passes `validateOpenBaoStack`. Preview enables the SSH mount, Ed25519 user CA, user-certificate role, sign-only policy, and Kubernetes auth role. Production disables OpenBao resources and remains unapplied.
+
+The application ServiceAccount receives a projected 600-second JWT with the declared OpenBao audience. The OpenBao role binds that exact ServiceAccount and namespace. Its service token can update only the configured SSH signing route.
+
+The workload mounts the JWT read-only and uses a separate memory-backed deploy credential volume. The image includes a locked offline uv environment, pyinfra, OpenSSH client tools, and the fixed deploy sources.
+
+`HOMELAB_MCP_DEPLOY_*` and `HOMELAB_MCP_OPENBAO_*` values come from `DeployIntegrationConfig` and the `openbao*` Pulumi keys. [SSH trust and OpenBao identity](../deploys/ssh-trust-openbao.md#configuration-authority) lists the exact names and owners.
+
+The `deployMachineSshEgressCidrs` stack key controls machine SSH egress. Preview declares only `172.16.0.0/16`. Pulumi creates one NetworkPolicy rule per CIDR and limits each rule to TCP port 22. Production declares an empty list. An absent or empty key adds no machine SSH rule. These source declarations do not prove cluster enforcement, route reachability, SSH authentication, or a machine deploy.
+
+The platform OpenBao and Tekton configuration is live and canary-verified: `auth/kubernetes` uses in-cluster TokenReview, and the exact `pipelines-as-code/openbao-pulumi-admin-v1` ServiceAccount and matching role issue 30-minute-maximum batch tokens carrying only `openbao-pulumi-admin`. The shared `pipelines-as-code/openbao-kubernetes-login` StepAction is also live and converged from homelab commit `8b98da9`. This repository now declares its consumption, but that pipeline revision has not run.
+
+Only `deploy-preview` selects that ServiceAccount. The shared StepAction alone consumes its projected 600-second, audience-bound JWT and writes the validated batch token atomically to a mode-0400 file on a memory-backed same-pod volume. The normal apply step mounts only that session volume, reads the token into `VAULT_TOKEN` immediately before Pulumi, and unsets the variable and removes the file on exit. The explicit Vault provider does not create a child token. Local applies leave the CI token file absent and can continue to supply `VAULT_TOKEN` directly. Kubernetes deployment authentication remains the separately mounted `tekton-cluster-kubeconfig`. Pulumi, Authentik, and Grafana credentials remain separate. CI receives no administrator SSH credential and runs no pyinfra entrypoint. Operator-local bootstrap uses separately held administrator SSH access.
+
+The application-owned SSH mount, CA, role, sign policy, and runtime Kubernetes role remain declarations in this worktree. No repository pipeline run, preview apply of those resources, workload OpenBao login, certificate issue, SSH authentication, bootstrap, or machine deploy has occurred for this change.
+
+Before any apply, verify the exact `openbaoEndpointCidrs` against current routing. Vault provider `7.11.0` is the exact platform-tested version, but that does not prove this repository's first apply or application resource behavior.
+
 ## Preview Pipeline
 
 `.tekton/homelab-mcp-preview.yaml` targets `main` push and incoming events. It defines one preview path and no release path.
 
 The pipeline clones the requested revision and scans Cargo, container, Tekton, and Pulumi inputs for private key patterns. The amd64 and arm64 image builds then run in parallel.
 
-The final `general-ci:latest` step maps Grafana provider credentials and runs `pulumi up --stack preview --skip-preview`. It relies on the separately reviewed local preview and repository checks for pre-apply evidence.
+The final `general-ci:latest` step retains Pulumi, Authentik, Grafana, and kubeconfig inputs. Only that deploy task selects the platform OpenBao ServiceAccount; the preceding shared StepAction places its short-lived token on the memory-only session volume before the provider-backed `pulumi up --stack preview --skip-preview`. This source-declared flow has not yet run and does not add preview deployment evidence.
 
 The main preview workflow completed successfully for commit `798dd92` and applied the preview stack.
 
@@ -137,11 +161,11 @@ No release pipeline exists.
 
 The preview runtime targets stateless MCP Streamable HTTP revision `2026-07-28` at exact resource `/mcp`.
 
-It requires locally issued `mcp:use` tokens and configures DCR, CIMD, and native loopback clients through PostgreSQL-backed OAuth state.
+It requires locally issued tokens with `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. It configures DCR, CIMD, and native loopback clients through PostgreSQL-backed OAuth state.
 
 Generic Kuri owns strict OIDC login, callback, one-shot transaction state, ID-token verification, the mapper seam, and hosted continuation. Homelab supplies Authentik configuration and stable issuer-plus-subject mapping.
 
-The current runtime exposes ten read-only actions through `grafana_query`, two image actions through `grafana_render`, and only `silence.create` through separately advertised, operationally consequential `grafana_exec`. The existing `mcp:use` scope authorizes all three Grafana tools. Their canonical limits, results, and errors are defined by the [Grafana query](../grafana-query/README.md) and [render](../grafana-render/README.md) specifications. Preview commit `798dd92` exposes both `alert-rule.list` and `recording-rule.list`.
+The current runtime exposes ten read-only actions through `grafana_query`, two image actions through `grafana_render`, and only `silence.create` through separately advertised, operationally consequential `grafana_exec`. The complete eight-scope global set gates all three Grafana tools; no Grafana-specific scope is enforced per action. Their canonical limits, results, and errors are defined by the [Grafana query](../grafana-query/README.md) and [render](../grafana-render/README.md) specifications. Preview commit `798dd92` exposes both `alert-rule.list` and `recording-rule.list` under its explicitly historical authorization state.
 
 Silence creation performs no automatic retry. If it returns `mutation_outcome_unknown`, use `silence.list` to inspect current silences before deciding whether to retry because Grafana may already have applied the request. A silence suppresses matching notifications; it does not stop rule evaluation or delete alert data.
 
