@@ -778,7 +778,7 @@ describe("standalone resource topology", () => {
     assert.equal(ca.inputs.generateSigningKey, true);
     assert.equal(ca.inputs.privateKey, undefined);
     const sshRole = resource("vault:ssh/secretBackendRole:SecretBackendRole", "homelab-mcp-openbao-ssh-role");
-    assert.deepEqual({ keyType: sshRole.inputs.keyType, allowUserCertificates: sshRole.inputs.allowUserCertificates, allowHostCertificates: sshRole.inputs.allowHostCertificates, allowedUsers: sshRole.inputs.allowedUsers, defaultUser: sshRole.inputs.defaultUser, ttl: sshRole.inputs.ttl, maxTtl: sshRole.inputs.maxTtl }, { keyType: "ca", allowUserCertificates: true, allowHostCertificates: false, allowedUsers: "homelab", defaultUser: "homelab", ttl: "15m", maxTtl: "15m" });
+    assert.deepEqual({ keyType: sshRole.inputs.keyType, allowUserCertificates: sshRole.inputs.allowUserCertificates, allowHostCertificates: sshRole.inputs.allowHostCertificates, allowedUsers: sshRole.inputs.allowedUsers, defaultUser: sshRole.inputs.defaultUser, ttl: sshRole.inputs.ttl, maxTtl: sshRole.inputs.maxTtl, notBeforeDuration: sshRole.inputs.notBeforeDuration }, { keyType: "ca", allowUserCertificates: true, allowHostCertificates: false, allowedUsers: "homelab", defaultUser: "homelab", ttl: "15m", maxTtl: "15m", notBeforeDuration: "30s" });
     const policy = resource("vault:index/policy:Policy", "homelab-mcp-openbao");
     assert.equal(policy.inputs.policy, 'path "homelab-ssh-client/sign/homelab" {\n  capabilities = ["update"]\n}\n');
     const role = resource("vault:kubernetes/authBackendRole:AuthBackendRole", "homelab-mcp-openbao-kubernetes-role");

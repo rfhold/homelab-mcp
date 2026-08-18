@@ -207,6 +207,7 @@ if (openbaoEnabled) {
     defaultUser: "homelab",
     ttl: "15m",
     maxTtl: "15m",
+    notBeforeDuration: "30s",
   }, { dependsOn: [ca], provider });
   const policy = new vault.Policy("homelab-mcp-openbao", {
     name: openbaoKubernetesRole,

@@ -66,6 +66,8 @@ The Compose command validates fixture configuration only. It does not pull or ru
 
 Do not run `bootstrap-homelab` during routine validation. It mutates sudo and sshd configuration on one exact target. Follow [the operator procedure](docs/deploys/deploy-workflow.md#operator-bootstrap) only with target-specific authority.
 
+The agent-first bootstrap helper with advertised password fallback and the `ssh_homelab` helper are local operator interfaces. Do not run either during repository validation. Their tests mock agent, authentication, URL, and subprocess boundaries and do not establish live SSH-agent, hardware-key, OpenBao, OIDC, host trust, certificate, or SSH behavior.
+
 Do not treat a standalone `docker run` as a runtime smoke test. Startup requires PostgreSQL, an OAuth wrapping keyring, OIDC configuration, local OAuth settings, and Grafana credentials. See [the testing guide](docs/quality/testing.md) for current coverage.
 
 For documentation-only changes:
