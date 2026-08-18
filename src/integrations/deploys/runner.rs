@@ -39,6 +39,12 @@ enum FailureClassification {
     NonzeroExit,
     WaitFailed,
     InvalidData,
+    SshHostKeyVerification,
+    SshAuthentication,
+    ConnectionUnavailable,
+    ConnectionTimeout,
+    NameResolution,
+    RuntimeSetup,
     Other,
 }
 
@@ -52,6 +58,12 @@ impl FailureClassification {
             Self::NonzeroExit => "nonzero_exit",
             Self::WaitFailed => "wait_failed",
             Self::InvalidData => "invalid_data",
+            Self::SshHostKeyVerification => "ssh_host_key_verification",
+            Self::SshAuthentication => "ssh_authentication",
+            Self::ConnectionUnavailable => "connection_unavailable",
+            Self::ConnectionTimeout => "connection_timeout",
+            Self::NameResolution => "name_resolution",
+            Self::RuntimeSetup => "runtime_setup",
             Self::Other => "other",
         }
     }
@@ -114,6 +126,51 @@ fn classify_io(error: &std::io::Error) -> FailureClassification {
         std::io::ErrorKind::InvalidData => FailureClassification::InvalidData,
         _ => FailureClassification::Other,
     }
+}
+
+fn classify_uv_stderr(stderr: &[u8]) -> FailureClassification {
+    if contains_bytes(stderr, b"An exception occurred in:") {
+        FailureClassification::RuntimeSetup
+    } else if (contains_bytes(stderr, b"SSH host key error (Host key for ")
+        && contains_bytes(stderr, b" does not match.)"))
+        || contains_bytes(stderr, b" not found in known_hosts")
+        || (contains_bytes(stderr, b"Host key for server '")
+            && contains_bytes(stderr, b"' does not match: got '"))
+    {
+        FailureClassification::SshHostKeyVerification
+    } else if contains_bytes(stderr, b"Authentication failed.")
+        || contains_bytes(stderr, b"Authentication failed:")
+    {
+        FailureClassification::SshAuthentication
+    } else if contains_bytes(stderr, b"Could not resolve hostname (") {
+        FailureClassification::NameResolution
+    } else if contains_bytes(stderr, b"Could not connect (timed out)")
+        || contains_bytes(
+            stderr,
+            b"Key-exchange timed out waiting for key negotiation",
+        )
+    {
+        FailureClassification::ConnectionTimeout
+    } else if contains_bytes(stderr, b"Could not connect (Unable to connect to port ") {
+        FailureClassification::ConnectionUnavailable
+    } else {
+        FailureClassification::Other
+    }
+}
+
+fn emit_uv_exit_failure(
+    diagnostics: &DeployDiagnostics,
+    stderr: Option<&[u8]>,
+    exit_code: Option<i32>,
+) {
+    let classification = stderr
+        .map(classify_uv_stderr)
+        .unwrap_or(FailureClassification::WaitFailed);
+    diagnostics.failure("uv_exit", classification, exit_code);
+}
+
+fn contains_bytes(value: &[u8], pattern: &[u8]) -> bool {
+    value.windows(pattern.len()).any(|window| window == pattern)
 }
 
 #[derive(Clone, Debug)]
@@ -377,18 +434,19 @@ async fn run_uv(
         .take()
         .ok_or(DeployError::ExecutionOutcomeUnknown)?;
     let mut stdout_task = Some(tokio::spawn(drain(stdout, MAX_STDOUT_BYTES)));
-    let mut stderr_task = Some(tokio::spawn(drain(stderr, MAX_STDERR_BYTES)));
+    let mut stderr_task = Some(tokio::spawn(drain_sensitive(stderr, MAX_STDERR_BYTES)));
     let expires = Instant::now() + Duration::from_secs(deploy.timeout_seconds);
     let mut status: Option<std::process::ExitStatus> = None;
     let mut output: Option<Vec<u8>> = None;
-    let mut stderr_done = false;
+    let mut stderr_output: Option<Zeroizing<Vec<u8>>> = None;
     loop {
-        if let (Some(status), Some(output)) = (status.as_ref(), output.as_ref())
-            && stderr_done
+        if let (Some(status), Some(output), Some(stderr)) =
+            (status.as_ref(), output.as_ref(), stderr_output.as_ref())
         {
             return if status.success() {
                 Ok(output.clone())
             } else {
+                emit_uv_exit_failure(diagnostics, Some(stderr), status.code());
                 Err(DeployError::ExecutionOutcomeUnknown)
             };
         }
@@ -396,9 +454,9 @@ async fn run_uv(
             biased;
             _ = &mut *cancelled => { terminate_group(&mut child, stdout_task.take(), stderr_task.take()).await; return Err(DeployError::CancelledOutcomeUnknown); }
             _ = tokio::time::sleep_until(expires) => { terminate_group(&mut child, stdout_task.take(), stderr_task.take()).await; return Err(DeployError::TimeoutOutcomeUnknown); }
-            result = child.wait(), if status.is_none() => match result { Ok(value) => status = Some(value), Err(_) => { terminate_group(&mut child, stdout_task.take(), stderr_task.take()).await; return Err(DeployError::ExecutionOutcomeUnknown); } },
+            result = child.wait(), if status.is_none() => match result { Ok(value) => status = Some(value), Err(_) => { emit_uv_exit_failure(diagnostics, None, None); terminate_group(&mut child, stdout_task.take(), stderr_task.take()).await; return Err(DeployError::ExecutionOutcomeUnknown); } },
             result = async { stdout_task.as_mut().expect("guarded").await }, if stdout_task.is_some() => { stdout_task = None; match result { Ok(Ok(bytes)) => output = Some(bytes), _ => { terminate_group(&mut child, None, stderr_task.take()).await; return Err(DeployError::OutputTooLargeOutcomeUnknown); } } },
-            result = async { stderr_task.as_mut().expect("guarded").await }, if stderr_task.is_some() => { stderr_task = None; match result { Ok(Ok(_)) => stderr_done = true, _ => { terminate_group(&mut child, stdout_task.take(), None).await; return Err(DeployError::OutputTooLargeOutcomeUnknown); } } },
+            result = async { stderr_task.as_mut().expect("guarded").await }, if stderr_task.is_some() => { stderr_task = None; match result { Ok(Ok(bytes)) => stderr_output = Some(bytes), _ => { terminate_group(&mut child, stdout_task.take(), None).await; return Err(DeployError::OutputTooLargeOutcomeUnknown); } } },
         }
     }
 }
@@ -418,7 +476,7 @@ fn process_group(command: &mut Command) {
 async fn terminate_group(
     child: &mut Child,
     stdout: Option<JoinHandle<Result<Vec<u8>, ()>>>,
-    stderr: Option<JoinHandle<Result<Vec<u8>, ()>>>,
+    stderr: Option<JoinHandle<Result<Zeroizing<Vec<u8>>, ()>>>,
 ) {
     if let Some(pid) = child.id() {
         unsafe {
@@ -426,7 +484,11 @@ async fn terminate_group(
         }
     }
     let _ = child.wait().await;
-    for task in [stdout, stderr].into_iter().flatten() {
+    if let Some(task) = stdout {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = stderr {
         task.abort();
         let _ = task.await;
     }
@@ -444,6 +506,25 @@ async fn drain(mut stream: impl AsyncRead + Unpin, limit: usize) -> Result<Vec<u
             return Err(());
         }
         output.extend_from_slice(&buffer[..read]);
+    }
+}
+
+async fn drain_sensitive(
+    mut stream: impl AsyncRead + Unpin,
+    limit: usize,
+) -> Result<Zeroizing<Vec<u8>>, ()> {
+    let mut output = Zeroizing::new(Vec::with_capacity(limit));
+    let mut buffer = Zeroizing::new([0; 8192]);
+    loop {
+        let read = stream.read(&mut *buffer).await.map_err(|_| ())?;
+        if read == 0 {
+            return Ok(output);
+        }
+        if read > limit.saturating_sub(output.len()) {
+            return Err(());
+        }
+        output.extend_from_slice(&buffer[..read]);
+        buffer[..read].fill(0);
     }
 }
 
@@ -683,11 +764,20 @@ mod tests {
         machine: Machine,
         config: Arc<DeployRunnerConfig>,
     ) -> (Result<DeployResult, DeployError>, Vec<CapturedEvent>) {
+        let (_cancel, cancelled) = oneshot::channel();
+        captured_worker_with_cancellation(runner, machine, config, cancelled).await
+    }
+
+    async fn captured_worker_with_cancellation(
+        runner: &DeployRunner<Signer>,
+        machine: Machine,
+        config: Arc<DeployRunnerConfig>,
+        cancelled: oneshot::Receiver<()>,
+    ) -> (Result<DeployResult, DeployError>, Vec<CapturedEvent>) {
         let machine_id = machine.id;
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(EventCapture(events.clone()));
         let _subscriber = tracing::subscriber::set_default(subscriber);
-        let (_cancel, cancelled) = oneshot::channel();
         let result = worker(
             runner.catalog.resolve("system-info").unwrap(),
             machine,
@@ -937,6 +1027,206 @@ print({output:?})
                 PIN,
             ],
         );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uv_nonzero_exit_emits_each_allowlisted_safe_classification() {
+        for (stderr, classification) in [
+            (
+                "SSH host key error (Host key for SENTINEL_HOST does not match.)",
+                "ssh_host_key_verification",
+            ),
+            (
+                "Host key for server 'SENTINEL_HOST' does not match: got 'SENTINEL_KEY', expected 'x'",
+                "ssh_host_key_verification",
+            ),
+            (
+                "Authentication failed. SENTINEL_TOKEN",
+                "ssh_authentication",
+            ),
+            (
+                "Could not connect (Unable to connect to port 22 on SENTINEL_HOST)",
+                "connection_unavailable",
+            ),
+            (
+                "Key-exchange timed out waiting for key negotiation SENTINEL_HOST",
+                "connection_timeout",
+            ),
+            (
+                "Could not resolve hostname (SENTINEL_HOST)",
+                "name_resolution",
+            ),
+            (
+                "An exception occurred in: SENTINEL_PRIVATE_PATH",
+                "runtime_setup",
+            ),
+        ] {
+            let script = format!("#!/bin/sh\nprintf '%s' {stderr:?} >&2\nexit 23\n");
+            let (runner, base) = setup(&script, 2);
+            let machine = machine("SENTINEL_HOST", 22, Some(PIN));
+            let machine_id = machine.id;
+            let (result, events) = captured_worker(&runner, machine, runner.config.clone()).await;
+
+            assert_eq!(result.unwrap_err(), DeployError::ExecutionOutcomeUnknown);
+            assert_eq!(events.len(), 1);
+            assert_failure_event(&events[0], machine_id, "uv_exit", classification, Some(23));
+            assert_event_excludes(
+                &events[0],
+                &[
+                    "SENTINEL_HOST",
+                    "SENTINEL_KEY",
+                    "SENTINEL_TOKEN",
+                    "SENTINEL_PRIVATE_PATH",
+                ],
+            );
+            fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[test]
+    fn uv_runtime_setup_marker_takes_precedence_over_nested_failure_text() {
+        assert_eq!(
+            classify_uv_stderr(
+                b"An exception occurred in: SENTINEL_PATH Authentication failed. Could not connect (timed out)"
+            )
+            .as_str(),
+            "runtime_setup"
+        );
+    }
+
+    #[tokio::test]
+    async fn sensitive_drain_preallocates_the_complete_bound() {
+        let bytes = b"SENTINEL_SENSITIVE_STDERR".to_vec();
+        let output = drain_sensitive(std::io::Cursor::new(bytes.clone()), 1024)
+            .await
+            .unwrap();
+
+        assert_eq!(output.as_slice(), bytes);
+        assert_eq!(output.capacity(), 1024);
+    }
+
+    #[test]
+    fn uv_wait_failure_emits_exact_safe_event_without_exit_code() {
+        let machine_id = Uuid::new_v4();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture(events.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            emit_uv_exit_failure(
+                &DeployDiagnostics::new("system-info", machine_id),
+                None,
+                None,
+            );
+        });
+        let events = Arc::try_unwrap(events).unwrap().into_inner().unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_failure_event(&events[0], machine_id, "uv_exit", "wait_failed", None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uv_unknown_invalid_unicode_stderr_is_other_and_remains_secret() {
+        let (runner, base) = setup(
+            "#!/bin/sh\nprintf '\\377SENTINEL_CHILD_OUTPUT' >&2\nexit 24\n",
+            2,
+        );
+        let machine = machine("SENTINEL_HOST", 22, Some(PIN));
+        let machine_id = machine.id;
+        let (result, events) = captured_worker(&runner, machine, runner.config.clone()).await;
+
+        assert_eq!(result.unwrap_err(), DeployError::ExecutionOutcomeUnknown);
+        assert_eq!(events.len(), 1);
+        assert_failure_event(&events[0], machine_id, "uv_exit", "other", Some(24));
+        assert_event_excludes(&events[0], &["SENTINEL_HOST", "SENTINEL_CHILD_OUTPUT"]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uv_signal_exit_emits_other_without_exit_code() {
+        let (runner, base) = setup(
+            "#!/bin/sh\nprintf SENTINEL_CHILD_OUTPUT >&2\nkill -TERM $$\n",
+            2,
+        );
+        let machine = machine("SENTINEL_HOST", 22, Some(PIN));
+        let machine_id = machine.id;
+        let (result, events) = captured_worker(&runner, machine, runner.config.clone()).await;
+
+        assert_eq!(result.unwrap_err(), DeployError::ExecutionOutcomeUnknown);
+        assert_eq!(events.len(), 1);
+        assert_failure_event(&events[0], machine_id, "uv_exit", "other", None);
+        assert_event_excludes(&events[0], &["SENTINEL_HOST", "SENTINEL_CHILD_OUTPUT"]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_uv_emits_no_diagnostic_event() {
+        let script = format!(
+            "#!/bin/sh\nprintf SENTINEL_SUCCESS_STDERR >&2\nprintf '%b' {output:?}\n",
+            output = output(),
+        );
+        let (runner, base) = setup(&script, 2);
+        let machine = machine("SENTINEL_HOST", 22, Some(PIN));
+        let (result, events) = captured_worker(&runner, machine, runner.config.clone()).await;
+
+        assert!(result.is_ok());
+        assert!(events.is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uv_cancellation_emits_no_exit_event() {
+        let (runner, base) = setup("#!/bin/sh\nsleep 30\n", 5);
+        let (cancel, cancelled) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = cancel.send(());
+        });
+        let (result, events) = captured_worker_with_cancellation(
+            &runner,
+            machine("SENTINEL_HOST", 22, Some(PIN)),
+            runner.config.clone(),
+            cancelled,
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), DeployError::CancelledOutcomeUnknown);
+        assert!(events.is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uv_timeout_emits_no_exit_event() {
+        let (runner, base) = setup("#!/bin/sh\nsleep 30\n", 1);
+        let (result, events) = captured_worker(
+            &runner,
+            machine("SENTINEL_HOST", 22, Some(PIN)),
+            runner.config.clone(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), DeployError::TimeoutOutcomeUnknown);
+        assert!(events.is_empty());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uv_stderr_overflow_emits_no_exit_event() {
+        let (runner, base) = setup(
+            "#!/bin/sh\nwhile :; do printf SENTINEL_CHILD_OUTPUT >&2; done\n",
+            5,
+        );
+        let (result, events) = captured_worker(
+            &runner,
+            machine("SENTINEL_HOST", 22, Some(PIN)),
+            runner.config.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            DeployError::OutputTooLargeOutcomeUnknown
+        );
+        assert!(events.is_empty());
         fs::remove_dir_all(base).unwrap();
     }
 

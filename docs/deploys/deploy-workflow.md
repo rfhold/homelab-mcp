@@ -90,6 +90,10 @@ The event contract below covers only the listed instrumented pre-execution setup
 
 Stage values are `run_dir_create`, `keygen_spawn`, `keygen_exit`, `keygen_timeout`, `key_chmod`, `key_file_read`, `certificate_write`, `known_hosts_write`, `inventory_serialize`, and `uv_spawn`. Classification values are `not_found`, `permission_denied`, `already_exists`, `timeout`, `nonzero_exit`, `wait_failed`, `invalid_data`, and `other`.
 
+After uv starts, a normal nonzero child exit emits the same safe event with stage `uv_exit`. Its classification uses only fixed patterns from pinned pyinfra 3.5 and Paramiko 3.5.1 sources. Values are `ssh_host_key_verification`, `ssh_authentication`, `connection_unavailable`, `connection_timeout`, `name_resolution`, `runtime_setup`, and `other`. Paramiko combines refused and unreachable endpoints under one connection message, so diagnostics do not infer a narrower cause. Pinned uv 0.11.15 contributes no category because its packaged executable provides no reviewed static signature for these failures. Unmatched uv errors use `other`. A child wait failure uses `uv_exit` and `wait_failed` without an exit code.
+
+The runtime retains stderr only in a fixed-capacity buffer preallocated to the existing 32 KiB limit. The buffer never reallocates within that bound. It zeroizes the allocation and read buffer after use. Diagnostics never log, return, serialize, hash, or include raw child output or a substring from it.
+
 These events never contain raw errors, paths, target hosts, usernames, inventory JSON, command arguments, or child output. They also exclude keys, certificates, tokens, and environment values. Public MCP error codes and messages remain unchanged.
 
 ## Local Checks
