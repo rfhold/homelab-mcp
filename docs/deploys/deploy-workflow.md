@@ -86,6 +86,12 @@ uv run --locked pyinfra --yes <catalog-inventory> <catalog-entrypoint>
 
 Only one deploy can run at a time. Cancellation, timeout, process failure, or excess output can produce an unknown outcome. Inspect the target through a separately authorized read before retry.
 
+The event contract below covers only the listed instrumented pre-execution setup paths. Each such failure emits one internal warning event under `homelab_mcp::integrations::deploys::runner`. Host-pin validation and OpenBao credential failures do not emit these diagnostic events. The event contains `deploy.correlation_id`, `deploy.id`, `machine.id`, `deploy.stage`, and `error.classification`. A nonzero child exit can also add the integer `process.exit_code` field. The correlation ID uses independent random data. It connects failures from one run.
+
+Stage values are `run_dir_create`, `keygen_spawn`, `keygen_exit`, `keygen_timeout`, `key_chmod`, `key_file_read`, `certificate_write`, `known_hosts_write`, `inventory_serialize`, and `uv_spawn`. Classification values are `not_found`, `permission_denied`, `already_exists`, `timeout`, `nonzero_exit`, `wait_failed`, `invalid_data`, and `other`.
+
+These events never contain raw errors, paths, target hosts, usernames, inventory JSON, command arguments, or child output. They also exclude keys, certificates, tokens, and environment values. Public MCP error codes and messages remain unchanged.
+
 ## Local Checks
 
 These commands validate the locked Python project and deploy contracts without contacting a machine:

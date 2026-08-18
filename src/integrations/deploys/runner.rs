@@ -30,6 +30,92 @@ use super::{
 const MAX_STDOUT_BYTES: usize = 512 * 1024;
 const MAX_STDERR_BYTES: usize = 32 * 1024;
 
+#[derive(Clone, Copy)]
+enum FailureClassification {
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    Timeout,
+    NonzeroExit,
+    WaitFailed,
+    InvalidData,
+    Other,
+}
+
+impl FailureClassification {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::AlreadyExists => "already_exists",
+            Self::Timeout => "timeout",
+            Self::NonzeroExit => "nonzero_exit",
+            Self::WaitFailed => "wait_failed",
+            Self::InvalidData => "invalid_data",
+            Self::Other => "other",
+        }
+    }
+}
+
+struct DeployDiagnostics {
+    correlation_id: uuid::Uuid,
+    deploy_id: String,
+    machine_id: uuid::Uuid,
+}
+
+impl DeployDiagnostics {
+    fn new(deploy_id: &str, machine_id: uuid::Uuid) -> Self {
+        Self {
+            correlation_id: uuid::Uuid::new_v4(),
+            deploy_id: deploy_id.to_owned(),
+            machine_id,
+        }
+    }
+
+    fn failure(
+        &self,
+        stage: &'static str,
+        classification: FailureClassification,
+        exit_code: Option<i32>,
+    ) {
+        let correlation_id = self.correlation_id;
+        let deploy_id = self.deploy_id.as_str();
+        let machine_id = self.machine_id;
+        let classification = classification.as_str();
+        if let Some(exit_code) = exit_code {
+            tracing::warn!(
+                deploy.correlation_id = %correlation_id,
+                deploy.id = deploy_id,
+                machine.id = %machine_id,
+                deploy.stage = stage,
+                error.classification = classification,
+                process.exit_code = exit_code,
+                "deploy stage failed"
+            );
+        } else {
+            tracing::warn!(
+                deploy.correlation_id = %correlation_id,
+                deploy.id = deploy_id,
+                machine.id = %machine_id,
+                deploy.stage = stage,
+                error.classification = classification,
+                "deploy stage failed"
+            );
+        }
+    }
+}
+
+fn classify_io(error: &std::io::Error) -> FailureClassification {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => FailureClassification::NotFound,
+        std::io::ErrorKind::PermissionDenied => FailureClassification::PermissionDenied,
+        std::io::ErrorKind::AlreadyExists => FailureClassification::AlreadyExists,
+        std::io::ErrorKind::TimedOut => FailureClassification::Timeout,
+        std::io::ErrorKind::InvalidData => FailureClassification::InvalidData,
+        _ => FailureClassification::Other,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DeployRunnerConfig {
     pub uv_executable: PathBuf,
@@ -94,6 +180,7 @@ impl<S: OpenBaoSigner> DeployRunner<S> {
         machine: Machine,
         mut cancellation: Pin<&mut (dyn Future<Output = ()> + Send)>,
     ) -> Result<DeployResult, DeployError> {
+        let diagnostics = DeployDiagnostics::new(deploy_id, machine.id);
         let permit = self
             .permit
             .clone()
@@ -109,7 +196,8 @@ impl<S: OpenBaoSigner> DeployRunner<S> {
         let config = self.config.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let _ = result_tx.send(worker(deploy, machine, signer, config, cancel_rx).await);
+            let _ = result_tx
+                .send(worker(deploy, machine, signer, config, cancel_rx, diagnostics).await);
         });
         tokio::select! {
             biased;
@@ -128,6 +216,7 @@ async fn worker<S: OpenBaoSigner>(
     signer: Arc<S>,
     config: Arc<DeployRunnerConfig>,
     mut cancelled: oneshot::Receiver<()>,
+    diagnostics: DeployDiagnostics,
 ) -> Result<DeployResult, DeployError> {
     cancelled_now(&mut cancelled)?;
     let pin = machine
@@ -135,12 +224,18 @@ async fn worker<S: OpenBaoSigner>(
         .as_deref()
         .ok_or(DeployError::MissingHostPin)?;
     validate_host_pin(pin)?;
-    let run_dir = create_run_dir(&config.temp_root)?;
+    let run_dir = create_run_dir(&config.temp_root, &diagnostics)?;
     let _cleanup = Cleanup(run_dir.clone());
     let key = run_dir.join("identity");
     let known_hosts = run_dir.join("known_hosts");
-    run_keygen(&config.ssh_keygen_executable, &key, &mut cancelled).await?;
-    let public_key = read_bounded(&key.with_extension("pub"), 1024)?;
+    run_keygen(
+        &config.ssh_keygen_executable,
+        &key,
+        &mut cancelled,
+        &diagnostics,
+    )
+    .await?;
+    let public_key = read_bounded(&key.with_extension("pub"), 1024, &diagnostics)?;
     cancelled_now(&mut cancelled)?;
     let certificate = Zeroizing::new(tokio::select! {
         result = signer.sign(public_key.trim_end()) => result?,
@@ -150,6 +245,8 @@ async fn worker<S: OpenBaoSigner>(
         &key.with_file_name("identity-cert.pub"),
         certificate.as_bytes(),
         0o600,
+        "certificate_write",
+        &diagnostics,
     )?;
     write_private(
         &known_hosts,
@@ -160,15 +257,25 @@ async fn worker<S: OpenBaoSigner>(
         )
         .as_bytes(),
         0o600,
+        "known_hosts_write",
+        &diagnostics,
     )?;
     let inventory = serde_json::to_string(&json!({"version":1,"host":{"address":machine.ssh_host,"user":machine.ssh_username,"port":machine.ssh_port,"ssh_key":key,"known_hosts":known_hosts}}))
-        .map_err(|_| DeployError::ExecutionRejected)?;
+        .map_err(|_| {
+            diagnostics.failure(
+                "inventory_serialize",
+                FailureClassification::InvalidData,
+                None,
+            );
+            DeployError::ExecutionRejected
+        })?;
     let output = run_uv(
         &config.uv_executable,
         &config.temp_root,
         &deploy,
         &inventory,
         &mut cancelled,
+        &diagnostics,
     )
     .await?;
     normalize::system_info(&output)
@@ -178,6 +285,7 @@ async fn run_keygen(
     executable: &Path,
     key: &Path,
     cancelled: &mut oneshot::Receiver<()>,
+    diagnostics: &DeployDiagnostics,
 ) -> Result<(), DeployError> {
     let mut command = Command::new(executable);
     command
@@ -189,18 +297,37 @@ async fn run_keygen(
         .stderr(Stdio::null())
         .kill_on_drop(true);
     process_group(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|_| DeployError::ExecutionRejected)?;
+    let mut child = command.spawn().map_err(|error| {
+        diagnostics.failure("keygen_spawn", classify_io(&error), None);
+        DeployError::ExecutionRejected
+    })?;
     let result = tokio::select! {
-        result = child.wait() => match result { Ok(status) if status.success() => Ok(()), _ => Err(DeployError::ExecutionRejected) },
+        result = child.wait() => match result {
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => {
+                diagnostics.failure("keygen_exit", FailureClassification::NonzeroExit, status.code());
+                Err(DeployError::ExecutionRejected)
+            }
+            Err(_) => {
+                diagnostics.failure("keygen_exit", FailureClassification::WaitFailed, None);
+                Err(DeployError::ExecutionRejected)
+            }
+        },
         _ = &mut *cancelled => { terminate_group(&mut child, None, None).await; Err(DeployError::Cancelled) },
-        _ = tokio::time::sleep(Duration::from_secs(10)) => { terminate_group(&mut child, None, None).await; Err(DeployError::ExecutionRejected) }
+        _ = tokio::time::sleep(Duration::from_secs(10)) => {
+            terminate_group(&mut child, None, None).await;
+            diagnostics.failure("keygen_timeout", FailureClassification::Timeout, None);
+            Err(DeployError::ExecutionRejected)
+        }
     };
     result?;
     for path in [key.to_path_buf(), key.with_extension("pub")] {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| DeployError::ExecutionRejected)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| {
+                diagnostics.failure("key_chmod", classify_io(&error), None);
+                DeployError::ExecutionRejected
+            },
+        )?;
     }
     Ok(())
 }
@@ -211,6 +338,7 @@ async fn run_uv(
     deploy: &ResolvedDeploy,
     inventory: &str,
     cancelled: &mut oneshot::Receiver<()>,
+    diagnostics: &DeployDiagnostics,
 ) -> Result<Vec<u8>, DeployError> {
     let project_environment = deploy.root.join(".venv");
     let path = format!(
@@ -236,9 +364,10 @@ async fn run_uv(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     process_group(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|_| DeployError::ExecutionRejected)?;
+    let mut child = command.spawn().map_err(|error| {
+        diagnostics.failure("uv_spawn", classify_io(&error), None);
+        DeployError::ExecutionRejected
+    })?;
     let stdout = child
         .stdout
         .take()
@@ -318,10 +447,13 @@ async fn drain(mut stream: impl AsyncRead + Unpin, limit: usize) -> Result<Vec<u
     }
 }
 
-fn create_run_dir(root: &Path) -> Result<PathBuf, DeployError> {
+fn create_run_dir(root: &Path, diagnostics: &DeployDiagnostics) -> Result<PathBuf, DeployError> {
     for _ in 0..8 {
         let mut random = [0_u8; 16];
-        getrandom::fill(&mut random).map_err(|_| DeployError::ExecutionRejected)?;
+        getrandom::fill(&mut random).map_err(|_| {
+            diagnostics.failure("run_dir_create", FailureClassification::Other, None);
+            DeployError::ExecutionRejected
+        })?;
         let name = random
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -332,30 +464,56 @@ fn create_run_dir(root: &Path) -> Result<PathBuf, DeployError> {
                 return Ok(path);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(DeployError::ExecutionRejected),
+            Err(error) => {
+                diagnostics.failure("run_dir_create", classify_io(&error), None);
+                return Err(DeployError::ExecutionRejected);
+            }
         }
     }
+    diagnostics.failure("run_dir_create", FailureClassification::AlreadyExists, None);
     Err(DeployError::ExecutionRejected)
 }
 
-fn write_private(path: &Path, bytes: &[u8], mode: u32) -> Result<(), DeployError> {
+fn write_private(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+    stage: &'static str,
+    diagnostics: &DeployDiagnostics,
+) -> Result<(), DeployError> {
     use std::io::Write as _;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(mode)
         .open(path)
-        .map_err(|_| DeployError::ExecutionRejected)?;
-    file.write_all(bytes)
-        .map_err(|_| DeployError::ExecutionRejected)
+        .map_err(|error| {
+            diagnostics.failure(stage, classify_io(&error), None);
+            DeployError::ExecutionRejected
+        })?;
+    file.write_all(bytes).map_err(|error| {
+        diagnostics.failure(stage, classify_io(&error), None);
+        DeployError::ExecutionRejected
+    })
 }
 
-fn read_bounded(path: &Path, limit: u64) -> Result<String, DeployError> {
-    let metadata = std::fs::metadata(path).map_err(|_| DeployError::ExecutionRejected)?;
+fn read_bounded(
+    path: &Path,
+    limit: u64,
+    diagnostics: &DeployDiagnostics,
+) -> Result<String, DeployError> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        diagnostics.failure("key_file_read", classify_io(&error), None);
+        DeployError::ExecutionRejected
+    })?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > limit {
+        diagnostics.failure("key_file_read", FailureClassification::InvalidData, None);
         return Err(DeployError::CredentialInvalid);
     }
-    std::fs::read_to_string(path).map_err(|_| DeployError::CredentialInvalid)
+    std::fs::read_to_string(path).map_err(|error| {
+        diagnostics.failure("key_file_read", classify_io(&error), None);
+        DeployError::CredentialInvalid
+    })
 }
 
 fn known_hosts_host(host: &str, port: u16) -> String {
@@ -407,10 +565,16 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use std::{
-        fs,
+        collections::BTreeMap,
+        fmt, fs,
         os::unix::fs::PermissionsExt,
-        sync::atomic::{AtomicU64, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
     };
+    use tracing::{Event, Subscriber, field::Visit};
+    use tracing_subscriber::{Layer, layer::Context, layer::SubscriberExt as _};
     use uuid::Uuid;
 
     const PIN: &str =
@@ -514,6 +678,94 @@ mod tests {
         }
     }
 
+    async fn captured_worker(
+        runner: &DeployRunner<Signer>,
+        machine: Machine,
+        config: Arc<DeployRunnerConfig>,
+    ) -> (Result<DeployResult, DeployError>, Vec<CapturedEvent>) {
+        let machine_id = machine.id;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventCapture(events.clone()));
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let (_cancel, cancelled) = oneshot::channel();
+        let result = worker(
+            runner.catalog.resolve("system-info").unwrap(),
+            machine,
+            runner.signer.clone(),
+            config,
+            cancelled,
+            DeployDiagnostics::new("system-info", machine_id),
+        )
+        .await;
+        drop(_subscriber);
+        let events = Arc::try_unwrap(events).unwrap().into_inner().unwrap();
+        (result, events)
+    }
+
+    fn assert_failure_event(
+        event: &CapturedEvent,
+        machine_id: Uuid,
+        stage: &str,
+        classification: &str,
+        exit_code: Option<i64>,
+    ) {
+        assert_eq!(event.level, tracing::Level::WARN);
+        assert_eq!(event.target, "homelab_mcp::integrations::deploys::runner");
+        assert_eq!(event.fields["message"], "deploy stage failed");
+        assert_eq!(event.fields["deploy.id"], "system-info");
+        assert_eq!(event.fields["machine.id"], machine_id.to_string());
+        assert_eq!(event.fields["deploy.stage"], stage);
+        assert_eq!(event.fields["error.classification"], classification);
+        let correlation_id = Uuid::parse_str(
+            event.fields["deploy.correlation_id"]
+                .as_str()
+                .expect("correlation ID must be a string"),
+        )
+        .unwrap();
+        assert_eq!(correlation_id.get_version_num(), 4);
+        assert_eq!(
+            event
+                .fields
+                .get("process.exit_code")
+                .and_then(serde_json::Value::as_i64),
+            exit_code,
+        );
+        assert_eq!(event.fields.len(), if exit_code.is_some() { 7 } else { 6 });
+    }
+
+    fn assert_event_excludes(event: &CapturedEvent, sentinels: &[&str]) {
+        let captured = event
+            .fields
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .chain(std::iter::once(event.target.clone()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for sentinel in sentinels {
+            assert!(!captured.contains(sentinel), "event exposed sentinel data");
+        }
+        for forbidden in [
+            "error",
+            "path",
+            "host",
+            "username",
+            "inventory",
+            "key",
+            "certificate",
+            "token",
+            "environment",
+            "command",
+            "stdout",
+            "stderr",
+            "output",
+        ] {
+            assert!(
+                !event.fields.contains_key(forbidden),
+                "event exposed forbidden field {forbidden}"
+            );
+        }
+    }
+
     #[test]
     fn known_hosts_formats_default_nondefault_and_ipv6() {
         assert_eq!(known_hosts_host("host.example", 22), "host.example");
@@ -607,6 +859,87 @@ print({output:?})
         fs::remove_dir_all(base).unwrap();
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn keygen_permission_failure_emits_safe_classified_event() {
+        let (runner, base) = setup("#!/bin/sh\nexit 0\n", 2);
+        fs::set_permissions(
+            &runner.config.ssh_keygen_executable,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let machine = machine("SENTINEL_HOST", 22, Some(PIN));
+        let machine_id = machine.id;
+        let (result, events) = captured_worker(&runner, machine, runner.config.clone()).await;
+
+        let error = result.unwrap_err();
+        assert_eq!(error, DeployError::ExecutionRejected);
+        assert_eq!(error.code(), "execution_rejected");
+        assert_eq!(events.len(), 1);
+        assert_failure_event(
+            &events[0],
+            machine_id,
+            "keygen_spawn",
+            "permission_denied",
+            None,
+        );
+        assert_event_excludes(&events[0], &["SENTINEL_HOST"]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn keygen_nonzero_exit_emits_code_without_child_output() {
+        let (runner, base) = setup("#!/bin/sh\nexit 0\n", 2);
+        executable(
+            &runner.config.ssh_keygen_executable,
+            "#!/bin/sh\nprintf SENTINEL_CHILD_OUTPUT >&2\nexit 7\n",
+        );
+        let machine = machine("SENTINEL_HOST", 22, Some(PIN));
+        let machine_id = machine.id;
+        let (result, events) = captured_worker(&runner, machine, runner.config.clone()).await;
+
+        assert_eq!(result.unwrap_err(), DeployError::ExecutionRejected);
+        assert_eq!(events.len(), 1);
+        assert_failure_event(
+            &events[0],
+            machine_id,
+            "keygen_exit",
+            "nonzero_exit",
+            Some(7),
+        );
+        assert_event_excludes(&events[0], &["SENTINEL_HOST", "SENTINEL_CHILD_OUTPUT"]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uv_not_found_emits_safe_event_and_preserves_public_error() {
+        let (runner, base) = setup("#!/bin/sh\nexit 0\n", 2);
+        let missing_uv = base.join("SENTINEL_PRIVATE_PATH");
+        let config = Arc::new(DeployRunnerConfig {
+            uv_executable: missing_uv,
+            ..runner.config.as_ref().clone()
+        });
+        let mut machine = machine("SENTINEL_HOST", 22, Some(PIN));
+        machine.ssh_username = "SENTINEL_TOKEN_USERNAME".into();
+        let machine_id = machine.id;
+        let (result, events) = captured_worker(&runner, machine, config).await;
+
+        assert_eq!(result.unwrap_err(), DeployError::ExecutionRejected);
+        assert_eq!(events.len(), 1);
+        assert_failure_event(&events[0], machine_id, "uv_spawn", "not_found", None);
+        assert_event_excludes(
+            &events[0],
+            &[
+                "SENTINEL_PRIVATE_PATH",
+                "SENTINEL_HOST",
+                "SENTINEL_TOKEN_USERNAME",
+                "AAAATEST",
+                "AAACERT",
+                PIN,
+            ],
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
     #[tokio::test]
     async fn timeout_kills_process_group_and_cleans_files() {
         let pid_file = temporary().join("pid");
@@ -694,5 +1027,52 @@ print({output:?})
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("process {pid} was not killed")
+    }
+
+    #[derive(Debug)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        target: String,
+        fields: BTreeMap<String, serde_json::Value>,
+    }
+
+    struct EventCapture(Arc<Mutex<Vec<CapturedEvent>>>);
+
+    impl<S> Layer<S> for EventCapture
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(CapturedEvent {
+                level: *event.metadata().level(),
+                target: event.metadata().target().to_owned(),
+                fields: fields.0,
+            });
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturedFields(BTreeMap<String, serde_json::Value>);
+
+    impl Visit for CapturedFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            self.0.insert(
+                field.name().to_owned(),
+                serde_json::Value::String(format!("{value:?}").trim_matches('"').to_owned()),
+            );
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(
+                field.name().to_owned(),
+                serde_json::Value::String(value.to_owned()),
+            );
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.0.insert(field.name().to_owned(), value.into());
+        }
     }
 }
