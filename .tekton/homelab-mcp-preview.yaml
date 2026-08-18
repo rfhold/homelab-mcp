@@ -268,6 +268,16 @@ spec:
                   set -eu
                   version="`/usr/local/bin/kubectl version --client --output=json`"
                   printf '%s' "$version" | tr -d '[:space:]' | grep -Fq '"gitVersion":"v1.33.5"'
+                  test "`getent passwd 65532`" = 'homelab-mcp:x:65532:65532::/data:/usr/sbin/nologin'
+                  test "`getent group 65532`" = 'homelab-mcp:x:65532:'
+                  if ssh_keygen_output="`/usr/bin/ssh-keygen -? 2>&1`"; then
+                    echo "ssh-keygen interface probe unexpectedly succeeded" >&2
+                    exit 1
+                  fi
+                  printf '%s' "$ssh_keygen_output" | grep -Fq 'usage: ssh-keygen'
+                  if printf '%s' "$ssh_keygen_output" | grep -Fq 'No user exists'; then
+                    exit 1
+                  fi
         params:
           - name: image
             value: $(tasks.resolve-and-verify-image.results.image)

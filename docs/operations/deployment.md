@@ -35,7 +35,7 @@ The current Pulumi declarations would create:
 - an egress NetworkPolicy and ClusterIP Service; and
 - an HTTPRoute to `ingress/default-gateway` with request timeout `0s`.
 
-The Deployment runs as UID and GID 65532. It disables service-account token mounts, privilege escalation, root filesystems, and Linux capabilities.
+The Deployment runs as UID and GID 65532. The image provides matching `homelab-mcp` passwd and group records, with home `/data` and non-login shell `/usr/sbin/nologin`. OpenSSH requires a named NSS user for the effective UID before `ssh-keygen` can process deploy keys. The Deployment disables service-account token mounts, privilege escalation, root filesystems, and Linux capabilities.
 
 The Deployment declares startup, readiness, and liveness probes, explicit resource limits, a bounded temporary volume, and Stakater Reloader annotations.
 
@@ -47,7 +47,7 @@ The deployed `/health` remains unconditional. `/ready` performs bounded live Pos
 
 The generic `mcp` dependency embeds its PostgreSQL migrations. The application binary also embeds migrations from `migrations/`, including `homelab.machines`, through `sqlx::migrate!` in `src/database.rs`.
 
-The runtime contains Python 3.13, uv, the locked pyinfra environment, OpenSSH client tools, `kubectl`, CA certificates, the fixed deploy sources, and the Rust service binary. It runs as UID/GID 65532.
+The runtime contains Python 3.13, uv, the locked pyinfra environment, OpenSSH client tools, `kubectl`, CA certificates, the fixed deploy sources, and the Rust service binary. It runs as UID/GID 65532 under the named `homelab-mcp` NSS identity while retaining numeric `USER 65532:65532` and ownership of `/data`.
 
 The image includes OCI source and revision labels. It has no Docker `HEALTHCHECK`; Kubernetes owns health checks.
 

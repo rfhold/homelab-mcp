@@ -1301,6 +1301,13 @@ describe("standalone resource topology", () => {
     assert.match(dockerfile, /UV_NO_SYNC=1/);
     assert.match(dockerfile, /COPY deploys deploys/);
     assert.match(dockerfile, /openssh-client/);
+    assert.match(dockerfile, /groupadd --gid 65532 homelab-mcp/);
+    assert.match(
+      dockerfile,
+      /useradd --uid 65532 --gid 65532 --home-dir \/data --no-create-home --shell \/usr\/sbin\/nologin homelab-mcp/,
+    );
+    assert.match(dockerfile, /install -d -o 65532 -g 65532 \/data/);
+    assert.match(dockerfile, /USER 65532:65532/);
     const pipeline = readFileSync(join(__dirname, "..", "..", ".tekton", "homelab-mcp-preview.yaml"), "utf8");
     const taskRunSpecs = pipeline.slice(
       pipeline.indexOf("  taskRunSpecs:"),
@@ -1350,7 +1357,12 @@ describe("standalone resource topology", () => {
     assert.doesNotMatch(pipeline, /openbao-pulumi-credentials/);
     assert.doesNotMatch(pipeline, /(?:uv lock --check|python -m unittest discover)/);
     assert.doesNotMatch(deployTask, /(?:results\.|\$\(results\.|secretName: openbao)/);
-    assert.doesNotMatch(pipeline, /(?:ssh-keyscan|ssh-keygen|pyinfra\s|deploys\/entrypoints)/);
+    assert.match(pipeline, /getent passwd 65532.*homelab-mcp:x:65532:65532::\/data:\/usr\/sbin\/nologin/);
+    assert.match(pipeline, /getent group 65532.*homelab-mcp:x:65532:/);
+    assert.match(pipeline, /\/usr\/bin\/ssh-keygen -\? 2>&1/);
+    assert.match(pipeline, /usage: ssh-keygen/);
+    assert.match(pipeline, /No user exists/);
+    assert.doesNotMatch(pipeline, /(?:ssh-keyscan|pyinfra\s|deploys\/entrypoints)/);
   });
 
   test("defaults machine SSH egress to empty and rejects invalid CIDRs", async () => {

@@ -83,6 +83,8 @@ LABEL org.opencontainers.image.source="https://git.holdenitdown.net/rfhold/homel
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates openssh-client && \
     rm -rf /var/lib/apt/lists/* && \
+    groupadd --gid 65532 homelab-mcp && \
+    useradd --uid 65532 --gid 65532 --home-dir /data --no-create-home --shell /usr/sbin/nologin homelab-mcp && \
     install -d -o 65532 -g 65532 /data
 
 ENV HOME=/data \
