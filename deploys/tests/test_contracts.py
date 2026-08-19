@@ -1,8 +1,10 @@
 import json
 import os
 import base64
+import io
 import subprocess
 import struct
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,7 +19,12 @@ from pyinfra.connectors.ssh_util import get_private_key
 from deploys.lib.inventory import bootstrap_inventory, system_info_inventory
 from deploys.lib.bootstrap import _SSHD_DROP_IN, _SUDOERS, _bootstrap_operation
 from deploys.lib.password_auth import AgentFirstAuthStrategy, MAX_AGENT_KEY_ATTEMPTS
-from deploys.lib.system_info import _SYSTEM_INFO_COMMAND
+from deploys.lib.system_info import (
+    _SYSTEM_INFO_COMMAND,
+    _SYSTEM_INFO_METADATA_NAME,
+    _SYSTEM_INFO_OPERATION,
+    _SystemInfoOutputCallback,
+)
 
 
 ROOT = Path(__file__).parents[2]
@@ -430,6 +437,109 @@ class SystemInfoTests(unittest.TestCase):
         self.assertIn("emit uptime uptime -p", _SYSTEM_INFO_COMMAND)
         for forbidden in ("/proc/", "ps ", "env", "printenv", "journalctl"):
             self.assertNotIn(forbidden, _SYSTEM_INFO_COMMAND)
+
+    def test_exact_command_completes_with_protocol_markers_under_sh(self) -> None:
+        result = subprocess.run(
+            ["sh", "-c", _SYSTEM_INFO_COMMAND],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertTrue(result.stdout.startswith(b"HOMELAB_SYSTEM_INFO_V1_BEGIN\n"))
+        self.assertTrue(result.stdout.endswith(b"HOMELAB_SYSTEM_INFO_V1_END\n"))
+
+    def test_output_callback_exports_only_the_system_info_operation_stdout(self) -> None:
+        host = object()
+
+        class State:
+            inventory = (host,)
+
+            def __init__(
+                self,
+                name: str,
+                stdout: str = "INTENDED_STDOUT",
+                succeeded: bool = True,
+            ) -> None:
+                self.name = name
+                self.stdout = stdout
+                self.succeeded = succeeded
+
+            def get_op_meta(self, op_hash):
+                return SimpleNamespace(names={self.name})
+
+            def get_op_data_for_host(self, selected_host, op_hash):
+                if selected_host is not host:
+                    raise AssertionError("callback selected an unexpected host")
+                return SimpleNamespace(
+                    operation_meta=SimpleNamespace(
+                        did_succeed=lambda: self.succeeded,
+                        stdout=self.stdout,
+                        stderr="SENTINEL_STDERR",
+                    )
+                )
+
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            _SystemInfoOutputCallback.operation_end(State("other operation"), "other")
+            _SystemInfoOutputCallback.operation_end(
+                State(
+                    _SYSTEM_INFO_METADATA_NAME,
+                    "SENTINEL_FAILED_STDOUT",
+                    succeeded=False,
+                ),
+                "failed-system-info",
+            )
+            _SystemInfoOutputCallback.operation_end(
+                State(_SYSTEM_INFO_METADATA_NAME), "system-info"
+            )
+            _SystemInfoOutputCallback.operation_end(
+                State(_SYSTEM_INFO_METADATA_NAME, "ALREADY_TERMINATED\n"),
+                "system-info",
+            )
+
+        self.assertEqual(output.getvalue(), "INTENDED_STDOUT\nALREADY_TERMINATED\n")
+
+    def test_pinned_pyinfra_cli_exports_parseable_system_info_stdout(self) -> None:
+        result = subprocess.run(
+            [
+                str(Path(sys.executable).with_name("pyinfra")),
+                "--yes",
+                "@local",
+                "deploys/entrypoints/system_info.py",
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        begin = b"HOMELAB_SYSTEM_INFO_V1_BEGIN\n"
+        end = b"HOMELAB_SYSTEM_INFO_V1_END\n"
+        self.assertTrue(result.stdout.startswith(begin))
+        self.assertTrue(result.stdout.endswith(end))
+        payload = result.stdout[len(begin) : -len(end)]
+        for section in (
+            "hostname",
+            "uptime",
+            "boot_time",
+            "os_release",
+            "kernel_arch",
+            "cpu",
+            "memory",
+            "filesystems",
+            "block_devices",
+            "interfaces",
+            "default_routes",
+        ):
+            section_begin = f"--- {section} BEGIN ---\n".encode()
+            section_end = f"\n--- {section} END ---\n".encode()
+            self.assertTrue(payload.startswith(section_begin))
+            _, separator, payload = payload[len(section_begin) :].partition(section_end)
+            self.assertEqual(separator, section_end)
+        self.assertEqual(payload, b"")
 
 
 if __name__ == "__main__":

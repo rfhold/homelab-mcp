@@ -29,6 +29,8 @@ use super::{
 
 const MAX_STDOUT_BYTES: usize = 512 * 1024;
 const MAX_STDERR_BYTES: usize = 32 * 1024;
+const SYSTEM_INFO_BEGIN: &[u8] = b"HOMELAB_SYSTEM_INFO_V1_BEGIN\n";
+const SYSTEM_INFO_END: &[u8] = b"HOMELAB_SYSTEM_INFO_V1_END\n";
 
 #[derive(Clone, Copy)]
 enum FailureClassification {
@@ -45,6 +47,7 @@ enum FailureClassification {
     ConnectionTimeout,
     NameResolution,
     RuntimeSetup,
+    RemoteCommand,
     Other,
 }
 
@@ -64,6 +67,7 @@ impl FailureClassification {
             Self::ConnectionTimeout => "connection_timeout",
             Self::NameResolution => "name_resolution",
             Self::RuntimeSetup => "runtime_setup",
+            Self::RemoteCommand => "remote_command",
             Self::Other => "other",
         }
     }
@@ -163,9 +167,15 @@ fn emit_uv_exit_failure(
     stderr: Option<&[u8]>,
     exit_code: Option<i32>,
 ) {
-    let classification = stderr
-        .map(classify_uv_stderr)
-        .unwrap_or(FailureClassification::WaitFailed);
+    let classification = if stderr.is_some_and(|stderr| {
+        contains_bytes(stderr, SYSTEM_INFO_BEGIN) && !contains_bytes(stderr, SYSTEM_INFO_END)
+    }) {
+        FailureClassification::RemoteCommand
+    } else {
+        stderr
+            .map(classify_uv_stderr)
+            .unwrap_or(FailureClassification::WaitFailed)
+    };
     diagnostics.failure("uv_exit", classification, exit_code);
 }
 
@@ -1144,6 +1154,63 @@ print({output:?})
                     "SENTINEL_TOKEN",
                     "SENTINEL_PRIVATE_PATH",
                 ],
+            );
+            fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uv_partial_system_info_protocol_is_remote_command_and_remains_secret() {
+        let (runner, base) = setup(
+            "#!/bin/sh\nprintf 'SENTINEL_STDOUT'\nprintf 'HOMELAB_SYSTEM_INFO_V1_BEGIN\\nSENTINEL_STDERR Authentication failed.' >&2\nexit 25\n",
+            2,
+        );
+        let machine = machine("SENTINEL_HOST", 22, Some(PIN));
+        let machine_id = machine.id;
+        let (result, events) = captured_worker(&runner, machine, runner.config.clone()).await;
+
+        assert_eq!(result.unwrap_err(), DeployError::ExecutionOutcomeUnknown);
+        assert_eq!(events.len(), 1);
+        assert_failure_event(
+            &events[0],
+            machine_id,
+            "uv_exit",
+            "remote_command",
+            Some(25),
+        );
+        assert_event_excludes(
+            &events[0],
+            &["SENTINEL_HOST", "SENTINEL_STDOUT", "SENTINEL_STDERR"],
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn uv_remote_command_detection_falls_back_for_other_protocol_states() {
+        for stderr in [
+            "Authentication failed. SENTINEL_STDERR",
+            "HOMELAB_SYSTEM_INFO_V1_BEGIN\\nSENTINEL_STDERR\\nHOMELAB_SYSTEM_INFO_V1_END\\nAuthentication failed.",
+        ] {
+            let script = format!(
+                "#!/bin/sh\nprintf 'SENTINEL_STDOUT'\nprintf '%b' {stderr:?} >&2\nexit 26\n"
+            );
+            let (runner, base) = setup(&script, 2);
+            let machine = machine("SENTINEL_HOST", 22, Some(PIN));
+            let machine_id = machine.id;
+            let (result, events) = captured_worker(&runner, machine, runner.config.clone()).await;
+
+            assert_eq!(result.unwrap_err(), DeployError::ExecutionOutcomeUnknown);
+            assert_eq!(events.len(), 1);
+            assert_failure_event(
+                &events[0],
+                machine_id,
+                "uv_exit",
+                "ssh_authentication",
+                Some(26),
+            );
+            assert_event_excludes(
+                &events[0],
+                &["SENTINEL_HOST", "SENTINEL_STDOUT", "SENTINEL_STDERR"],
             );
             fs::remove_dir_all(base).unwrap();
         }
