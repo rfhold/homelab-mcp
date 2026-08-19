@@ -305,6 +305,10 @@ async fn worker<S: OpenBaoSigner>(
         "certificate_write",
         &diagnostics,
     )?;
+    std::fs::remove_file(key.with_extension("pub")).map_err(|error| {
+        diagnostics.failure("public_key_remove", classify_io(&error), None);
+        DeployError::ExecutionRejected
+    })?;
     write_private(
         &known_hosts,
         format!(
@@ -674,6 +678,31 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct PublicKeyRemovalFailureSigner {
+        temp_root: PathBuf,
+    }
+
+    impl OpenBaoSigner for PublicKeyRemovalFailureSigner {
+        fn sign<'a>(
+            &'a self,
+            public_key: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<String, DeployError>> + Send + 'a>> {
+            assert_eq!(public_key, "ssh-ed25519 AAAATEST");
+            let mut run_dirs = fs::read_dir(&self.temp_root).unwrap();
+            let public_key_path = run_dirs
+                .next()
+                .unwrap()
+                .unwrap()
+                .path()
+                .join("identity.pub");
+            assert!(run_dirs.next().is_none());
+            fs::remove_file(&public_key_path).unwrap();
+            fs::create_dir(&public_key_path).unwrap();
+            Box::pin(async { Ok("ssh-ed25519-cert-v01@openssh.com AAACERT".into()) })
+        }
+    }
+
     fn temporary() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "homelab-deploy-runner-{}-{}",
@@ -759,8 +788,8 @@ mod tests {
         }
     }
 
-    async fn captured_worker(
-        runner: &DeployRunner<Signer>,
+    async fn captured_worker<S: OpenBaoSigner>(
+        runner: &DeployRunner<S>,
         machine: Machine,
         config: Arc<DeployRunnerConfig>,
     ) -> (Result<DeployResult, DeployError>, Vec<CapturedEvent>) {
@@ -768,8 +797,8 @@ mod tests {
         captured_worker_with_cancellation(runner, machine, config, cancelled).await
     }
 
-    async fn captured_worker_with_cancellation(
-        runner: &DeployRunner<Signer>,
+    async fn captured_worker_with_cancellation<S: OpenBaoSigner>(
+        runner: &DeployRunner<S>,
         machine: Machine,
         config: Arc<DeployRunnerConfig>,
         cancelled: oneshot::Receiver<()>,
@@ -890,7 +919,10 @@ assert "HOMELAB_INVENTORY_JSON" in os.environ
 assert "USER" not in os.environ
 value=json.loads(os.environ["HOMELAB_INVENTORY_JSON"]); host=value["host"]
 assert set(value) == {{"version", "host"}} and set(host) == {{"address","user","port","ssh_key","known_hosts"}}
-assert pathlib.Path(host["ssh_key"] + "-cert.pub").read_text() == "ssh-ed25519-cert-v01@openssh.com AAACERT"
+key = pathlib.Path(host["ssh_key"])
+assert key.read_text() == "private"
+assert pathlib.Path(str(key) + "-cert.pub").read_text() == "ssh-ed25519-cert-v01@openssh.com AAACERT"
+assert not pathlib.Path(str(key) + ".pub").exists()
 assert pathlib.Path(host["known_hosts"]).read_text() == "[2001:db8::1]:2222 {PIN}\n"
 pathlib.Path("{audit}").write_text(str(pathlib.Path(host["ssh_key"]).parent))
 print({output:?})
@@ -910,6 +942,39 @@ print({output:?})
         assert_eq!(fs::read_dir(base.join("temp")).unwrap().count(), 0);
         fs::remove_dir_all(base).unwrap();
         fs::remove_dir_all(audit.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_key_removal_failure_rejects_before_uv_and_cleans_run_directory() {
+        let (runner, base) = setup("#!/bin/sh\nprintf called > uv-audit\n", 2);
+        let runner = DeployRunner {
+            catalog: runner.catalog.clone(),
+            signer: Arc::new(PublicKeyRemovalFailureSigner {
+                temp_root: base.join("temp"),
+            }),
+            config: runner.config.clone(),
+            permit: Arc::new(Semaphore::new(1)),
+        };
+        let machine = machine("SENTINEL_HOST", 22, Some(PIN));
+        let machine_id = machine.id;
+
+        let (result, events) = captured_worker(&runner, machine, runner.config.clone()).await;
+
+        assert_eq!(result.unwrap_err(), DeployError::ExecutionRejected);
+        assert_eq!(events.len(), 1);
+        assert_failure_event(&events[0], machine_id, "public_key_remove", "other", None);
+        assert_event_excludes(
+            &events[0],
+            &[
+                "SENTINEL_HOST",
+                "AAAATEST",
+                "AAACERT",
+                base.to_str().unwrap(),
+            ],
+        );
+        assert!(!base.join("root/uv-audit").exists());
+        assert_eq!(fs::read_dir(base.join("temp")).unwrap().count(), 0);
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[tokio::test]

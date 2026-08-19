@@ -38,7 +38,7 @@ For each run, `DeployRunner` creates a private directory in `HOMELAB_MCP_DEPLOY_
 
 The preview Pulumi role also limits user certificates to `homelab`, disables host certificates, caps TTL at 15 minutes, and now declares `notBeforeDuration: "30s"` explicitly.
 
-The runner writes private material with restrictive modes on a memory-backed 16 MiB volume. It clears the child environment, disables stdin, uses fixed absolute executables, and deletes the run directory after completion.
+The runner writes private material with restrictive modes on a memory-backed 16 MiB volume. After writing the signed certificate, it removes the generated plain public key before starting pyinfra, leaving only the private key and `identity-cert.pub` for credential loading. It clears the child environment, disables stdin, uses fixed absolute executables, and deletes the run directory after completion.
 
 ## Host Authentication And Bounds
 

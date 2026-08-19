@@ -1,6 +1,7 @@
 import json
 import os
 import base64
+import subprocess
 import struct
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from unittest.mock import Mock, patch
 from paramiko import AuthenticationException, BadAuthenticationType
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.connectors.ssh import SSHConnector
+from pyinfra.connectors.ssh_util import get_private_key
 
 from deploys.lib.inventory import bootstrap_inventory, system_info_inventory
 from deploys.lib.bootstrap import _SSHD_DROP_IN, _SUDOERS, _bootstrap_operation
@@ -76,6 +78,38 @@ class CatalogTests(unittest.TestCase):
     def test_bootstrap_policy_is_fixed(self) -> None:
         self.assertEqual(_SUDOERS, "homelab ALL=(ALL:ALL) NOPASSWD: ALL\n")
         self.assertEqual(_SSHD_DROP_IN, "TrustedUserCAKeys /etc/ssh/trusted-user-ca-keys.pem\n")
+
+
+class RuntimeSshCredentialTests(unittest.TestCase):
+    def test_pyinfra_retains_certificate_when_plain_public_key_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            identity = root / "identity"
+            ca = root / "ca"
+            for key in (identity, ca):
+                subprocess.run(
+                    ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", key],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            subprocess.run(
+                [
+                    "ssh-keygen", "-q", "-s", ca, "-I", "runtime-test",
+                    "-n", "homelab", "-V", "-30s:+15m", identity.with_suffix(".pub"),
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            identity.with_suffix(".pub").unlink()
+
+            self.assertTrue(identity.is_file())
+            self.assertTrue((root / "identity-cert.pub").is_file())
+            self.assertFalse(identity.with_suffix(".pub").exists())
+            key = get_private_key(SimpleNamespace(private_keys={}, cwd=None), str(identity), "")
+            self.assertIsNotNone(key.public_blob)
+            self.assertEqual(key.public_blob.key_type, "ssh-ed25519-cert-v01@openssh.com")
 
 
 class InventoryTests(unittest.TestCase):
