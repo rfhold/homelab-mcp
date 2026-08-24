@@ -86,7 +86,7 @@ before(async () => {
     ]),
     "homelab-mcp:backupRetention": "7d",
     "homelab-mcp:backupSchedule": "0 30 1 * * *",
-    "homelab-mcp:mcpOAuthAccessTokenTtl": "300",
+    "homelab-mcp:mcpOAuthAccessTokenTtl": "259200",
     "homelab-mcp:mcpOAuthRefreshTokenTtl": "86400",
     "homelab-mcp:mcpOAuthRefreshFamilyTtl": "2592000",
     "homelab-mcp:mcpOAuthCodeTtl": "300",
@@ -393,6 +393,10 @@ describe("configuration policy", () => {
     );
     for (const stack of [preview, production]) {
       assert.match(stack, /^\s*kubernetes:context: pantheon$/m);
+      assert.match(
+        stack,
+        /^\s*homelab-mcp:mcpOAuthAccessTokenTtl: "259200"$/m,
+      );
       assert.doesNotMatch(stack, /^\s*homelab-mcp:image:/m);
       assert.doesNotMatch(
         stack,
@@ -590,6 +594,7 @@ describe("standalone resource topology", () => {
     assert.equal(app.HOMELAB_MCP_CEPH_PANTHEON_PASSWORD, cephPasswordFixture);
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_DCR, "true");
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_CIMD, "true");
+    assert.equal(app.HOMELAB_MCP_OAUTH_ACCESS_TOKEN_TTL, "259200");
     assert.equal(
       app.HOMELAB_MCP_OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS,
       "https://kuri.internal.example",

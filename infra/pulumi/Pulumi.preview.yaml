@@ -28,7 +28,7 @@ config:
     - name: pantheon
       origin: https://ceph.pantheon.holdenitdown.net
       expectedMajorRelease: 19
-  homelab-mcp:mcpOAuthAccessTokenTtl: "300"
+  homelab-mcp:mcpOAuthAccessTokenTtl: "259200"
   homelab-mcp:mcpOAuthRefreshTokenTtl: "86400"
   homelab-mcp:mcpOAuthRefreshFamilyTtl: "2592000"
   homelab-mcp:mcpOAuthCodeTtl: "300"

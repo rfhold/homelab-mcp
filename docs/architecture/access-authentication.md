@@ -84,7 +84,7 @@ Authentik session lifetime does not extend local authorization codes, access tok
 
 | State | Lifetime |
 | --- | --- |
-| Access token | 300 seconds |
+| Access token | 259200 seconds |
 | Authorization code | 300 seconds |
 | Refresh generation | 86400 seconds |
 | Refresh family | 2592000 seconds |
