@@ -2,6 +2,7 @@ import json
 import os
 import base64
 import io
+import shlex
 import subprocess
 import struct
 import sys
@@ -9,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from paramiko import AuthenticationException, BadAuthenticationType
 from pyinfra.api.exceptions import ConnectError
@@ -17,7 +18,14 @@ from pyinfra.connectors.ssh import SSHConnector
 from pyinfra.connectors.ssh_util import get_private_key
 
 from deploys.lib.inventory import bootstrap_inventory, system_info_inventory
-from deploys.lib.bootstrap import _SSHD_DROP_IN, _SUDOERS, _bootstrap_operation
+from deploys.lib.bootstrap import (
+    _SSHD_DROP_IN,
+    _SUDOERS,
+    _SUDO_SHELL,
+    _configure_bootstrap,
+    _ssh_trust_command,
+    _sudoers_operation,
+)
 from deploys.lib.password_auth import AgentFirstAuthStrategy, MAX_AGENT_KEY_ATTEMPTS
 from deploys.lib.system_info import (
     _SYSTEM_INFO_COMMAND,
@@ -409,7 +417,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_passwords_are_absent_from_remote_commands_and_debug_representations(self) -> None:
         sentinel = "SENTINEL-password-do-not-surface"
-        command, stdin = _bootstrap_operation("debian", self._ca_key(), sentinel)
+        command, stdin = _sudoers_operation(sentinel)
         self.assertNotIn(sentinel, command)
         self.assertNotIn("PYINFRA_SUDO_PASSWORD", command)
         self.assertNotIn("SUDO_ASKPASS", command)
@@ -418,16 +426,194 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn(sentinel, repr(stdin))
         self.assertEqual(stdin.readlines(), [sentinel + "\n"])
 
-    def test_bootstrap_uses_each_user_creation_branch_and_preserves_existing_primary_group(self) -> None:
-        command, _ = _bootstrap_operation("debian", self._ca_key(), "password")
-        self.assertIn("if id -u homelab", command)
-        self.assertIn("homelab_group=$(id -gn homelab); usermod -d /home/homelab", command)
-        self.assertIn("elif getent group homelab", command)
-        self.assertIn("homelab_group=homelab; useradd -m -d /home/homelab -s /bin/sh -g homelab homelab", command)
-        self.assertIn("else useradd -m -d /home/homelab -s /bin/sh homelab; homelab_group=$(id -gn homelab); fi", command)
-        self.assertIn('install -d -o homelab -g "$homelab_group" -m 0755 /home/homelab', command)
-        self.assertNotIn("usermod -g", command)
-        self.assertNotIn("install -d -o homelab -g homelab", command)
+    def test_bootstrap_uses_native_debian_operations_and_preserves_primary_group(self) -> None:
+        operations = []
+        with patch("deploys.lib.bootstrap.apt.packages") as apt_packages, patch(
+            "deploys.lib.bootstrap.pacman.packages"
+        ) as pacman_packages, patch("deploys.lib.bootstrap.server.user") as user, patch(
+            "deploys.lib.bootstrap.files.directory"
+        ) as directory, patch("deploys.lib.bootstrap.server.shell") as shell:
+            apt_packages.side_effect = lambda **_: operations.append("packages")
+            user.side_effect = lambda **_: operations.append("user")
+            directory.side_effect = lambda **_: operations.append("home")
+            shell.side_effect = lambda **kwargs: operations.append(kwargs["name"])
+            _configure_bootstrap(
+                "debian",
+                {"homelab": {"group": "existing-primary"}},
+                self._ca_key(),
+                "SENTINEL-password",
+            )
+
+        apt_packages.assert_called_once_with(
+            name="Install OpenSSH and sudo packages",
+            packages=["openssh-server", "sudo"],
+            update=True,
+            _shell_executable=_SUDO_SHELL,
+            _stdin=ANY,
+        )
+        pacman_packages.assert_not_called()
+        user.assert_called_once_with(
+            name="Reconcile homelab administrator account",
+            user="homelab",
+            home="/home/homelab",
+            shell="/bin/sh",
+            create_home=True,
+            ensure_home=False,
+            _shell_executable=_SUDO_SHELL,
+            _stdin=ANY,
+        )
+        directory.assert_called_once_with(
+            name="Reconcile homelab home directory",
+            path="/home/homelab",
+            user="homelab",
+            group="existing-primary",
+            mode="0755",
+            _shell_executable=_SUDO_SHELL,
+            _stdin=ANY,
+        )
+        self.assertEqual(shell.call_count, 2)
+        sudoers_call, ssh_call = shell.call_args_list
+        self.assertEqual(
+            operations,
+            [
+                "packages",
+                "user",
+                "home",
+                "Validate and install homelab sudoers policy",
+                "Validate and activate SSH user CA trust",
+            ],
+        )
+        for operation_call in (
+            apt_packages.call_args,
+            user.call_args,
+            directory.call_args,
+            sudoers_call,
+            ssh_call,
+        ):
+            self.assertNotIn("SENTINEL-password", repr(operation_call))
+            self.assertNotIn("_env", operation_call.kwargs)
+            self.assertNotIn("_sudo", operation_call.kwargs)
+        self.assertEqual(sudoers_call.kwargs["_stdin"].readlines(), ["SENTINEL-password\n"])
+        privileged_calls = (
+            apt_packages.call_args,
+            user.call_args,
+            directory.call_args,
+            ssh_call,
+        )
+        self.assertEqual(
+            len({id(operation_call.kwargs["_stdin"]) for operation_call in privileged_calls}),
+            len(privileged_calls),
+        )
+        for operation_call in privileged_calls:
+            self.assertEqual(operation_call.kwargs["_shell_executable"], _SUDO_SHELL)
+            stdin = operation_call.kwargs["_stdin"]
+            self.assertNotIn("SENTINEL-password", repr(stdin))
+            self.assertEqual(stdin.readlines(), ["SENTINEL-password\n"])
+            self.assertEqual(stdin.readlines(), ["SENTINEL-password\n"])
+        self.assertIn("systemctl --quiet is-active ssh.service", ssh_call.kwargs["commands"])
+
+    def test_bootstrap_uses_native_arch_packages_and_predicts_new_user_group(self) -> None:
+        with patch("deploys.lib.bootstrap.apt.packages") as apt_packages, patch(
+            "deploys.lib.bootstrap.pacman.packages"
+        ) as pacman_packages, patch("deploys.lib.bootstrap.server.user") as user, patch(
+            "deploys.lib.bootstrap.files.directory"
+        ) as directory, patch("deploys.lib.bootstrap.server.shell"):
+            _configure_bootstrap("arch linux", {}, self._ca_key(), "password")
+
+        apt_packages.assert_not_called()
+        pacman_packages.assert_called_once_with(
+            name="Install OpenSSH and sudo packages",
+            packages=["openssh", "sudo"],
+            update=True,
+            _shell_executable=_SUDO_SHELL,
+            _stdin=ANY,
+        )
+        self.assertNotIn("group", user.call_args.kwargs)
+        self.assertTrue(user.call_args.kwargs["create_home"])
+        self.assertEqual(directory.call_args.kwargs["group"], "homelab")
+
+    def test_bootstrap_rejects_unsupported_distribution_before_operations(self) -> None:
+        with patch("deploys.lib.bootstrap.server.shell") as shell:
+            with self.assertRaisesRegex(ValueError, "unsupported Linux distribution: fedora"):
+                _configure_bootstrap("fedora", {}, self._ca_key(), "password")
+        shell.assert_not_called()
+
+    def test_sudoers_installation_is_validated_and_atomic(self) -> None:
+        command, _ = _sudoers_operation("password")
+        script = shlex.split(command)[-1]
+        self.assertIn("visudo -cf", script)
+        metadata = "LC_ALL=C stat -c '%F:%u:%g:%a'"
+        repair_predicate = "[ \"$metadata\" != 'regular file:0:0:440' ]"
+        sudoers_install = 'install -o root -g root -m 0440 "$staging" /etc/sudoers.d/.homelab.tmp.$$'
+        self.assertIn(metadata, script)
+        self.assertIn(repair_predicate, script)
+        self.assertIn('[ -f "$target" ] && cmp -s "$staging" "$target"', script)
+        directory_guard = '[ -d "$target" ] && [ ! -L "$target" ]'
+        self.assertIn(directory_guard, script)
+        self.assertLess(script.index(directory_guard), script.index(sudoers_install))
+        self.assertLess(script.index("visudo -cf"), script.index(sudoers_install))
+        self.assertLess(script.index(repair_predicate), script.index(sudoers_install))
+        self.assertIn('mv -fT /etc/sudoers.d/.homelab.tmp.$$ "$target"', script)
+
+    def test_ssh_transaction_validates_candidate_and_final_before_conditional_reload(self) -> None:
+        for service in ("ssh", "sshd"):
+            command = _ssh_trust_command(self._ca_key(), service)
+            candidate_validation = 'sshd -t -f "$candidate"'
+            final_validation = "sshd -t;"
+            producer = 'exec sshd -T >"$effective_fifo"'
+            bounded_capture = 'head -c 131073 >"$staging/sshd.effective"'
+            producer_wait = 'if wait "$producer_pid"; then producer_status=0'
+            producer_check = '[ "$producer_status" -eq 0 ]'
+            size_check = '[ "$effective_size" -le 131072 ]'
+            effective_check = (
+                "grep -Fqx -- 'trustedusercakeys "
+                "/etc/ssh/trusted-user-ca-keys.pem'"
+            )
+            reload_check = f"systemctl --quiet is-active {service}.service"
+            ca_install = (
+                'install -o root -g root -m 0644 "$staging/user-ca.pub" '
+                "/etc/ssh/.trusted-user-ca-keys.pem.tmp.$$"
+            )
+            self.assertIn("ssh-keygen -l", command)
+            self.assertLess(command.index(candidate_validation), command.index(ca_install))
+            self.assertLess(command.index(ca_install), command.index(final_validation))
+            self.assertLess(command.index(final_validation), command.index(reload_check))
+            self.assertLess(command.index(producer), command.index(bounded_capture))
+            self.assertLess(command.index(bounded_capture), command.index(producer_wait))
+            self.assertLess(command.index(producer_wait), command.index(producer_check))
+            self.assertLess(command.index(producer_check), command.index(size_check))
+            self.assertLess(command.index(size_check), command.index(effective_check))
+            self.assertLess(command.index(effective_check), command.index(reload_check))
+            self.assertIn("cat >/dev/null", command)
+            self.assertIn('kill "$producer_pid"', command)
+            self.assertIn('wait "$producer_pid" 2>/dev/null', command)
+            self.assertIn("mkfifo \"$effective_fifo\"", command)
+            self.assertIn(f"systemctl reload {service}.service", command)
+            self.assertIn("mv -fT /etc/ssh/.trusted-user-ca-keys.pem.tmp.$$", command)
+            self.assertIn("ca_metadata=$(LC_ALL=C stat -c '%F:%u:%g:%a'", command)
+            self.assertIn("[ \"$ca_metadata\" != 'regular file:0:0:644' ]", command)
+            self.assertIn("drop_in_metadata=$(LC_ALL=C stat -c '%F:%u:%g:%a'", command)
+            self.assertIn("[ \"$drop_in_metadata\" != 'regular file:0:0:644' ]", command)
+            ca_directory_guard = '[ -d "$ca_target" ] && [ ! -L "$ca_target" ]'
+            drop_in_directory_guard = (
+                '[ -d "$drop_in_target" ] && [ ! -L "$drop_in_target" ]'
+            )
+            self.assertLess(command.index(ca_directory_guard), command.index(ca_install))
+            self.assertLess(command.index(drop_in_directory_guard), command.index(ca_install))
+            self.assertIn(
+                'if [ "$ca_content_matches" -ne 1 ]; then content_changed=1',
+                command,
+            )
+            self.assertIn(
+                'if [ "$drop_in_content_matches" -ne 1 ]; then content_changed=1',
+                command,
+            )
+            self.assertNotIn('if [ "$content_changed" -eq 1 ]; then sshd -t', command)
+            self.assertNotIn("sudo -S", command)
+            self.assertNotIn("visudo", command)
+            self.assertNotIn("useradd", command)
+            self.assertNotIn("apt-get", command)
+            self.assertNotIn("pacman", command)
 
 
 class SystemInfoTests(unittest.TestCase):
