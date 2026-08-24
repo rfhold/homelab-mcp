@@ -92,6 +92,8 @@ Authentik session lifetime does not extend local authorization codes, access tok
 
 The implementation must expire durable records and reject replay even before cleanup removes old rows.
 
+The signing verification overlap, and therefore retired verification-key retention, must cover the access-token lifetime plus Kuri's policy clock skew. The service derives this overlap from the configured access-token lifetime while preserving Kuri's longer 10-minute default when it applies; the current 3-day lifetime requires at least 259230 seconds.
+
 ## Token Contract
 
 The local issuer signs access tokens with ES256. Each access token must:
