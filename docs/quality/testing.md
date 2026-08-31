@@ -2,7 +2,7 @@
 
 ## Status
 
-The repository runtime has 213 passing Rust tests under Rust 1.96: 211 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, integrations, inventory, deploys, and cleanup control.
+The repository runtime has 233 passing Rust tests under Rust 1.96: 231 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, integrations, inventory, deploys, and cleanup control.
 
 These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
 
@@ -57,6 +57,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
 | OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, eleven-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
+| MCP progress heartbeat | Incremental SSE correlation, payload safety, lifecycle, ordering, and opt-in behavior through `progress_heartbeat_streams_increasing_correlated_events_before_completion` and `progress_heartbeat_omits_events_without_token_and_for_short_calls`. |
 | Grafana actions | Datasource queries, dashboard inventory and PNG rendering, alerting and recording-rule reads, silence creation, bounds, normalization, fixed routes, redirects, semantic errors, timeout, capacity, and permit release against mock HTTP servers. |
 | Kubernetes actions | Exact typed action schemas, all 36 resource kinds, namespace scope, fixed API paths and mutations, normalization, limits, safe errors, process supervision, and uncertain mutation outcomes. |
 | Ceph Dashboard actions | Ten query and five OSD exec schemas, fixed Squid routes, normalization, bounds, safe-to-destroy checks, destructive confirmations, synchronous completion, safe HTTP 202 task identities, and uncertain mutation outcomes. |
@@ -104,6 +105,8 @@ Tests must cover the [access contract](../architecture/access-authentication.md)
 - encrypted ES256 signing material with separate database and wrapping-key secrets.
 
 Negative tests must verify that errors, logs, redirects, traces, and MCP content contain no secret material.
+
+Focused incremental SSE tests cover string and integer progress-token correlation, strictly increasing values, and the fixed safe payload shape. They also cover delivery before completion, omission without a token, short calls, terminal-result ordering, stream closure, and reporter termination.
 
 ## Grafana Contract Coverage
 

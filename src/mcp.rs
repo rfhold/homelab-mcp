@@ -1,6 +1,6 @@
 #![allow(clippy::useless_vec)]
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use axum::Router;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -65,6 +65,9 @@ use crate::{
 
 // Progressive schemas reject unsupported actions before handler dispatch.
 const _: CephError = CephError::UnsupportedAction;
+
+const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const PROGRESS_HEARTBEAT_MESSAGE: &str = "Request is still running";
 
 #[cfg(test)]
 const QUERY_TOOL_NAME: &str = "grafana_query";
@@ -172,6 +175,46 @@ struct DeployRunInput {
 #[derive(Clone)]
 pub struct HomelabMcp {
     services: Arc<Services>,
+    progress_heartbeat_interval: Duration,
+}
+
+struct ProgressHeartbeat(Option<tokio::task::JoinHandle<()>>);
+
+impl ProgressHeartbeat {
+    fn start(context: &ServerContext, interval: Duration) -> Self {
+        let Some(token) = context.progress_token() else {
+            return Self(None);
+        };
+        let context = context.clone();
+        let task = tokio::spawn(async move {
+            let mut progress = 1.0;
+            loop {
+                tokio::time::sleep(interval).await;
+                if context
+                    .progress(
+                        token.clone(),
+                        progress,
+                        None,
+                        Some(PROGRESS_HEARTBEAT_MESSAGE.to_owned()),
+                    )
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                progress += 1.0;
+            }
+        });
+        Self(Some(task))
+    }
+}
+
+impl Drop for ProgressHeartbeat {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
 }
 
 pub fn router(
@@ -179,7 +222,10 @@ pub fn router(
     services: Arc<Services>,
     oauth: &OAuthAuthorizationServer,
 ) -> Result<Router, String> {
-    let handler = Arc::new(HomelabMcp { services });
+    let handler = Arc::new(HomelabMcp {
+        services,
+        progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
+    });
     let required_scopes = config.required_scopes.clone();
     let metadata =
         McpProtectedResourceMetadata::new(config.resource.clone(), [config.issuer.clone()])
@@ -338,6 +384,10 @@ pub fn router(
     )
 )]
 impl HomelabMcp {
+    fn progress_heartbeat(&self, context: &ServerContext) -> ProgressHeartbeat {
+        ProgressHeartbeat::start(context, self.progress_heartbeat_interval)
+    }
+
     /// Execute a LogQL instant or range query through Grafana.
     ///
     /// Use instant mode without start/end, or range mode with both endpoints.
@@ -348,6 +398,7 @@ impl HomelabMcp {
         input: LogqlInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tool_error("LogQL", GrafanaError::InvalidArguments)),
@@ -372,6 +423,7 @@ impl HomelabMcp {
         input: PromqlInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tool_error("PromQL", GrafanaError::InvalidArguments)),
@@ -396,6 +448,7 @@ impl HomelabMcp {
         input: TraceqlInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tool_error("TraceQL", GrafanaError::InvalidArguments)),
@@ -420,6 +473,7 @@ impl HomelabMcp {
         input: ProfilesInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tool_error("profile", GrafanaError::InvalidArguments)),
@@ -441,6 +495,7 @@ impl HomelabMcp {
         input: AlertRulesInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tool_error("alert rule", GrafanaError::InvalidArguments)),
@@ -462,6 +517,7 @@ impl HomelabMcp {
         input: RecordingRulesInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tool_error("recording rule", GrafanaError::InvalidArguments)),
@@ -483,6 +539,7 @@ impl HomelabMcp {
         input: AlertInstancesInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => {
@@ -506,6 +563,7 @@ impl HomelabMcp {
         input: ListSilencesInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tool_error("silence", GrafanaError::InvalidArguments)),
@@ -527,6 +585,7 @@ impl HomelabMcp {
         input: ListDashboardsInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tool_error("dashboard", GrafanaError::InvalidArguments)),
@@ -548,6 +607,7 @@ impl HomelabMcp {
         input: GetDashboardInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tool_error("dashboard", GrafanaError::InvalidArguments)),
@@ -569,6 +629,7 @@ impl HomelabMcp {
         input: RenderDashboardInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let request = match input.validate() {
             Ok(request) => request,
             Err(_) => return Ok(tool_error("render", GrafanaError::InvalidArguments)),
@@ -590,6 +651,7 @@ impl HomelabMcp {
         input: RenderPanelInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let request = match input.validate() {
             Ok(request) => request,
             Err(_) => return Ok(tool_error("render", GrafanaError::InvalidArguments)),
@@ -617,6 +679,7 @@ impl HomelabMcp {
         input: CreateSilenceInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let command = match input.validate() {
             Ok(command) => command,
             Err(_) => return Ok(tool_error("silence", GrafanaError::InvalidArguments)),
@@ -648,6 +711,7 @@ impl HomelabMcp {
         input: RepositoryListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => {
@@ -674,6 +738,7 @@ impl HomelabMcp {
         input: WorkflowListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tekton_tool_error("workflow", TektonError::InvalidArguments)),
@@ -695,6 +760,7 @@ impl HomelabMcp {
         input: RunListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
@@ -716,6 +782,7 @@ impl HomelabMcp {
         input: RunGetInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
@@ -737,6 +804,7 @@ impl HomelabMcp {
         input: RunStatusInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
@@ -758,6 +826,7 @@ impl HomelabMcp {
         input: RunWaitInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
@@ -779,6 +848,7 @@ impl HomelabMcp {
         input: TaskListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tekton_tool_error("task", TektonError::InvalidArguments)),
@@ -800,6 +870,7 @@ impl HomelabMcp {
         input: TaskLogsInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let query = match input.validate() {
             Ok(query) => query,
             Err(_) => return Ok(tekton_tool_error("task log", TektonError::InvalidArguments)),
@@ -821,6 +892,7 @@ impl HomelabMcp {
         input: WorkflowDispatchInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let command = match input.validate() {
             Ok(command) => command,
             Err(_) => return Ok(tekton_tool_error("workflow", TektonError::InvalidArguments)),
@@ -837,6 +909,7 @@ impl HomelabMcp {
         input: RunRerunInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let command = match input.validate() {
             Ok(command) => command,
             Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
@@ -853,6 +926,7 @@ impl HomelabMcp {
         input: RunCancelInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let command = match input.validate() {
             Ok(command) => command,
             Err(_) => return Ok(tekton_tool_error("run", TektonError::InvalidArguments)),
@@ -914,6 +988,7 @@ impl HomelabMcp {
         input: ClusterListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_kubernetes_query(input.validate(), "cluster", context.cancelled())
             .await
     }
@@ -925,6 +1000,7 @@ impl HomelabMcp {
         input: CapabilityListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_kubernetes_query(input.validate(), "capability", context.cancelled())
             .await
     }
@@ -936,6 +1012,7 @@ impl HomelabMcp {
         input: ResourceListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_kubernetes_query(input.validate(), "resource", context.cancelled())
             .await
     }
@@ -947,6 +1024,7 @@ impl HomelabMcp {
         input: ResourceGetInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_kubernetes_query(input.validate(), "resource", context.cancelled())
             .await
     }
@@ -958,6 +1036,7 @@ impl HomelabMcp {
         input: WorkloadRestartInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_kubernetes_exec(input.validate(), "workload", context.cancelled())
             .await)
@@ -970,6 +1049,7 @@ impl HomelabMcp {
         input: WorkloadScaleInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_kubernetes_exec(input.validate(), "workload", context.cancelled())
             .await)
@@ -982,6 +1062,7 @@ impl HomelabMcp {
         input: CronjobSuspendInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_kubernetes_exec(input.validate(), "CronJob", context.cancelled())
             .await)
@@ -994,6 +1075,7 @@ impl HomelabMcp {
         input: CronjobTriggerInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_kubernetes_exec(input.validate(), "CronJob", context.cancelled())
             .await)
@@ -1006,6 +1088,7 @@ impl HomelabMcp {
         input: PodDeleteInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_kubernetes_exec(input.validate(), "Pod", context.cancelled())
             .await)
@@ -1072,6 +1155,7 @@ impl HomelabMcp {
         input: CephClusterListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "cluster", context.cancelled())
             .await
     }
@@ -1083,6 +1167,7 @@ impl HomelabMcp {
         input: CephStatusGetInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "status", context.cancelled())
             .await
     }
@@ -1094,6 +1179,7 @@ impl HomelabMcp {
         input: CephMetricsSummaryInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "metrics", context.cancelled())
             .await
     }
@@ -1105,6 +1191,7 @@ impl HomelabMcp {
         input: CephOsdListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "OSD", context.cancelled())
             .await
     }
@@ -1116,6 +1203,7 @@ impl HomelabMcp {
         input: CephOsdGetInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "OSD", context.cancelled())
             .await
     }
@@ -1127,6 +1215,7 @@ impl HomelabMcp {
         input: CephOsdSafeToDestroyInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "OSD", context.cancelled())
             .await
     }
@@ -1138,6 +1227,7 @@ impl HomelabMcp {
         input: CephDeviceListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "device", context.cancelled())
             .await
     }
@@ -1149,6 +1239,7 @@ impl HomelabMcp {
         input: CephDeviceGetInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "device", context.cancelled())
             .await
     }
@@ -1160,6 +1251,7 @@ impl HomelabMcp {
         input: CephFlagsGetInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "flags", context.cancelled())
             .await
     }
@@ -1171,6 +1263,7 @@ impl HomelabMcp {
         input: CephTaskListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_ceph_query(input.validate(), "task", context.cancelled())
             .await
     }
@@ -1182,6 +1275,7 @@ impl HomelabMcp {
         input: CephOsdMarkInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
             .await)
@@ -1194,6 +1288,7 @@ impl HomelabMcp {
         input: CephOsdReweightInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
             .await)
@@ -1206,6 +1301,7 @@ impl HomelabMcp {
         input: CephOsdScrubInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
             .await)
@@ -1218,6 +1314,7 @@ impl HomelabMcp {
         input: CephOsdDestroyInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
             .await)
@@ -1230,6 +1327,7 @@ impl HomelabMcp {
         input: CephOsdPurgeInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(self
             .dispatch_ceph_exec(input.validate(), "OSD", context.cancelled())
             .await)
@@ -1282,6 +1380,7 @@ impl HomelabMcp {
         input: MachineListInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let result = tokio::select! {
             result = self.services.inventory.list(input.limit) => result,
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
@@ -1301,6 +1400,7 @@ impl HomelabMcp {
         input: MachineCreateInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let command = CreateMachine {
             display_name: input.display_name,
             ssh_host: input.ssh_host,
@@ -1325,6 +1425,7 @@ impl HomelabMcp {
         input: MachineUpdateInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let Some(id) = parse_machine_id(&input.machine_id) else {
             return Ok(invalid_machine_arguments());
         };
@@ -1351,6 +1452,7 @@ impl HomelabMcp {
         input: MachineIdInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let Some(id) = parse_machine_id(&input.machine_id) else {
             return Ok(invalid_machine_arguments());
         };
@@ -1371,6 +1473,7 @@ impl HomelabMcp {
         input: MachineIdInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let Some(id) = parse_machine_id(&input.machine_id) else {
             return Ok(invalid_machine_arguments());
         };
@@ -1391,6 +1494,7 @@ impl HomelabMcp {
         input: MachineHostKeyInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let Some(id) = parse_machine_id(&input.machine_id) else {
             return Ok(invalid_machine_arguments());
         };
@@ -1409,8 +1513,9 @@ impl HomelabMcp {
     async fn deploy_list(
         &self,
         _: DeployListInput,
-        _: ServerContext,
+        context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         Ok(json_result(
             json!({"deploys": self.services.deploys.list()}),
         ))
@@ -1423,6 +1528,7 @@ impl HomelabMcp {
         input: DeployRunInput,
         context: ServerContext,
     ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
         let Some(id) = parse_machine_id(&input.machine_id) else {
             return Ok(invalid_deploy_arguments());
         };
@@ -1792,6 +1898,7 @@ mod tests {
                 url::Url::parse(&format!("{origin}/")).unwrap(),
                 std::time::Duration::from_secs(1),
             ))),
+            progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         });
         (handler, propagated, task)
     }
@@ -1863,6 +1970,170 @@ mod tests {
             .find_map(|line| line.strip_prefix("data: "))
             .unwrap_or(&text);
         (status, serde_json::from_str(payload).unwrap())
+    }
+
+    async fn progress_test_server(
+        action_duration: Duration,
+        heartbeat_interval: Duration,
+    ) -> (String, Arc<AtomicBool>, JoinHandle<()>, JoinHandle<()>) {
+        let completed = Arc::new(AtomicBool::new(false));
+        let upstream_completed = Arc::clone(&completed);
+        let grafana = Router::new().route(
+            "/api/datasources/proxy/uid/loki/loki/api/v1/query",
+            get(move || {
+                let upstream_completed = Arc::clone(&upstream_completed);
+                async move {
+                    tokio::time::sleep(action_duration).await;
+                    upstream_completed.store(true, Ordering::SeqCst);
+                    Json(json!({
+                        "status":"success",
+                        "data":{"resultType":"vector","result":[]}
+                    }))
+                }
+            }),
+        );
+        let (grafana_origin, grafana_task) = serve(grafana).await;
+        let handler = Arc::new(HomelabMcp {
+            services: Arc::new(Services::new(GrafanaClient::for_test(
+                url::Url::parse(&format!("{grafana_origin}/")).unwrap(),
+                Duration::from_secs(1),
+            ))),
+            progress_heartbeat_interval: heartbeat_interval,
+        });
+        let (mcp_origin, mcp_task) = serve(streamable_http_router(handler)).await;
+        (
+            format!("{mcp_origin}/mcp"),
+            completed,
+            grafana_task,
+            mcp_task,
+        )
+    }
+
+    fn progress_call(token: Option<Value>) -> Value {
+        let mut body = request(
+            "tools/call",
+            "progress-call",
+            json!({
+                "name":QUERY_TOOL_NAME,
+                "arguments":{
+                    "action":"logql.query",
+                    "input":{"query":"{job=\"progress-test\"}"}
+                }
+            }),
+        );
+        if let Some(token) = token {
+            body["params"]["_meta"]["progressToken"] = token;
+        }
+        body
+    }
+
+    async fn send_mcp_stream(endpoint: &str, body: &Value) -> reqwest::Response {
+        Client::new()
+            .post(endpoint)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", MCP_PROTOCOL_VERSION)
+            .header("mcp-method", "tools/call")
+            .header("mcp-name", QUERY_TOOL_NAME)
+            .json(body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    async fn next_sse_payload(
+        response: &mut reqwest::Response,
+        buffered: &mut Vec<u8>,
+    ) -> Option<Value> {
+        loop {
+            if let Some(end) = buffered.windows(2).position(|window| window == b"\n\n") {
+                let frame = buffered.drain(..end + 2).collect::<Vec<_>>();
+                let frame = std::str::from_utf8(&frame).unwrap();
+                if let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) {
+                    return Some(serde_json::from_str(data).unwrap());
+                }
+                continue;
+            }
+            match response.chunk().await.unwrap() {
+                Some(chunk) => buffered.extend_from_slice(&chunk),
+                None => return None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_heartbeat_streams_increasing_correlated_events_before_completion() {
+        for token in [json!("request-progress"), json!(42)] {
+            let (endpoint, completed, grafana_task, mcp_task) =
+                progress_test_server(Duration::from_millis(120), Duration::from_millis(15)).await;
+            let mut response =
+                send_mcp_stream(&endpoint, &progress_call(Some(token.clone()))).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()[reqwest::header::CONTENT_TYPE],
+                "text/event-stream"
+            );
+
+            let mut buffered = Vec::new();
+            let first = tokio::time::timeout(
+                Duration::from_millis(100),
+                next_sse_payload(&mut response, &mut buffered),
+            )
+            .await
+            .expect("progress must arrive before terminal completion")
+            .expect("progress SSE payload");
+            assert_eq!(first["method"], "notifications/progress");
+            assert!(!completed.load(Ordering::SeqCst));
+
+            let mut payloads = vec![first];
+            while let Some(payload) = next_sse_payload(&mut response, &mut buffered).await {
+                payloads.push(payload);
+            }
+            let progress = payloads
+                .iter()
+                .filter(|payload| payload["method"] == "notifications/progress")
+                .collect::<Vec<_>>();
+            assert!(progress.len() >= 2, "payloads: {payloads:?}");
+            for (index, payload) in progress.iter().enumerate() {
+                let params = payload["params"].as_object().unwrap();
+                assert_eq!(params.len(), 3);
+                assert_eq!(params["progressToken"], token);
+                assert_eq!(params["progress"], json!((index + 1) as f64));
+                assert_eq!(params["message"], PROGRESS_HEARTBEAT_MESSAGE);
+                assert!(!params.contains_key("total"));
+            }
+            assert!(payloads.last().unwrap().get("result").is_some());
+            assert!(completed.load(Ordering::SeqCst));
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_millis(40),
+                    next_sse_payload(&mut response, &mut buffered)
+                )
+                .await
+                .expect("completed stream must close")
+                .is_none()
+            );
+
+            grafana_task.abort();
+            mcp_task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_heartbeat_omits_events_without_token_and_for_short_calls() {
+        for (action_duration, token) in [
+            (Duration::from_millis(70), None),
+            (Duration::from_millis(1), Some(json!(7))),
+        ] {
+            let (endpoint, _, grafana_task, mcp_task) =
+                progress_test_server(action_duration, Duration::from_millis(15)).await;
+            let response = send_mcp_stream(&endpoint, &progress_call(token)).await;
+            let payload = response.text().await.unwrap();
+            assert!(!payload.contains("notifications/progress"), "{payload}");
+            assert!(payload.contains("structuredContent"), "{payload}");
+            grafana_task.abort();
+            mcp_task.abort();
+        }
     }
 
     #[derive(Clone, Debug, Default)]
@@ -3350,6 +3621,7 @@ mod tests {
                 inventory: Arc::new(crate::services::InertInventory),
                 deploys: Arc::new(crate::services::InertDeploys),
             }),
+            progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         });
         let (mcp_origin, mcp_task) = serve(streamable_http_router(handler)).await;
         let (_, response) = post_mcp(
@@ -3645,6 +3917,7 @@ mod tests {
                 url::Url::parse(&format!("{grafana_origin}/")).unwrap(),
                 std::time::Duration::from_secs(1),
             ))),
+            progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         });
         let (origin, mcp_task) = serve(streamable_http_router(handler)).await;
         let (_, response) = post_mcp(
@@ -3704,6 +3977,7 @@ mod tests {
                 url::Url::parse(&format!("{grafana_origin}/")).unwrap(),
                 std::time::Duration::from_secs(1),
             ))),
+            progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         });
         let cancellation = Arc::new(Notify::new());
         let cancellation_signal = Arc::clone(&cancellation);
@@ -3968,6 +4242,7 @@ mod tests {
         services.deploys = Arc::new(CancellingDeploys(cancelled.clone()));
         let handler = HomelabMcp {
             services: Arc::new(services),
+            progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         };
         let now = chrono::Utc::now();
         let machine = Machine {

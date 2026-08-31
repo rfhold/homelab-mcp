@@ -35,6 +35,7 @@ The current worktree service:
 - uses Kuri's generic private `mcp` crate at a reviewed immutable Git revision;
 - serves MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
 - uses `#[mcp::progressive_server]` to generate read-only query and operationally consequential exec tools for Grafana, Tekton, Kubernetes, and Ceph;
+- starts the request-scoped `ProgressHeartbeat` guard in every generated `#[action]` handler;
 - exposes ten Grafana query actions, two Grafana render actions, bounded silence creation, eight Tekton reads, three Tekton mutations, four Kubernetes reads, five Kubernetes mutations, ten Ceph reads, and five Ceph OSD mutations;
 - exposes progressive `machines` inventory actions and `deploys` catalog and run actions;
 - queries Grafana's HTTP API through fixed Loki, Mimir, Tempo, and Pyroscope datasource UIDs;
@@ -74,6 +75,10 @@ The [Kubernetes tool specifications](../kubernetes/README.md) own implemented Ku
 6. The service validates the selected query or exec action arguments.
 7. The service contacts only fixed integration routes, or runs one catalog deploy against one exact machine.
 8. The action returns a semantic `McpToolResult`.
+
+The 56 generated `#[action]` handlers support the MCP protocol progress notification independently from `#[mcp::progressive_server]` action discovery and filtering. A client opts in by supplying `_meta.progressToken`. While the action remains active, `ProgressHeartbeat` emits the first `notifications/progress` event after ten seconds and repeats every ten seconds. The reporter preserves string and integer tokens exactly. Progress starts at `1`, strictly increases, omits `total`, and uses only the fixed message `Request is still running`.
+
+The heartbeat supplies periodic SSE traffic while work remains active. It does not guarantee proxy or client timeout behavior. A request without a progress token starts no reporter, and a short action emits no progress event. Handler completion drops the guard and aborts the reporter. A notification failure stops only the reporter. Existing cancellation, results, timeouts, and mutation outcome-unknown semantics remain unchanged.
 
 ## Trust Boundaries
 
