@@ -12,7 +12,7 @@ chrono-tz = "0.10.4"
 getrandom = "0.4.3"
 http = "1.4.0"
 libc = "0.2.183"
-mcp = { git = "https://git.holdenitdown.net/rfhold/kuri.git", rev = "184ce47ba45537ccb310de48a9b918d9423f3460", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }
+mcp = { git = "https://git.holdenitdown.net/rfhold/kuri.git", rev = "99d0fe1883fd177e7b5eb1254a220cb3d0e86814", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }

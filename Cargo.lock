@@ -1430,6 +1430,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jaq-core"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6fda09ee08c84c81293fdf811d9ebaa87b327557b5391f290c926d728c2ddd4"
+dependencies = [
+ "aho-corasick",
+ "base64",
+ "chrono",
+ "hifijson",
+ "jaq-interpret",
+ "libm",
+ "log",
+ "regex",
+ "urlencoding",
+]
+
+[[package]]
 name = "jaq-interpret"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1451,6 +1468,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0346d7d3146cdda8acd929581f3d6626a332356c74d5c95aeaffaac2eb6dee82"
 dependencies = [
  "chumsky",
+ "jaq-syn",
+]
+
+[[package]]
+name = "jaq-std"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfbaa55578fd3b70433b594a370741e0c364e4afff92cc0099623fce87311bc1"
+dependencies = [
  "jaq-syn",
 ]
 
@@ -1677,15 +1703,17 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mcp"
 version = "0.1.0"
-source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=184ce47ba45537ccb310de48a9b918d9423f3460#184ce47ba45537ccb310de48a9b918d9423f3460"
+source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=99d0fe1883fd177e7b5eb1254a220cb3d0e86814#99d0fe1883fd177e7b5eb1254a220cb3d0e86814"
 dependencies = [
  "aes-gcm",
  "axum",
  "base64",
  "cookie",
  "futures-util",
+ "jaq-core",
  "jaq-interpret",
  "jaq-parse",
+ "jaq-std",
  "jsonwebtoken",
  "mcp-macros",
  "opentelemetry",
@@ -1709,7 +1737,7 @@ dependencies = [
 [[package]]
 name = "mcp-macros"
 version = "0.1.0"
-source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=184ce47ba45537ccb310de48a9b918d9423f3460#184ce47ba45537ccb310de48a9b918d9423f3460"
+source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=99d0fe1883fd177e7b5eb1254a220cb3d0e86814#99d0fe1883fd177e7b5eb1254a220cb3d0e86814"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2416,6 +2444,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -3694,6 +3734,12 @@ dependencies = [
  "percent-encoding",
  "serde",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "utf8_iter"
