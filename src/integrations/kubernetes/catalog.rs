@@ -68,6 +68,11 @@ impl KubernetesCatalog {
                     .query_cancelled(query, cancellation.as_mut())
                     .await
             }
+            QueryCommand::PodLogs { cluster, query } => {
+                self.client(cluster)?
+                    .pod_logs_cancelled(query, cancellation.as_mut())
+                    .await
+            }
         }
     }
 

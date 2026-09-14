@@ -103,7 +103,7 @@ Runtime configuration defines one through 32 exact cluster objects and rejects u
 
 The Tekton deployment kubeconfig serves only as provider bootstrap authority. The runtime uses dedicated reduced credentials for one combined exact-RBAC ServiceAccount in each target cluster.
 
-Each declared runtime ServiceAccount receives cluster-wide fixed reads, exact get-only discovery routes, and only the approved curated writes. It receives no application wildcard, Secret, ConfigMap, arbitrary CRD, pod-log, exec, attach, proxy, port-forward, node-write, force-delete, or general mutation authority. Kubernetes may separately grant broader authenticated discovery through `system:discovery`; the application grant does not remove inherited defaults.
+Each declared runtime ServiceAccount receives cluster-wide fixed reads, exact get-only discovery routes, core `pods/log` `get`, and only the approved curated writes. It receives no authority for application wildcards, Secrets, ConfigMaps, arbitrary CRDs, any other Pod subresource, extra pod-log verbs, exec, attach, proxy, port-forward, node writes, force deletion, or general mutations. Kubernetes may separately grant broader authenticated discovery through `system:discovery`; the application grant does not remove inherited defaults.
 
 The deployment mounts runtime kubeconfigs separately from provider credentials, application secrets, and OAuth key material. NetworkPolicy derives each cluster egress port from the same validated server URL, using its explicit port or HTTPS default 443, and pairs it with only that cluster's configured endpoint CIDRs.
 

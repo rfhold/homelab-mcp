@@ -909,6 +909,7 @@ describe("standalone resource topology", () => {
     const expectedRules = [
       { nonResourceURLs: ["/api", "/apis", "/version", "/api/v1", "/apis/apps/v1", "/apis/autoscaling/v2", "/apis/batch/v1", "/apis/ceph.rook.io/v1", "/apis/cert-manager.io/v1", "/apis/discovery.k8s.io/v1", "/apis/events.k8s.io/v1", "/apis/gateway.networking.k8s.io/v1", "/apis/kafka.strimzi.io/v1beta2", "/apis/metrics.k8s.io/v1beta1", "/apis/networking.k8s.io/v1", "/apis/policy/v1", "/apis/postgresql.cnpg.io/v1", "/apis/storage.k8s.io/v1", "/apis/velero.io/v1"], verbs: ["get"] },
       { apiGroups: [""], resources: ["namespaces", "nodes", "pods", "services", "persistentvolumeclaims"], verbs: ["get", "list"] },
+      { apiGroups: [""], resources: ["pods/log"], verbs: ["get"] },
       { apiGroups: ["events.k8s.io"], resources: ["events"], verbs: ["get", "list"] },
       { apiGroups: ["apps"], resources: ["deployments", "statefulsets", "daemonsets", "replicasets"], verbs: ["get", "list"] },
       { apiGroups: ["batch"], resources: ["jobs", "cronjobs"], verbs: ["get", "list"] },
@@ -937,7 +938,8 @@ describe("standalone resource topology", () => {
       );
       assert.deepEqual(role.inputs.rules, expectedRules);
       const serialized = JSON.stringify(role.inputs.rules);
-      assert.doesNotMatch(serialized, /(?:"\*"|secrets|configmaps|pods\/log|exec|attach)/);
+      assert.doesNotMatch(serialized, /(?:"\*"|secrets|configmaps|exec|attach)/);
+      assert.equal((serialized.match(/pods\/log/g) ?? []).length, 1);
       assert.doesNotMatch(serialized, /token/);
     }
   });

@@ -27,6 +27,18 @@ pub enum QueryInput {
         namespace: Option<String>,
         name: String,
     },
+    PodLogs {
+        cluster: String,
+        namespace: String,
+        pod: String,
+        pod_uid: String,
+        container: String,
+        instance: PodLogInstance,
+        #[schemars(range(min = 1, max = 1_000))]
+        tail_lines: Option<u16>,
+        #[schemars(range(min = 1, max = 262_144))]
+        max_bytes: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -36,6 +48,39 @@ pub struct ClusterListInput {}
 impl ClusterListInput {
     pub fn validate(self) -> Result<QueryCommand, ValidationError> {
         QueryInput::ClusterList {}.validate()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PodLogsInput {
+    pub cluster: String,
+    pub namespace: String,
+    pub pod: String,
+    pub pod_uid: String,
+    pub container: String,
+    pub instance: PodLogInstance,
+    /// Number of trailing lines, from 1 through 1,000. Defaults to 200.
+    #[schemars(range(min = 1, max = 1_000))]
+    pub tail_lines: Option<u16>,
+    /// Maximum returned UTF-8 bytes, from 1 through 262,144. Defaults to 65,536.
+    #[schemars(range(min = 1, max = 262_144))]
+    pub max_bytes: Option<u32>,
+}
+
+impl PodLogsInput {
+    pub fn validate(self) -> Result<QueryCommand, ValidationError> {
+        QueryInput::PodLogs {
+            cluster: self.cluster,
+            namespace: self.namespace,
+            pod: self.pod,
+            pod_uid: self.pod_uid,
+            container: self.container,
+            instance: self.instance,
+            tail_lines: self.tail_lines,
+            max_bytes: self.max_bytes,
+        }
+        .validate()
     }
 }
 
@@ -156,6 +201,10 @@ pub enum QueryCommand {
         cluster: String,
         query: ResourceQuery,
     },
+    PodLogs {
+        cluster: String,
+        query: PodLogsQuery,
+    },
 }
 
 impl QueryInput {
@@ -201,8 +250,95 @@ impl QueryInput {
                 }
                 .validate()?,
             }),
+            Self::PodLogs {
+                cluster,
+                namespace,
+                pod,
+                pod_uid,
+                container,
+                instance,
+                tail_lines,
+                max_bytes,
+            } if valid_catalog_name(&cluster) => Ok(QueryCommand::PodLogs {
+                cluster,
+                query: PodLogsQueryInput {
+                    namespace,
+                    pod,
+                    pod_uid,
+                    container,
+                    instance,
+                    tail_lines,
+                    max_bytes,
+                }
+                .validate()?,
+            }),
             _ => Err(ValidationError),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PodLogInstance {
+    Current,
+    Previous,
+}
+
+#[derive(Debug, Clone)]
+pub struct PodLogsQueryInput {
+    pub namespace: String,
+    pub pod: String,
+    pub pod_uid: String,
+    pub container: String,
+    pub instance: PodLogInstance,
+    pub tail_lines: Option<u16>,
+    pub max_bytes: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PodLogsQuery {
+    pub namespace: String,
+    pub pod: String,
+    pub pod_uid: String,
+    pub container: String,
+    pub instance: PodLogInstance,
+    pub tail_lines: u16,
+    pub max_bytes: u32,
+}
+
+impl PodLogsQueryInput {
+    pub fn validate(self) -> Result<PodLogsQuery, ValidationError> {
+        let tail_lines = self.tail_lines.unwrap_or(200);
+        let max_bytes = self.max_bytes.unwrap_or(65_536);
+        if !valid_namespace(&self.namespace)
+            || !valid_object_name(&self.pod)
+            || !valid_dns_label(&self.container)
+            || !valid_uid(&self.pod_uid)
+            || !(1..=1_000).contains(&tail_lines)
+            || !(1..=262_144).contains(&max_bytes)
+        {
+            return Err(ValidationError);
+        }
+        Ok(PodLogsQuery {
+            namespace: self.namespace,
+            pod: self.pod,
+            pod_uid: self.pod_uid,
+            container: self.container,
+            instance: self.instance,
+            tail_lines,
+            max_bytes,
+        })
+    }
+}
+
+impl PodLogsQuery {
+    pub(super) fn is_valid(&self) -> bool {
+        valid_namespace(&self.namespace)
+            && valid_object_name(&self.pod)
+            && valid_dns_label(&self.container)
+            && valid_uid(&self.pod_uid)
+            && (1..=1_000).contains(&self.tail_lines)
+            && (1..=262_144).contains(&self.max_bytes)
     }
 }
 
@@ -967,6 +1103,14 @@ fn valid_dns_label(value: &str) -> bool {
             .is_some_and(u8::is_ascii_alphanumeric)
 }
 
+fn valid_uid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))
+}
+
 fn valid_label_segment(value: &str, empty_allowed: bool) -> bool {
     if value.is_empty() {
         return empty_allowed;
@@ -1151,6 +1295,83 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn pod_logs_inputs_are_strict_bounded_and_defaulted() {
+        let action: QueryInput = serde_json::from_str(
+            r#"{"action":"pod_logs","cluster":"cluster","namespace":"ns","pod":"pod-1","pod_uid":"uid_1","container":"app","instance":"previous","tail_lines":1,"max_bytes":262144}"#,
+        )
+        .unwrap();
+        let QueryCommand::PodLogs { cluster, query } = action.validate().unwrap() else {
+            panic!()
+        };
+        assert_eq!(cluster, "cluster");
+        assert_eq!(query.instance, PodLogInstance::Previous);
+        assert_eq!(query.tail_lines, 1);
+        assert_eq!(query.max_bytes, 262_144);
+
+        let input: PodLogsInput = serde_json::from_str(
+            r#"{"cluster":"cluster","namespace":"ns","pod":"pod-1","pod_uid":"uid_1","container":"app","instance":"current"}"#,
+        )
+        .unwrap();
+        let QueryCommand::PodLogs { cluster, query } = input.validate().unwrap() else {
+            panic!()
+        };
+        assert_eq!(cluster, "cluster");
+        assert_eq!(query.tail_lines, 200);
+        assert_eq!(query.max_bytes, 65_536);
+        assert_eq!(query.instance, PodLogInstance::Current);
+
+        let schema = serde_json::to_value(schemars::schema_for!(PodLogsInput)).unwrap();
+        assert_eq!(schema["properties"]["tail_lines"]["minimum"], 1);
+        assert_eq!(schema["properties"]["tail_lines"]["maximum"], 1_000);
+        assert_eq!(schema["properties"]["max_bytes"]["minimum"], 1);
+        assert_eq!(schema["properties"]["max_bytes"]["maximum"], 262_144);
+
+        for payload in [
+            r#"{"cluster":"cluster","namespace":"ns","pod":"pod","pod_uid":"uid","container":"app","instance":"future"}"#,
+            r#"{"cluster":"cluster","namespace":"ns","pod":"pod","pod_uid":"uid","container":"app","instance":"current","follow":true}"#,
+            r#"{"cluster":"cluster","namespace":"ns","pod":"pod","container":"app","instance":"current"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<PodLogsInput>(payload).is_err(),
+                "accepted {payload}"
+            );
+        }
+        for (tail_lines, max_bytes) in [(0, 1), (1_001, 1), (1, 0), (1, 262_145)] {
+            assert!(
+                PodLogsQueryInput {
+                    namespace: "ns".into(),
+                    pod: "pod".into(),
+                    pod_uid: "uid".into(),
+                    container: "app".into(),
+                    instance: PodLogInstance::Previous,
+                    tail_lines: Some(tail_lines),
+                    max_bytes: Some(max_bytes),
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        for (field, value) in [
+            ("namespace", "BAD"),
+            ("pod", "--all"),
+            ("pod_uid", "bad uid"),
+            ("container", "bad.name"),
+        ] {
+            let mut input = serde_json::json!({
+                "cluster":"cluster","namespace":"ns","pod":"pod","pod_uid":"uid",
+                "container":"app","instance":"previous"
+            });
+            input[field] = serde_json::json!(value);
+            assert!(
+                serde_json::from_value::<PodLogsInput>(input)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
     }
 
     #[test]

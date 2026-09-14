@@ -114,6 +114,7 @@ impl Services {
             config.oidc.client_secret.expose().to_owned(),
             config.integrations.grafana.token.expose().to_owned(),
         ];
+        add_common_tekton_redactions(&mut redactions, &config.integrations.tekton);
         if let Ok(database_url) = Url::parse(&config.database.url)
             && let Some(password) = database_url.password()
         {
@@ -163,7 +164,7 @@ impl Services {
                 config.integrations.grafana.origin.clone(),
                 config.integrations.grafana.token.clone(),
             )?,
-            tekton: TektonClient::production(&config.integrations.tekton, redactions)?,
+            tekton: TektonClient::production(&config.integrations.tekton, redactions.clone())?,
             kubernetes: KubernetesCatalog::new(
                 config
                     .integrations
@@ -178,6 +179,7 @@ impl Services {
                             cluster.context.clone(),
                             cluster.name.clone(),
                         )
+                        .with_redactions(redactions.clone())
                     })
                     .collect(),
             )?,
@@ -213,6 +215,16 @@ impl Services {
             deploys: Arc::new(InertDeploys),
         }
     }
+}
+
+fn add_common_tekton_redactions(
+    redactions: &mut Vec<String>,
+    config: &crate::config::TektonConfig,
+) {
+    redactions.extend([
+        config.forgejo_token.expose().to_owned(),
+        config.pac_incoming_secret.expose().to_owned(),
+    ]);
 }
 
 #[cfg(test)]
@@ -266,5 +278,30 @@ impl DeployService for InertDeploys {
         _: Pin<&'a mut (dyn Future<Output = ()> + Send)>,
     ) -> ServiceFuture<'a, Result<DeployResult, DeployError>> {
         Box::pin(async { Err(DeployError::DeployNotFound) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Secret, TektonConfig};
+
+    #[test]
+    fn common_redactions_include_tekton_credentials_for_kubernetes() {
+        let config = TektonConfig {
+            forgejo_origin: Url::parse("https://forgejo.example/").unwrap(),
+            forgejo_token: Secret::for_test("forgejo-secret"),
+            namespace: "pipelines".into(),
+            pac_origin: Url::parse("http://pac.example/").unwrap(),
+            pac_incoming_secret: Secret::for_test("pac-secret"),
+        };
+        let mut redactions = vec!["existing-secret".to_owned()];
+
+        add_common_tekton_redactions(&mut redactions, &config);
+
+        assert_eq!(
+            redactions,
+            ["existing-secret", "forgejo-secret", "pac-secret"]
+        );
     }
 }

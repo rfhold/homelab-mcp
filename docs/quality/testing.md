@@ -204,11 +204,13 @@ Tests must cover:
 - proof that the entire global scope set gates every tool and does not enforce per-action access;
 - a unique one-through-32 cluster catalog, exact cluster selection, and initial Pantheon and Romulus entries;
 - rejection of caller-controlled executables, kubeconfigs, contexts, API servers, arguments, verbs, resources, API paths, selectors, and output templates;
-- `cluster_list`, `capability_list`, `resource_list`, and `resource_get` validation and normalized output, including schema-visible namespace requirements and disjoint kind subsets;
+- `cluster_list`, `capability_list`, `resource_list`, `resource_get`, and `pod_logs` validation and normalized output, including schema-visible namespace requirements and disjoint kind subsets;
 - every approved built-in and fixed platform resource kind, API mapping, namespaced rule, and unsupported capability result;
 - exact label maps with at most eight entries and rejection of arbitrary selector syntax;
 - five-page, 500-inspected, and 100-returned list ceilings with separate source, result, and aggregate truncation fields;
 - conditions capped at 20, Event messages capped at 1,024 UTF-8 bytes each, and Event text capped at 32 KiB per result;
+- Pod UID and safe init, application, and ephemeral container lifecycle states capped at 32 total, including current and last termination fields and omission of unsafe container details;
+- exact Pod-log identity preflight and postflight replacement detection, current and previous instances, fixed paths and server-owned parameters, 1,000-line and 262,144-byte ceilings, timestamps, UTF-8 safety, truncation, known-secret and static kubeconfig-token redaction, and safe failures;
 - normalized allowlists with no raw objects, Secrets, ConfigMaps, arbitrary labels, arbitrary annotations, or arbitrary custom resources;
 - two concurrent `kubectl` processes, an outer deadline of at most 30 seconds, 4 MiB stdout, 32 KiB stderr, cancellation, child termination, and permit release;
 - safe semantic errors with no command, path, credential, API origin, stdout, stderr, or raw-object disclosure, including unknown outcomes for every non-success mutation process result after spawn;
@@ -220,7 +222,7 @@ Tests must cover:
 
 Deployment tests verify dedicated runtime kubeconfigs, strict normalized cluster configuration, per-server NetworkPolicy ports, and one combined exact-RBAC ServiceAccount per target cluster. They prove that the Tekton provider kubeconfig never reaches the runtime.
 
-RBAC declaration tests verify fixed cluster-wide reads, exact curated writes, exact get-only discovery routes, and no application wildcard permissions. Standard Kubernetes may independently grant broader authenticated discovery through `system:discovery`; live effective-RBAC checks must account for inherited defaults. Representative denials must cover Secrets, ConfigMaps, arbitrary CRDs, pod logs, exec, attach, proxy, port forwarding, node writes, force deletion, and general mutation.
+RBAC declaration tests verify fixed cluster-wide reads, exact core `pods/log` `get`, exact curated writes, exact get-only discovery routes, and no application wildcard permissions. They must prove that `pods/log` has no `list`, `watch`, or mutation verb. Standard Kubernetes may independently grant broader authenticated discovery through `system:discovery`; live effective-RBAC checks must account for inherited defaults. Representative denials must cover Secrets, ConfigMaps, arbitrary CRDs, other Pod subresources, exec, attach, proxy, port forwarding, node writes, force deletion, and general mutation.
 
 Preview evidence requires exact target-specific approval. It must verify identity, effective RBAC, API reachability, catalog behavior, representative reads, denied exclusions, server dry-run, controlled accepted mutations, and uncertain-outcome recovery.
 

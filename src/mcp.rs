@@ -45,7 +45,7 @@ use crate::{
         Error as KubernetesError,
         actions::{
             CapabilityListInput, ClusterListInput, CronjobSuspendInput, CronjobTriggerInput,
-            ExecCommand as KubernetesExecCommand, PodDeleteInput,
+            ExecCommand as KubernetesExecCommand, PodDeleteInput, PodLogsInput,
             QueryCommand as KubernetesQueryCommand, ResourceGetInput, ResourceListInput,
             ValidationError as KubernetesValidationError, WorkloadRestartInput, WorkloadScaleInput,
         },
@@ -1026,6 +1026,18 @@ impl HomelabMcp {
     ) -> ServerResult<McpToolResult> {
         let _progress_heartbeat = self.progress_heartbeat(&context);
         self.dispatch_kubernetes_query(input.validate(), "resource", context.cancelled())
+            .await
+    }
+
+    /// Read bounded current or previous logs for one exact Pod container and Pod UID.
+    #[action(tool = "kubernetes_query", name = "pod_logs")]
+    async fn kubernetes_pod_logs(
+        &self,
+        input: PodLogsInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let _progress_heartbeat = self.progress_heartbeat(&context);
+        self.dispatch_kubernetes_query(input.validate(), "Pod log", context.cancelled())
             .await
     }
 
@@ -2855,7 +2867,8 @@ mod tests {
                 "cluster_list",
                 "capability_list",
                 "resource_list",
-                "resource_get"
+                "resource_get",
+                "pod_logs"
             ])
         );
         assert_eq!(
@@ -2884,7 +2897,7 @@ mod tests {
         let kubernetes_actions = kubernetes_help["result"]["structuredContent"]["result"]
             .as_array()
             .unwrap();
-        assert_eq!(kubernetes_actions.len(), 4);
+        assert_eq!(kubernetes_actions.len(), 5);
         for action in kubernetes_actions {
             if matches!(
                 action["action"].as_str(),
@@ -2923,6 +2936,40 @@ mod tests {
                 .get("namespace")
                 .is_none()
         );
+        let pod_logs_schema = &kubernetes_actions
+            .iter()
+            .find(|action| action["action"] == "pod_logs")
+            .unwrap()["input_schema"];
+        assert_eq!(pod_logs_schema["additionalProperties"], false);
+        assert_eq!(
+            pod_logs_schema["properties"]["instance"]["enum"],
+            json!(["current", "previous"])
+        );
+        assert_eq!(pod_logs_schema["properties"]["tail_lines"]["minimum"], 1);
+        assert_eq!(
+            pod_logs_schema["properties"]["tail_lines"]["maximum"],
+            1_000
+        );
+        assert_eq!(pod_logs_schema["properties"]["max_bytes"]["minimum"], 1);
+        assert_eq!(
+            pod_logs_schema["properties"]["max_bytes"]["maximum"],
+            262_144
+        );
+        for required in [
+            "cluster",
+            "namespace",
+            "pod",
+            "pod_uid",
+            "container",
+            "instance",
+        ] {
+            assert!(
+                pod_logs_schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(required))
+            );
+        }
         let (_, clusters) = post_mcp(
             &endpoint,
             request(

@@ -2,7 +2,7 @@
 
 ## Query Actions
 
-`kubernetes_query` exposes four actions:
+`kubernetes_query` exposes five actions:
 
 | Action | Contract |
 | --- | --- |
@@ -10,6 +10,7 @@
 | `capability_list` | Report support for all approved kinds, or a unique nonempty requested subset, on one exact cluster. |
 | `resource_list` | List one approved kind on one exact cluster, with required namespace for namespaced kinds, exact labels, and a 1-through-100 result limit. |
 | `resource_get` | Read one exact approved object by cluster, kind, namespace when required, and name. |
+| `pod_logs` | Read bounded current or previous logs for one exact container on one exact Pod identity. |
 
 `resource_list` will default its result limit to 50. It will accept at most eight exact key-value label matches. It will not accept set expressions, inequality, caller-built selector text, field selectors, or name patterns.
 
@@ -48,7 +49,7 @@ The [Ceph Dashboard tools](../../ceph/README.md) own native Ceph operational sta
 
 ## Normalized Results
 
-Every resource result will contain an approved subset of identity, API version, namespace, name, creation time, status, details, and conditions. `src/integrations/kubernetes/normalize.rs` with `Resource` and `ResourceList` will own the output model.
+Every resource result will contain an approved subset of identity, API version, namespace, name, creation time, status, details, and conditions. Pod results also contain the Pod UID. `src/integrations/kubernetes/normalize.rs` with `Resource` and `ResourceList` will own the output model.
 
 The normalized details can include:
 
@@ -65,9 +66,23 @@ The normalized details can include:
 
 Conditions will contain at most 20 entries. Each condition will use allowlisted type, status, reason, and transition time fields.
 
+Pod results include at most 32 lifecycle statuses in Kubernetes source order: init containers, application containers, then ephemeral containers. The status metadata reports source `count`, `returned`, and `truncated`. Each item includes only container kind, name, ready and started flags, restart count, current state (`running`, `waiting`, `terminated`, or `unknown`), reason, current termination exit code, signal, start time, and finish time, plus the equivalent useful `last_*` termination fields.
+
 Each Event message will contain at most 1,024 UTF-8 bytes. One result will contain at most 32 KiB of Event message text. Truncation will preserve valid UTF-8 and will remain explicit.
 
-Results will not include raw specifications, arbitrary status extensions, arbitrary labels, arbitrary annotations, managed fields, container environments, volumes, or Secret references.
+Results will not include raw specifications, arbitrary status extensions, arbitrary labels, arbitrary annotations, managed fields, termination messages, image names or IDs, container IDs, container environments, arguments, mounts, volumes, or Secret references.
+
+## Pod Log Semantics
+
+`pod_logs` requires exact `cluster`, `namespace`, `pod`, `pod_uid`, `container`, and `instance` fields. `instance` is either `current` or `previous`. `tail_lines` defaults to 200 and is bounded from 1 through 1,000. `max_bytes` defaults to 65,536 and is bounded from 1 through 262,144.
+
+Before requesting logs, the client reads the exact Pod through the fixed core API path. It rejects a name, namespace, or UID mismatch and rejects a container absent from the Pod's init, application, and ephemeral container specifications and statuses. After obtaining the bounded log bytes, it repeats the exact Pod read and discards the bytes unless the same identity and container checks still pass. Requiring both checks prevents a caller from receiving logs from a replacement Pod that reused the same name during the request.
+
+The subsequent request uses only the fixed core Pod log path. Server-owned parameters set the exact container, `tailLines`, `limitBytes`, and `timestamps=true`; `previous=true` is present only for the previous instance. The client never follows logs, streams a response, or accepts caller-selected paths or query parameters.
+
+The normalized result reports cluster, namespace, Pod name and UID, container, current or previous instance, timestamp use, requested line and byte limits, text, line count, line and byte truncation flags, redaction, and aggregate truncation. Invalid UTF-8 is replaced safely and local truncation preserves UTF-8 boundaries.
+
+Known application secrets supplied to the service and static bearer tokens embedded in target kubeconfigs are replaced with `[REDACTED]`. This is defense in depth, not complete data-loss prevention: arbitrary workload-emitted secrets that are not in the known redaction set cannot be recognized. Callers should continue to use Grafana and Loki for broader log search and retention.
 
 ## Pagination and Truncation
 

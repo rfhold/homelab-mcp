@@ -34,11 +34,51 @@ pub struct Resource {
     pub api_version: String,
     pub namespace: Option<String>,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
     pub created_at: Option<String>,
     pub status: Option<String>,
     pub details: BTreeMap<String, String>,
     pub details_truncated: bool,
     pub conditions: Vec<Condition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container_statuses: Option<ContainerStatuses>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerKind {
+    Init,
+    Application,
+    Ephemeral,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct ContainerStatus {
+    pub kind: ContainerKind,
+    pub name: String,
+    pub ready: Option<bool>,
+    pub started: Option<bool>,
+    pub restart_count: u64,
+    pub state: String,
+    pub reason: Option<String>,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub last_reason: Option<String>,
+    pub last_exit_code: Option<i32>,
+    pub last_signal: Option<i32>,
+    pub last_started_at: Option<String>,
+    pub last_finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct ContainerStatuses {
+    pub count: u16,
+    pub returned: u16,
+    pub truncated: bool,
+    pub items: Vec<ContainerStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -80,6 +120,26 @@ pub enum QueryResult {
     Capabilities(CapabilityCatalog),
     Resources(ResourceList),
     Resource(Resource),
+    PodLogs(PodLogs),
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct PodLogs {
+    pub cluster: String,
+    pub namespace: String,
+    pub pod: String,
+    pub pod_uid: String,
+    pub container: String,
+    pub instance: String,
+    pub timestamps: bool,
+    pub tail_lines: u16,
+    pub max_bytes: u32,
+    pub text: String,
+    pub line_count: u16,
+    pub tail_truncated: bool,
+    pub byte_truncated: bool,
+    pub redacted: bool,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
@@ -114,6 +174,17 @@ pub(crate) fn resource(kind: ResourceKind, value: &Value) -> Result<Resource, Er
     };
     let conditions = normalize_conditions(value);
     let status = status_for(kind, value);
+    let uid = if kind == ResourceKind::Pod {
+        Some(
+            token_text(metadata.get("uid"), 128)
+                .ok_or(Error::InvalidResponse)?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    let container_statuses =
+        (kind == ResourceKind::Pod).then(|| normalize_container_statuses(value));
     let mut details = BTreeMap::new();
     let mut details_truncated = false;
     match kind {
@@ -347,12 +418,95 @@ pub(crate) fn resource(kind: ResourceKind, value: &Value) -> Result<Resource, Er
         api_version: kind.api_version(),
         namespace,
         name,
+        uid,
         created_at: token_text(metadata.get("creationTimestamp"), 64).map(str::to_owned),
         status,
         details,
         details_truncated,
         conditions,
+        container_statuses,
     })
+}
+
+fn normalize_container_statuses(value: &Value) -> ContainerStatuses {
+    const MAX_CONTAINER_STATUSES: usize = 32;
+    let groups = [
+        (ContainerKind::Init, "/status/initContainerStatuses"),
+        (ContainerKind::Application, "/status/containerStatuses"),
+        (
+            ContainerKind::Ephemeral,
+            "/status/ephemeralContainerStatuses",
+        ),
+    ];
+    let count = groups
+        .iter()
+        .map(|(_, pointer)| {
+            value
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        })
+        .sum::<usize>();
+    let items = groups
+        .into_iter()
+        .flat_map(|(kind, pointer)| {
+            value
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(move |status| (kind, status))
+        })
+        .take(MAX_CONTAINER_STATUSES)
+        .filter_map(|(kind, status)| normalize_container_status(kind, status))
+        .collect::<Vec<_>>();
+    ContainerStatuses {
+        count: count.min(usize::from(u16::MAX)) as u16,
+        returned: items.len() as u16,
+        truncated: count > MAX_CONTAINER_STATUSES,
+        items,
+    }
+}
+
+fn normalize_container_status(kind: ContainerKind, value: &Value) -> Option<ContainerStatus> {
+    let name = token_text(value.get("name"), 253)?.to_owned();
+    let current = value.get("state");
+    let (state, state_value) = if let Some(running) = current.and_then(|v| v.get("running")) {
+        ("running", Some(running))
+    } else if let Some(waiting) = current.and_then(|v| v.get("waiting")) {
+        ("waiting", Some(waiting))
+    } else if let Some(terminated) = current.and_then(|v| v.get("terminated")) {
+        ("terminated", Some(terminated))
+    } else {
+        ("unknown", None)
+    };
+    let last = value.pointer("/lastState/terminated");
+    Some(ContainerStatus {
+        kind,
+        name,
+        ready: value.get("ready").and_then(Value::as_bool),
+        started: value.get("started").and_then(Value::as_bool),
+        restart_count: value
+            .get("restartCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        state: state.to_owned(),
+        reason: token_text(state_value.and_then(|v| v.get("reason")), 128).map(str::to_owned),
+        exit_code: signed_i32(state_value.and_then(|v| v.get("exitCode"))),
+        signal: signed_i32(state_value.and_then(|v| v.get("signal"))),
+        started_at: token_text(state_value.and_then(|v| v.get("startedAt")), 64).map(str::to_owned),
+        finished_at: token_text(state_value.and_then(|v| v.get("finishedAt")), 64)
+            .map(str::to_owned),
+        last_reason: token_text(last.and_then(|v| v.get("reason")), 128).map(str::to_owned),
+        last_exit_code: signed_i32(last.and_then(|v| v.get("exitCode"))),
+        last_signal: signed_i32(last.and_then(|v| v.get("signal"))),
+        last_started_at: token_text(last.and_then(|v| v.get("startedAt")), 64).map(str::to_owned),
+        last_finished_at: token_text(last.and_then(|v| v.get("finishedAt")), 64).map(str::to_owned),
+    })
+}
+
+fn signed_i32(value: Option<&Value>) -> Option<i32> {
+    value?.as_i64()?.try_into().ok()
 }
 
 fn normalize_conditions(value: &Value) -> Vec<Condition> {
@@ -398,13 +552,16 @@ fn status_for(kind: ResourceKind, value: &Value) -> Option<String> {
 }
 
 fn restart_count(value: &Value) -> u64 {
-    value
-        .pointer("/status/containerStatuses")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|v| v.get("restartCount").and_then(Value::as_u64))
-        .fold(0_u64, u64::saturating_add)
+    [
+        "/status/initContainerStatuses",
+        "/status/containerStatuses",
+        "/status/ephemeralContainerStatuses",
+    ]
+    .into_iter()
+    .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_array))
+    .flatten()
+    .filter_map(|v| v.get("restartCount").and_then(Value::as_u64))
+    .fold(0_u64, u64::saturating_add)
 }
 
 fn normalize_pod_metric(details: &mut BTreeMap<String, String>, value: &Value) {
@@ -592,7 +749,7 @@ mod tests {
     #[test]
     fn arbitrary_metadata_and_unreviewed_nested_content_are_omitted() {
         let result = resource(ResourceKind::Pod, &json!({
-            "metadata":{"name":"pod","namespace":"ns","labels":{"app":"SENTINEL"},"annotations":{"note":"SENTINEL"}},
+            "metadata":{"name":"pod","namespace":"ns","uid":"pod-uid","labels":{"app":"SENTINEL"},"annotations":{"note":"SENTINEL"}},
             "spec":{"token":"opaque-SENTINEL-742"}, "data":{"key":"opaque-SENTINEL-742"},
             "status":{"phase":"Running","conditions":[{"type":"Ready","status":"False","reason":"Invalid","message":"opaque-SENTINEL-742"}]}
         })).unwrap();
@@ -600,6 +757,138 @@ mod tests {
         assert!(!encoded.contains("SENTINEL"));
         assert!(!encoded.contains("labels"));
         assert!(!encoded.contains("annotations"));
+    }
+
+    #[test]
+    fn pod_container_lifecycle_statuses_are_safe_ordered_and_complete() {
+        let result = resource(ResourceKind::Pod, &json!({
+            "metadata":{"name":"pod","namespace":"ns","uid":"pod-uid"},
+            "spec":{
+                "containers":[{
+                    "name":"app","image":"private/image","args":["SENTINEL"],
+                    "env":[{"name":"TOKEN","valueFrom":{"secretKeyRef":{"name":"SENTINEL"}}}],
+                    "volumeMounts":[{"name":"SENTINEL","mountPath":"/secret"}]
+                }],
+                "volumes":[{"name":"SENTINEL","secret":{"secretName":"SENTINEL"}}]
+            },
+            "status":{
+                "initContainerStatuses":[{
+                    "name":"init","ready":true,"started":true,"restartCount":1,
+                    "state":{"running":{"startedAt":"2026-01-01T00:00:00Z"}},
+                    "lastState":{"terminated":{"reason":"Completed","exitCode":0,"signal":0,"startedAt":"2025-12-31T23:00:00Z","finishedAt":"2025-12-31T23:01:00Z","message":"SENTINEL"}},
+                    "image":"SENTINEL","imageID":"SENTINEL","containerID":"SENTINEL"
+                }],
+                "containerStatuses":[
+                    {"name":"app","ready":false,"started":false,"restartCount":2,"state":{"waiting":{"reason":"CrashLoopBackOff","message":"SENTINEL"}}},
+                    {"name":"done","restartCount":3,"state":{"terminated":{"reason":"Error","exitCode":17,"signal":9,"startedAt":"2026-01-01T01:00:00Z","finishedAt":"2026-01-01T01:01:00Z","message":"SENTINEL"}}},
+                    {"name":"unknown","restartCount":4,"state":{}}
+                ],
+                "ephemeralContainerStatuses":[{"name":"debugger","restartCount":5,"state":{"running":{}}}]
+            }
+        })).unwrap();
+        assert_eq!(result.uid.as_deref(), Some("pod-uid"));
+        assert_eq!(
+            result.details.get("restarts").map(String::as_str),
+            Some("15")
+        );
+        let statuses = result.container_statuses.as_ref().unwrap();
+        assert_eq!(
+            (statuses.count, statuses.returned, statuses.truncated),
+            (5, 5, false)
+        );
+        assert_eq!(
+            statuses
+                .items
+                .iter()
+                .map(|item| (item.kind, item.name.as_str(), item.state.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (ContainerKind::Init, "init", "running"),
+                (ContainerKind::Application, "app", "waiting"),
+                (ContainerKind::Application, "done", "terminated"),
+                (ContainerKind::Application, "unknown", "unknown"),
+                (ContainerKind::Ephemeral, "debugger", "running"),
+            ]
+        );
+        assert_eq!(statuses.items[0].last_reason.as_deref(), Some("Completed"));
+        assert_eq!(statuses.items[0].last_exit_code, Some(0));
+        assert_eq!(statuses.items[0].last_signal, Some(0));
+        assert_eq!(
+            statuses.items[0].started_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            statuses.items[0].last_finished_at.as_deref(),
+            Some("2025-12-31T23:01:00Z")
+        );
+        assert_eq!(statuses.items[2].exit_code, Some(17));
+        assert_eq!(statuses.items[2].signal, Some(9));
+        let encoded = serde_json::to_string(&result).unwrap();
+        for excluded in [
+            "SENTINEL",
+            "imageID",
+            "containerID",
+            "message",
+            "env",
+            "args",
+            "volumeMounts",
+            "volumes",
+            "secretKeyRef",
+        ] {
+            assert!(
+                !encoded.contains(excluded),
+                "included unsafe field {excluded}"
+            );
+        }
+    }
+
+    #[test]
+    fn pod_container_statuses_have_a_deterministic_total_cap() {
+        let statuses = |prefix: &str, count: usize| {
+            (0..count)
+                .map(|index| json!({"name":format!("{prefix}-{index:02}"),"restartCount":0,"state":{}}))
+                .collect::<Vec<_>>()
+        };
+        let result = resource(
+            ResourceKind::Pod,
+            &json!({
+                "metadata":{"name":"pod","namespace":"ns","uid":"uid"},
+                "status":{
+                    "initContainerStatuses":statuses("init", 16),
+                    "containerStatuses":statuses("app", 16),
+                    "ephemeralContainerStatuses":statuses("ephemeral", 4)
+                }
+            }),
+        )
+        .unwrap();
+        let statuses = result.container_statuses.unwrap();
+        assert_eq!(
+            (statuses.count, statuses.returned, statuses.truncated),
+            (36, 32, true)
+        );
+        assert_eq!(statuses.items[0].name, "init-00");
+        assert_eq!(statuses.items[31].name, "app-15");
+        assert!(
+            statuses
+                .items
+                .iter()
+                .all(|status| status.kind != ContainerKind::Ephemeral)
+        );
+    }
+
+    #[test]
+    fn pod_uid_is_required_and_bounded() {
+        let oversized = "u".repeat(129);
+        for uid in [None, Some("bad uid"), Some(""), Some(oversized.as_str())] {
+            let mut value = json!({"metadata":{"name":"pod","namespace":"ns"}});
+            if let Some(uid) = uid {
+                value["metadata"]["uid"] = json!(uid);
+            }
+            assert_eq!(
+                resource(ResourceKind::Pod, &value),
+                Err(Error::InvalidResponse)
+            );
+        }
     }
 
     #[test]

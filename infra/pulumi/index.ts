@@ -352,6 +352,11 @@ const kubernetesReadRules: k8s.types.input.rbac.v1.PolicyRule[] = [
     verbs: ["get", "list"],
   },
   {
+    apiGroups: [""],
+    resources: ["pods/log"],
+    verbs: ["get"],
+  },
+  {
     apiGroups: ["events.k8s.io"],
     resources: ["events"],
     verbs: ["get", "list"],

@@ -1,9 +1,13 @@
 use std::{
     collections::{BTreeMap, HashSet},
+    fs,
     future::Future,
     path::PathBuf,
     pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,10 +17,13 @@ use serde_json::Value;
 
 use super::{
     Error,
-    actions::{CapabilitiesQuery, ExecCommand, ResourceKind, ResourceQuery, valid_catalog_name},
+    actions::{
+        CapabilitiesQuery, ExecCommand, PodLogInstance, PodLogsQuery, ResourceKind, ResourceQuery,
+        valid_catalog_name,
+    },
     normalize::{
-        self, Capability, CapabilityCatalog, Cluster, ExecResult, ListMetadata, QueryResult,
-        ResourceList,
+        self, Capability, CapabilityCatalog, Cluster, ExecResult, ListMetadata, PodLogs,
+        QueryResult, ResourceList,
     },
     runner::{Operation, Runner},
 };
@@ -33,6 +40,7 @@ pub struct KubernetesConfig {
     pub context: String,
     pub cluster_name: String,
     pub deadline: Duration,
+    pub redactions: Vec<String>,
 }
 
 impl KubernetesConfig {
@@ -50,7 +58,13 @@ impl KubernetesConfig {
             context,
             cluster_name,
             deadline: Duration::from_secs(30),
+            redactions: Vec::new(),
         }
+    }
+
+    pub fn with_redactions(mut self, redactions: Vec<String>) -> Self {
+        self.redactions = redactions;
+        self
     }
 }
 
@@ -59,6 +73,7 @@ pub struct KubernetesClient {
     runner: Runner,
     context: String,
     cluster_name: String,
+    redactions: Arc<Vec<String>>,
 }
 
 impl KubernetesClient {
@@ -66,6 +81,11 @@ impl KubernetesClient {
         if !valid_catalog_name(&config.cluster_name) {
             return Err("invalid Kubernetes cluster name".into());
         }
+        let mut redactions = config.redactions;
+        redactions.extend(static_kubeconfig_tokens(&config.kubeconfig));
+        redactions.retain(|value| !value.is_empty());
+        redactions.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        redactions.dedup();
         let runner = Runner::new(
             config.kubectl_executable,
             config.kubeconfig,
@@ -77,6 +97,7 @@ impl KubernetesClient {
             runner,
             context: config.context,
             cluster_name: config.cluster_name,
+            redactions: Arc::new(redactions),
         })
     }
 
@@ -182,6 +203,81 @@ impl KubernetesClient {
         self.list_cancelled(query, cancellation.as_mut())
             .await
             .map(QueryResult::Resources)
+    }
+
+    #[cfg(test)]
+    pub async fn pod_logs(&self, query: &PodLogsQuery) -> Result<QueryResult, Error> {
+        let mut cancellation = Box::pin(std::future::pending());
+        self.pod_logs_cancelled(query, cancellation.as_mut()).await
+    }
+
+    pub(crate) async fn pod_logs_cancelled(
+        &self,
+        query: &PodLogsQuery,
+        mut cancellation: Pin<&mut (dyn Future<Output = ()> + Send)>,
+    ) -> Result<QueryResult, Error> {
+        if !query.is_valid() {
+            return Err(Error::InvalidArguments);
+        }
+        let pod_path = object_path(ResourceKind::Pod, Some(&query.namespace), Some(&query.pod))?;
+        let pod = parse_json(
+            &self
+                .raw_cancelled(&pod_path, Operation::Query, cancellation.as_mut())
+                .await?,
+        )?;
+        if !pod_matches_log_query(&pod, query) {
+            return Err(Error::NotFound);
+        }
+
+        let previous = query.instance == PodLogInstance::Previous;
+        let mut path = format!(
+            "/api/v1/namespaces/{}/pods/{}/log?container={}&tailLines={}&limitBytes={}&timestamps=true",
+            query.namespace, query.pod, query.container, query.tail_lines, query.max_bytes
+        );
+        if previous {
+            path.push_str("&previous=true");
+        }
+        let bytes = self
+            .raw_cancelled(&path, Operation::Query, cancellation.as_mut())
+            .await?;
+        let pod = parse_json(
+            &self
+                .raw_cancelled(&pod_path, Operation::Query, cancellation.as_mut())
+                .await?,
+        )?;
+        if !pod_matches_log_query(&pod, query) {
+            return Err(Error::NotFound);
+        }
+        let maximum = usize::try_from(query.max_bytes).map_err(|_| Error::InvalidArguments)?;
+        let mut byte_truncated = bytes.len() >= maximum;
+        let mut text = String::from_utf8_lossy(&bytes).into_owned();
+        let mut redacted = false;
+        for secret in self.redactions.iter() {
+            if text.contains(secret) {
+                text = text.replace(secret, "[REDACTED]");
+                redacted = true;
+            }
+        }
+        byte_truncated |= truncate_string_utf8(&mut text, maximum);
+        let line_count = text.lines().count();
+        let tail_truncated = line_count >= usize::from(query.tail_lines);
+        Ok(QueryResult::PodLogs(PodLogs {
+            cluster: self.cluster_name.clone(),
+            namespace: query.namespace.clone(),
+            pod: query.pod.clone(),
+            pod_uid: query.pod_uid.clone(),
+            container: query.container.clone(),
+            instance: if previous { "previous" } else { "current" }.to_owned(),
+            timestamps: true,
+            tail_lines: query.tail_lines,
+            max_bytes: query.max_bytes,
+            text,
+            line_count: line_count.min(usize::from(u16::MAX)) as u16,
+            tail_truncated,
+            byte_truncated,
+            redacted,
+            truncated: tail_truncated || byte_truncated,
+        }))
     }
 
     pub(crate) async fn execute_cancelled(
@@ -322,6 +418,57 @@ impl KubernetesClient {
             .await
             .map(|output| output.stdout)
     }
+}
+
+fn static_kubeconfig_tokens(path: &PathBuf) -> Vec<String> {
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_yaml::from_slice::<Value>(&bytes) else {
+        return Vec::new();
+    };
+    value
+        .get("users")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.pointer("/user/token").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn pod_has_container(pod: &Value, name: &str) -> bool {
+    [
+        "/spec/initContainers",
+        "/spec/containers",
+        "/spec/ephemeralContainers",
+        "/status/initContainerStatuses",
+        "/status/containerStatuses",
+        "/status/ephemeralContainerStatuses",
+    ]
+    .into_iter()
+    .filter_map(|pointer| pod.pointer(pointer).and_then(Value::as_array))
+    .flatten()
+    .any(|container| container.get("name").and_then(Value::as_str) == Some(name))
+}
+
+fn pod_matches_log_query(pod: &Value, query: &PodLogsQuery) -> bool {
+    pod.pointer("/metadata/name").and_then(Value::as_str) == Some(&query.pod)
+        && pod.pointer("/metadata/namespace").and_then(Value::as_str) == Some(&query.namespace)
+        && pod.pointer("/metadata/uid").and_then(Value::as_str) == Some(&query.pod_uid)
+        && pod_has_container(pod, &query.container)
+}
+
+fn truncate_string_utf8(value: &mut String, maximum: usize) -> bool {
+    if value.len() <= maximum {
+        return false;
+    }
+    let mut boundary = maximum;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    true
 }
 
 fn object_path(
@@ -550,8 +697,8 @@ fn base_mutation(first: &str, second: &str, dry_run: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::super::actions::{
-        CapabilitiesInput, ResourceQueryInput, RestartWorkloadKind, ScalableWorkloadKind,
-        valid_object_name,
+        CapabilitiesInput, PodLogsQueryInput, ResourceQueryInput, RestartWorkloadKind,
+        ScalableWorkloadKind, valid_object_name,
     };
     use super::*;
     use std::{
@@ -589,6 +736,20 @@ mod tests {
             name: None,
             labels: BTreeMap::new(),
             limit: Some(limit),
+        }
+        .validate()
+        .unwrap()
+    }
+
+    fn pod_logs_query(instance: PodLogInstance, tail_lines: u16, max_bytes: u32) -> PodLogsQuery {
+        PodLogsQueryInput {
+            namespace: "ns".into(),
+            pod: "pod".into(),
+            pod_uid: "pod-uid".into(),
+            container: "app".into(),
+            instance,
+            tail_lines: Some(tail_lines),
+            max_bytes: Some(max_bytes),
         }
         .validate()
         .unwrap()
@@ -683,7 +844,7 @@ mod tests {
     #[tokio::test]
     async fn list_limits_sort_and_report_metadata() {
         let (client, path) = client(
-            r#"printf '{"items":[{"metadata":{"name":"z","namespace":"ns"},"status":{"phase":"Running"}},{"metadata":{"name":"a","namespace":"ns"},"status":{"phase":"Pending"}}],"metadata":{}}'"#,
+            r#"printf '{"items":[{"metadata":{"name":"z","namespace":"ns","uid":"z-uid"},"status":{"phase":"Running"}},{"metadata":{"name":"a","namespace":"ns","uid":"a-uid"},"status":{"phase":"Pending"}}],"metadata":{}}'"#,
         );
         let QueryResult::Resources(result) = client.query(&query(1)).await.unwrap() else {
             panic!()
@@ -742,7 +903,7 @@ mod tests {
 
     #[tokio::test]
     async fn pagination_stops_at_five_pages_and_five_hundred_items() {
-        let item = r#"{"metadata":{"name":"pod","namespace":"ns"}}"#;
+        let item = r#"{"metadata":{"name":"pod","namespace":"ns","uid":"pod-uid"}}"#;
         let items = std::iter::repeat_n(item, 100).collect::<Vec<_>>().join(",");
         let body = format!(
             r#"case "$*" in
@@ -826,7 +987,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_api_page_is_rejected() {
-        let item = r#"{"metadata":{"name":"pod","namespace":"ns"}}"#;
+        let item = r#"{"metadata":{"name":"pod","namespace":"ns","uid":"pod-uid"}}"#;
         let items = std::iter::repeat_n(item, 101).collect::<Vec<_>>().join(",");
         let (client, path) = client(&format!(
             "printf '%s' '{{\"items\":[{items}],\"metadata\":{{}}}}'"
@@ -836,6 +997,189 @@ mod tests {
             Error::InvalidResponse
         );
         fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pod_logs_preflight_identity_and_container_before_fixed_current_request() {
+        let invocation_path = std::env::temp_dir().join(format!(
+            "homelab-kube-log-invocations-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let body = format!(
+            r#"printf '%s\n' "$*" >> '{}'
+case "$*" in
+  *'--raw=/api/v1/namespaces/ns/pods/pod/log?container=app&tailLines=2&limitBytes=64&timestamps=true'*) printf '2026-01-01T00:00:00Z known-secret\n2026-01-01T00:00:01Z ok\377\n' ;;
+  *'--raw=/api/v1/namespaces/ns/pods/pod'*) printf '{{"metadata":{{"name":"pod","namespace":"ns","uid":"pod-uid"}},"spec":{{"containers":[{{"name":"app"}}]}}}}' ;;
+  *) printf 'unexpected route' >&2; exit 1 ;;
+esac"#,
+            invocation_path.display()
+        );
+        let (mut client, executable_path) = client(&body);
+        client.redactions = Arc::new(vec!["known-secret".into()]);
+        let QueryResult::PodLogs(result) = client
+            .pod_logs(&pod_logs_query(PodLogInstance::Current, 2, 64))
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(result.instance, "current");
+        assert!(result.timestamps && result.redacted && result.tail_truncated);
+        assert!(result.truncated && !result.byte_truncated);
+        assert_eq!(result.line_count, 2);
+        assert!(result.text.contains("[REDACTED]") && result.text.contains('\u{fffd}'));
+        assert!(!result.text.contains("known-secret"));
+        let invocations = fs::read_to_string(&invocation_path).unwrap();
+        assert_eq!(invocations.lines().count(), 3);
+        assert!(!invocations.contains("previous=true"));
+        fs::remove_file(executable_path).unwrap();
+        fs::remove_file(invocation_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pod_logs_previous_is_fixed_and_locally_utf8_byte_bounded() {
+        let body = r#"case "$*" in
+  *'--raw=/api/v1/namespaces/ns/pods/pod/log?container=app&tailLines=1000&limitBytes=5&timestamps=true&previous=true'*) printf '\303\251\303\251\303\251' ;;
+  *'--raw=/api/v1/namespaces/ns/pods/pod'*) printf '{"metadata":{"name":"pod","namespace":"ns","uid":"pod-uid"},"status":{"ephemeralContainerStatuses":[{"name":"app"}]}}' ;;
+  *) exit 2 ;;
+esac"#;
+        let (client, path) = client(body);
+        let QueryResult::PodLogs(result) = client
+            .pod_logs(&pod_logs_query(PodLogInstance::Previous, 1_000, 5))
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(result.instance, "previous");
+        assert_eq!(result.text, "éé");
+        assert!(result.byte_truncated && result.truncated && !result.tail_truncated);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pod_logs_reject_uid_mismatch_and_unknown_container_without_log_request() {
+        for pod in [
+            r#"{"metadata":{"name":"pod","namespace":"ns","uid":"other"},"spec":{"containers":[{"name":"app"}]}}"#,
+            r#"{"metadata":{"name":"pod","namespace":"ns","uid":"pod-uid"},"spec":{"containers":[{"name":"other"}]}}"#,
+        ] {
+            let body = format!(
+                r#"case "$*" in
+  *'/log?'*) printf 'log route must not run' >&2; exit 2 ;;
+  *'--raw=/api/v1/namespaces/ns/pods/pod'*) printf '%s' '{}' ;;
+  *) exit 2 ;;
+esac"#,
+                pod
+            );
+            let (client, path) = client(&body);
+            assert_eq!(
+                client
+                    .pod_logs(&pod_logs_query(PodLogInstance::Current, 200, 65_536))
+                    .await
+                    .unwrap_err(),
+                Error::NotFound
+            );
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn pod_logs_discard_bytes_when_postflight_finds_replacement_pod() {
+        let invocation_path = std::env::temp_dir().join(format!(
+            "homelab-kube-log-postflight-invocations-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let state_path = std::env::temp_dir().join(format!(
+            "homelab-kube-log-postflight-state-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let body = format!(
+            r#"printf '%s\n' "$*" >> '{}'
+case "$*" in
+  *'/log?'*) printf 'must be discarded\n' ;;
+  *'--raw=/api/v1/namespaces/ns/pods/pod'*)
+    if [ -e '{}' ]; then
+      printf '{{"metadata":{{"name":"pod","namespace":"ns","uid":"replacement-uid"}},"spec":{{"containers":[{{"name":"app"}}]}}}}'
+    else
+      : > '{}'
+      printf '{{"metadata":{{"name":"pod","namespace":"ns","uid":"pod-uid"}},"spec":{{"containers":[{{"name":"app"}}]}}}}'
+    fi ;;
+  *) exit 2 ;;
+esac"#,
+            invocation_path.display(),
+            state_path.display(),
+            state_path.display()
+        );
+        let (client, executable_path) = client(&body);
+        assert_eq!(
+            client
+                .pod_logs(&pod_logs_query(PodLogInstance::Current, 200, 65_536))
+                .await
+                .unwrap_err(),
+            Error::NotFound
+        );
+
+        let invocations = fs::read_to_string(&invocation_path).unwrap();
+        let invocations = invocations.lines().collect::<Vec<_>>();
+        assert_eq!(invocations.len(), 3);
+        assert!(invocations[0].contains("--raw=/api/v1/namespaces/ns/pods/pod"));
+        assert!(!invocations[0].contains("/log?"));
+        assert!(invocations[1].contains("/log?"));
+        assert!(invocations[2].contains("--raw=/api/v1/namespaces/ns/pods/pod"));
+        assert!(!invocations[2].contains("/log?"));
+
+        fs::remove_file(executable_path).unwrap();
+        fs::remove_file(invocation_path).unwrap();
+        fs::remove_file(state_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn static_kubeconfig_bearer_tokens_are_collected_and_redacted() {
+        let kubeconfig_path = std::env::temp_dir().join(format!(
+            "homelab-kubeconfig-token-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(
+            &kubeconfig_path,
+            "users:\n- user:\n    token: bearer-secret\n    client-key-data: ignored-secret\n- user:\n    tokenFile: /ignored/path\n",
+        )
+        .unwrap();
+        assert_eq!(
+            static_kubeconfig_tokens(&kubeconfig_path),
+            ["bearer-secret"]
+        );
+
+        let body = r#"case "$*" in
+  *'/log?'*) printf 'bearer-secret\n' ;;
+  *'--raw=/api/v1/namespaces/ns/pods/pod'*) printf '{"metadata":{"name":"pod","namespace":"ns","uid":"pod-uid"},"spec":{"containers":[{"name":"app"}]}}' ;;
+  *) exit 2 ;;
+esac"#;
+        let (_, executable_path) = client(body);
+        let mut config = KubernetesConfig::new(
+            executable_path.clone(),
+            kubeconfig_path.clone(),
+            PathBuf::from("/tmp/kubectl-cache"),
+            "context".into(),
+            "cluster".into(),
+        );
+        config.deadline = Duration::from_secs(2);
+        let client = KubernetesClient::new(config).unwrap();
+        let QueryResult::PodLogs(result) = client
+            .pod_logs(&pod_logs_query(PodLogInstance::Current, 200, 65_536))
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(result.text, "[REDACTED]\n");
+        assert!(result.redacted);
+
+        fs::remove_file(kubeconfig_path).unwrap();
+        fs::remove_file(executable_path).unwrap();
     }
 
     #[test]

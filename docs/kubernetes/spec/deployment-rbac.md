@@ -26,13 +26,13 @@ Credential creation, retrieval, rotation, revocation, and mounting require targe
 
 ## Fixed Read RBAC
 
-The runtime ServiceAccount receives cluster-wide `get` and `list` access only for the approved [resource catalog](queries-resources.md#approved-resource-kinds). Its application grant permits `get` only on exact non-resource discovery paths: `/api`, `/apis`, `/version`, `/api/v1`, and each fixed `/apis/<group>/<version>` represented by `ResourceKind::mapping`. It grants no wildcard non-resource URL.
+The runtime ServiceAccount receives cluster-wide `get` and `list` access only for the approved [resource catalog](queries-resources.md#approved-resource-kinds), plus exactly core `pods/log` `get` for bounded Pod diagnostics. Its application grant permits `get` only on exact non-resource discovery paths: `/api`, `/apis`, `/version`, `/api/v1`, and each fixed `/apis/<group>/<version>` represented by `ResourceKind::mapping`. It grants no wildcard non-resource URL.
 
 Standard Kubernetes installations may independently bind authenticated principals to broader discovery access through `system:discovery`. This application grant does not remove or narrow inherited cluster defaults; effective-RBAC verification remains required.
 
 The read grant includes the fixed core, apps, batch, events, metrics, discovery, networking, Gateway API, storage, autoscaling, policy, cert-manager, CloudNativePG, Strimzi, Rook, and Velero resources.
 
-The ServiceAccount will receive no read access to Secrets, ConfigMaps, arbitrary custom resources, raw API paths, pod logs, or pod subresources.
+The ServiceAccount will receive no read access to Secrets, ConfigMaps, arbitrary custom resources, raw API paths, or Pod subresources other than `pods/log` `get`. The log grant includes no `list`, `watch`, or mutation verb.
 
 ## Fixed Write RBAC
 
@@ -48,7 +48,7 @@ The same ServiceAccount will receive cluster-wide write access only for these op
 
 Server dry-run uses the same write verbs. RBAC does not create a separate dry-run permission.
 
-The ServiceAccount will receive no wildcard API groups, resources, or verbs. It will receive no impersonation, escalation, binding, Secret, ConfigMap, exec, attach, log, proxy, port-forward, eviction, node-write, general apply, or unrelated delete authority.
+The ServiceAccount will receive no wildcard API groups, resources, or verbs. It will receive no impersonation, escalation, binding, Secret, ConfigMap, exec, attach, proxy, port-forward, eviction, node-write, general apply, or unrelated delete authority.
 
 RBAC cannot constrain a granted verb to the MCP input grammar or one object name. The typed server boundary must enforce exact cluster, kind, namespace, name, action, and bounds before process launch.
 

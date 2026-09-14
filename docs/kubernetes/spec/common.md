@@ -10,7 +10,7 @@ The authenticated MCP server exposes two typed progressive tools:
 
 | Tool | Actions | MCP annotations |
 | --- | --- | --- |
-| `kubernetes_query` | `cluster_list`, `capability_list`, `resource_list`, `resource_get` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
+| `kubernetes_query` | `cluster_list`, `capability_list`, `resource_list`, `resource_get`, `pod_logs` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
 | `kubernetes_exec` | `workload_restart`, `workload_scale`, `cronjob_suspend`, `cronjob_trigger`, `pod_delete` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` |
 
 Each tool provides progressive `help` actions, action-dependent typed `input`, and an optional jq-compatible `filter`. Read actions exist only on `kubernetes_query`. Mutation actions exist only on `kubernetes_exec`.
@@ -51,6 +51,9 @@ The catalog, not caller input, will define kubeconfig files, contexts, API serve
 | Conditions per object | At most 20 |
 | Event message | At most 1,024 UTF-8 bytes per event |
 | Event messages per result | At most 32 KiB total |
+| Pod container lifecycle statuses | At most 32 total |
+| Pod log tail | 1 through 1,000 lines; default 200 |
+| Pod log output | 1 through 262,144 UTF-8 bytes; default 65,536 |
 | Scale replicas | 0 through 1,000 |
 
 The service will enforce bounds before process launch and while it drains output. Capacity exhaustion will fail immediately and will not queue unbounded work.
@@ -69,10 +72,10 @@ No action will retry a `kubectl` process automatically. The [mutation contract](
 
 The tools will not provide:
 
-- pod logs, because callers must use Grafana and Loki;
 - raw objects, Secrets, ConfigMaps, or arbitrary custom resources;
 - arbitrary arguments, verbs, resources, API paths, selectors, or output templates;
 - arbitrary output labels or annotations;
+- caller-selected log URLs or query parameters, log following, or log streaming;
 - `exec`, `attach`, `debug`, `cp`, `proxy`, or `port-forward`;
 - apply, general patch, general delete, or force delete;
 - node drain, cordon, or taint operations; or
