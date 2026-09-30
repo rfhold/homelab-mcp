@@ -7,6 +7,7 @@ Preview runs commit `798dd92`. Basic runtime and discovery boundaries are verifi
 | Document | Covers |
 | --- | --- |
 | [Overview](overview.md) | Components, dependencies, trust boundaries, and request flow. |
+| [MCP Skills](mcp-skills.md) | Embedded task guidance, catalog integrity, domain-only actions, and authority boundaries. |
 | [Access and authentication](access-authentication.md) | Hosted MCP OAuth roles, token boundaries, scopes, and durable state. |
 | [Observability](observability.md) | Signal paths, bounded telemetry attributes, lifecycle, and data safety. |
 | [Tekton tools](../tekton/README.md) | Planned integration behavior and evidence boundaries. |

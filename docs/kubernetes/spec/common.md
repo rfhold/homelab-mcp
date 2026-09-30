@@ -13,7 +13,7 @@ The authenticated MCP server exposes two typed progressive tools:
 | `kubernetes_query` | `cluster_list`, `capability_list`, `resource_list`, `resource_get`, `pod_logs` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
 | `kubernetes_exec` | `workload_restart`, `workload_scale`, `cronjob_suspend`, `cronjob_trigger`, `pod_delete` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` |
 
-Each tool provides progressive `help` actions, action-dependent typed `input`, and an optional jq-compatible `filter`. Read actions exist only on `kubernetes_query`. Mutation actions exist only on `kubernetes_exec`.
+Each tool provides action-dependent typed `input` and an optional jq-compatible `filter`. Read actions exist only on `kubernetes_query`. Mutation actions exist only on `kubernetes_exec`. The [MCP Skills contract](../../architecture/mcp-skills.md) supplies authored task guidance instead of generated help actions.
 
 The implementation uses fixed `kubectl` command construction behind these typed actions. No tool exposes arbitrary `kubectl`, arguments, verbs, resources, API paths, selectors, or output templates.
 

@@ -56,7 +56,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Generic Kuri `mcp` | 111 standard all-feature tests pass; both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly. |
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
-| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, eleven-tool listing and annotations, generated help, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
+| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, eleven-tool listing and annotations, MCP Skills, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
 | MCP progress heartbeat | Incremental SSE correlation, payload safety, lifecycle, ordering, and opt-in behavior through `progress_heartbeat_streams_increasing_correlated_events_before_completion` and `progress_heartbeat_omits_events_without_token_and_for_short_calls`. |
 | Grafana actions | Datasource queries, dashboard inventory and PNG rendering, alerting and recording-rule reads, silence creation, bounds, normalization, fixed routes, redirects, semantic errors, timeout, capacity, and permit release against mock HTTP servers. |
 | Kubernetes actions | Exact typed action schemas, all 36 resource kinds, namespace scope, fixed API paths and mutations, normalization, limits, safe errors, process supervision, and uncertain mutation outcomes. |
@@ -108,11 +108,15 @@ Negative tests must verify that errors, logs, redirects, traces, and MCP content
 
 Focused incremental SSE tests cover string and integer progress-token correlation, strictly increasing values, and the fixed safe payload shape. They also cover delivery before completion, omission without a token, short calls, terminal-result ordering, stream closure, and reporter termination.
 
+## MCP Skills Contract Coverage
+
+The [MCP Skills contract](../architecture/mcp-skills.md) requires local HTTP coverage for the extension capability, five packages, all ten raw-byte manifest files, exact frontmatter/root agreement, digest and size integrity, unknown entry/file/cursor errors, and unchanged global authorization and Origin protection. `tools/list` must retain exactly eleven tools and 57 domain actions, reject all removed help actions, and preserve annotations, semantic filters, errors, images, and progress behavior. Assets must remain included by the Docker build's `src` copy.
+
 ## Grafana Contract Coverage
 
 Tests must cover the [Grafana tool specifications](../grafana-query/README.md), including:
 
-- macro-generated `help`, nested `input`, schema, and optional jq-compatible `filter` behavior;
+- MCP Skills discovery and resource reads, nested `input`, schema, and optional jq-compatible `filter` behavior;
 - every instant and range field combination;
 - non-empty queries and RFC3339 timestamps;
 - `forward` and `backward`, including the range default;
@@ -123,7 +127,7 @@ Tests must cover the [Grafana tool specifications](../grafana-query/README.md), 
 - normalized `streams`, `matrix`, `vector`, and `scalar` results;
 - deterministic aggregate stream-entry truncation to the validated line limit;
 - optional normalized statistics and synchronized complete unfiltered JSON text and structured content;
-- direct successful semantic filter output, synchronized compact text, and legacy `{ "result": ... }` wrapping for generated help and other JSON actions;
+- direct successful semantic filter output, synchronized compact text, and intact semantic errors and non-text image content;
 - every stable semantic error code and retryable value; and
 - JSON-RPC errors for malformed protocol, tool shape, action, and filter requests.
 
@@ -165,7 +169,7 @@ For actions whose upstream API accepts a limit, tests must prove that Grafana re
 
 Tests must cover the [Tekton tool specifications](../tekton/README.md), including:
 
-- generated help, schemas, filters, action separation, and exact MCP annotations;
+- listed action schemas, filters, action separation, and exact MCP annotations;
 - the eight-scope global authorization boundary, lack of Tekton-specific enforcement, and access by every principal that passes the global gate;
 - PAC `Repository` authority in fixed namespace `pipelines-as-code`;
 - canonical `org/repo` keys from valid fixed-origin Forgejo URLs for all repository selectors and relationships, including safe unreserved percent-decoding and encoded-separator rejection;
@@ -199,7 +203,7 @@ The [Kubernetes tool specifications](../kubernetes/README.md) define locally imp
 
 Tests must cover:
 
-- progressive help, typed action schemas, optional jq-compatible filters, action separation, and exact MCP annotations;
+- MCP Skills, typed action schemas, optional jq-compatible filters, action separation, and exact MCP annotations;
 - the global `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` requirement for `/mcp`, automatic Kuri requests, and historical-grant reauthorization;
 - proof that the entire global scope set gates every tool and does not enforce per-action access;
 - a unique one-through-32 cluster catalog, exact cluster selection, and initial Pantheon and Romulus entries;
@@ -234,7 +238,7 @@ The [Ceph Dashboard specifications](../ceph/README.md) define locally implemente
 
 Local runtime tests cover:
 
-- progressive help, typed schemas, jq-compatible filters, action separation, and exact MCP annotations for all ten query and five exec actions;
+- MCP Skills, typed schemas, jq-compatible filters, action separation, and exact MCP annotations for all ten query and five exec actions;
 - proof that the global OAuth boundary grants both Ceph tools to every authenticated MCP principal and has no per-tool enforcement;
 - exact `pantheon` and `romulus` selection with fixed HTTPS origins and dedicated credentials that callers cannot choose or observe;
 - rejection of arbitrary commands, routes, paths, methods, headers, bodies, force, retries, OSD `lost`, OSD `up`, and every deferred action;

@@ -5,7 +5,7 @@ use std::{future::Future, sync::Arc, time::Duration};
 use axum::Router;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use mcp::{
-    McpProtectedResourceMetadata, McpToolResult, OAuthAuthorizationServer,
+    McpProtectedResourceMetadata, McpToolResult, OAuthAuthorizationServer, SkillCatalog,
     server::{
         ServerContext, ServerError, ServerResult, StreamableHttpAuthorization,
         StreamableHttpOptions, streamable_http_router_with_options,
@@ -15,6 +15,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
+
+mod skills;
 
 use crate::{
     config::OAuthConfig,
@@ -175,6 +177,7 @@ struct DeployRunInput {
 #[derive(Clone)]
 pub struct HomelabMcp {
     services: Arc<Services>,
+    catalog: Arc<SkillCatalog>,
     progress_heartbeat_interval: Duration,
 }
 
@@ -224,6 +227,7 @@ pub fn router(
 ) -> Result<Router, String> {
     let handler = Arc::new(HomelabMcp {
         services,
+        catalog: Arc::new(skills::catalog().map_err(|error| error.to_string())?),
         progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
     });
     let required_scopes = config.required_scopes.clone();
@@ -244,6 +248,7 @@ pub fn router(
 }
 
 #[mcp::progressive_server(
+    skills = self.catalog,
     name = "homelab-mcp",
     version = "0.1.0",
     description = "Authenticated homelab observability tools.",
@@ -1910,6 +1915,7 @@ mod tests {
                 url::Url::parse(&format!("{origin}/")).unwrap(),
                 std::time::Duration::from_secs(1),
             ))),
+            catalog: Arc::new(skills::catalog().unwrap()),
             progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         });
         (handler, propagated, task)
@@ -1962,6 +1968,20 @@ mod tests {
         body
     }
 
+    fn action_schemas(tool: &Value) -> Vec<Value> {
+        let schema = &tool["inputSchema"]["properties"];
+        let actions = schema["action"]["enum"].as_array().unwrap();
+        let inputs = schema["input"]["oneOf"].as_array().unwrap();
+        assert_eq!(actions.len(), inputs.len());
+        actions
+            .iter()
+            .zip(inputs)
+            .map(|(action, input)| json!({"action":action,"input_schema":input}))
+            .collect()
+    }
+
+    mod skills_contract;
+
     async fn post_mcp(endpoint: &str, body: Value) -> (StatusCode, Value) {
         let method = body["method"].as_str().unwrap();
         let mut request = Client::new()
@@ -1972,6 +1992,9 @@ mod tests {
             .header("mcp-method", method);
         if let Some(name) = body["params"]["name"].as_str() {
             request = request.header("mcp-name", name);
+        }
+        if method == "resources/read" {
+            request = request.header("mcp-name", body["params"]["uri"].as_str().unwrap());
         }
         let response = request.json(&body).send().await.unwrap();
         let status = response.status();
@@ -2010,6 +2033,7 @@ mod tests {
                 url::Url::parse(&format!("{grafana_origin}/")).unwrap(),
                 Duration::from_secs(1),
             ))),
+            catalog: Arc::new(skills::catalog().unwrap()),
             progress_heartbeat_interval: heartbeat_interval,
         });
         let (mcp_origin, mcp_task) = serve(streamable_http_router(handler)).await;
@@ -2687,7 +2711,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_list_help_filter_and_call_follow_progressive_contract() {
+    async fn discovery_list_schema_filter_and_call_follow_skills_contract() {
         let (handler, _, grafana_task) = test_handler().await;
         let (origin, mcp_task) = serve(streamable_http_router(handler)).await;
         let endpoint = format!("{origin}/mcp");
@@ -2700,7 +2724,7 @@ mod tests {
         );
         assert_eq!(
             discover["result"]["capabilities"],
-            json!({"tools":{"listChanged":false}})
+            json!({"tools":{"listChanged":false},"resources":{"listChanged":false,"subscribe":false},"extensions":{"io.modelcontextprotocol/skills":{}}})
         );
         assert_eq!(discover["result"]["cacheScope"], "private");
         assert_eq!(discover["result"]["ttlMs"], 0);
@@ -2757,8 +2781,6 @@ mod tests {
         assert_eq!(
             machines_tool["inputSchema"]["properties"]["action"]["enum"],
             json!([
-                "help",
-                "help.host-key",
                 "list",
                 "create",
                 "update",
@@ -2769,7 +2791,7 @@ mod tests {
         );
         assert_eq!(
             deploys_tool["inputSchema"]["properties"]["action"]["enum"],
-            json!(["help", "list", "run"])
+            json!(["list", "run"])
         );
         assert_eq!(machines_tool["annotations"]["destructiveHint"], true);
         assert_eq!(deploys_tool["annotations"]["idempotentHint"], false);
@@ -2799,14 +2821,6 @@ mod tests {
             .as_array()
             .unwrap();
         for action in [
-            "help",
-            "help.cluster",
-            "help.status",
-            "help.metrics",
-            "help.osd",
-            "help.device",
-            "help.flags",
-            "help.task",
             "cluster.list",
             "status.get",
             "metrics.summary",
@@ -2827,8 +2841,6 @@ mod tests {
             .as_array()
             .unwrap();
         for action in [
-            "help",
-            "help.osd",
             "osd.mark",
             "osd.reweight",
             "osd.scrub",
@@ -2863,7 +2875,6 @@ mod tests {
         assert_eq!(
             kubernetes_query_tool["inputSchema"]["properties"]["action"]["enum"],
             json!([
-                "help",
                 "cluster_list",
                 "capability_list",
                 "resource_list",
@@ -2874,7 +2885,6 @@ mod tests {
         assert_eq!(
             kubernetes_exec_tool["inputSchema"]["properties"]["action"]["enum"],
             json!([
-                "help",
                 "workload_restart",
                 "workload_scale",
                 "cronjob_suspend",
@@ -2882,23 +2892,9 @@ mod tests {
                 "pod_delete"
             ])
         );
-        let (_, kubernetes_help) = post_mcp(
-            &endpoint,
-            request(
-                "tools/call",
-                "kubernetes-help",
-                json!({
-                    "name":KUBERNETES_QUERY_TOOL_NAME,
-                    "arguments":{"action":"help","filter":".actions"}
-                }),
-            ),
-        )
-        .await;
-        let kubernetes_actions = kubernetes_help["result"]["structuredContent"]["result"]
-            .as_array()
-            .unwrap();
+        let kubernetes_actions = action_schemas(kubernetes_query_tool);
         assert_eq!(kubernetes_actions.len(), 5);
-        for action in kubernetes_actions {
+        for action in &kubernetes_actions {
             if matches!(
                 action["action"].as_str(),
                 Some("resource_list" | "resource_get")
@@ -2987,55 +2983,9 @@ mod tests {
             clusters["result"]["structuredContent"]["result"]["clusters"][0]["name"],
             "test"
         );
-        let (_, ceph_help) = post_mcp(
-            &endpoint,
-            request(
-                "tools/call",
-                "ceph-help",
-                json!({
-                    "name":CEPH_QUERY_TOOL_NAME,
-                    "arguments":{"action":"help","filter":".namespaces"}
-                }),
-            ),
-        )
-        .await;
+        let ceph_actions = action_schemas(ceph_query_tool);
         assert_eq!(
-            ceph_help["result"]["structuredContent"]["result"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|namespace| namespace["namespace"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec![
-                "cluster", "status", "metrics", "osd", "device", "flags", "task"
-            ]
-        );
-        let mut ceph_help_actions = Vec::new();
-        for namespace in [
-            "cluster", "status", "metrics", "osd", "device", "flags", "task",
-        ] {
-            let (_, help) = post_mcp(
-                &endpoint,
-                request(
-                    "tools/call",
-                    "ceph-namespace-help",
-                    json!({
-                        "name":CEPH_QUERY_TOOL_NAME,
-                        "arguments":{"action":format!("help.{namespace}"),"filter":".actions"}
-                    }),
-                ),
-            )
-            .await;
-            ceph_help_actions.extend(
-                help["result"]["structuredContent"]["result"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .cloned(),
-            );
-        }
-        assert_eq!(
-            ceph_help_actions
+            ceph_actions
                 .iter()
                 .map(|action| action["action"].as_str().unwrap())
                 .collect::<Vec<_>>(),
@@ -3053,35 +3003,21 @@ mod tests {
             ]
         );
         assert!(
-            ceph_help_actions
+            ceph_actions
                 .iter()
                 .all(|action| action["input_schema"]["additionalProperties"] == false)
         );
         for action_name in ["osd.list", "device.list", "task.list"] {
-            let limit_schema = &ceph_help_actions
+            let limit_schema = &ceph_actions
                 .iter()
                 .find(|action| action["action"] == action_name)
                 .unwrap()["input_schema"]["properties"]["limit"];
             assert_eq!(limit_schema["minimum"], 1, "{action_name} minimum");
             assert_eq!(limit_schema["maximum"], 100, "{action_name} maximum");
         }
-        let (_, ceph_osd_help) = post_mcp(
-            &endpoint,
-            request(
-                "tools/call",
-                "ceph-osd-help",
-                json!({
-                    "name":CEPH_EXEC_TOOL_NAME,
-                    "arguments":{"action":"help.osd","filter":".actions"}
-                }),
-            ),
-        )
-        .await;
-        let ceph_osd_actions = ceph_osd_help["result"]["structuredContent"]["result"]
-            .as_array()
-            .unwrap();
+        let ceph_osd_actions = action_schemas(ceph_exec_tool);
         assert_eq!(ceph_osd_actions.len(), 5);
-        for action in ceph_osd_actions {
+        for action in &ceph_osd_actions {
             assert_eq!(action["input_schema"]["additionalProperties"], false);
         }
         let reweight_schema = &ceph_osd_actions
@@ -3171,21 +3107,10 @@ mod tests {
                 "missing {action}"
             );
         }
-        let (_, tekton_run_help) = post_mcp(
-            &endpoint,
-            request(
-                "tools/call",
-                "tekton-run-help",
-                json!({
-                    "name":TEKTON_QUERY_TOOL_NAME,
-                    "arguments":{"action":"help.run","filter":".actions"}
-                }),
-            ),
-        )
-        .await;
-        let tekton_run_actions = tekton_run_help["result"]["structuredContent"]["result"]
-            .as_array()
-            .unwrap();
+        let tekton_run_actions = action_schemas(tekton_query_tool)
+            .into_iter()
+            .filter(|action| action["action"].as_str().unwrap().starts_with("run."))
+            .collect::<Vec<_>>();
         assert_eq!(
             tekton_run_actions
                 .iter()
@@ -3245,22 +3170,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             render_actions,
-            json!(["help", "dashboard", "panel"]).as_array().unwrap()
+            json!(["dashboard", "panel"]).as_array().unwrap()
         );
         let query_action_enum = query_tool["inputSchema"]["properties"]["action"]["enum"]
             .as_array()
             .unwrap();
         for action in [
-            "help",
-            "help.logql",
-            "help.promql",
-            "help.traceql",
-            "help.profile",
-            "help.alert-rule",
-            "help.recording-rule",
-            "help.alert-instance",
-            "help.silence",
-            "help.dashboard",
             "logql.query",
             "promql.query",
             "traceql.search",
@@ -3294,75 +3209,13 @@ mod tests {
         let exec_action_enum = exec_tool["inputSchema"]["properties"]["action"]["enum"]
             .as_array()
             .unwrap();
-        for action in ["help", "help.silence", "silence.create"] {
-            assert!(
-                exec_action_enum.contains(&json!(action)),
-                "missing {action}"
-            );
-        }
+        assert_eq!(
+            exec_action_enum,
+            json!(["silence.create"]).as_array().unwrap()
+        );
         assert!(!exec_action_enum.contains(&json!("create_silence")));
 
-        let (_, query_root_help) = post_mcp(
-            &endpoint,
-            request(
-                "tools/call",
-                "query-help",
-                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"help","filter":".namespaces"}}),
-            ),
-        )
-        .await;
-        let query_namespaces = query_root_help["result"]["structuredContent"]["result"]
-            .as_array()
-            .unwrap();
-        assert_eq!(
-            query_namespaces
-                .iter()
-                .map(|namespace| namespace["namespace"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec![
-                "logql",
-                "promql",
-                "traceql",
-                "profile",
-                "alert-rule",
-                "recording-rule",
-                "alert-instance",
-                "silence",
-                "dashboard"
-            ]
-        );
-        let mut query_actions = Vec::new();
-        for namespace in [
-            "logql",
-            "promql",
-            "traceql",
-            "profile",
-            "alert-rule",
-            "recording-rule",
-            "alert-instance",
-            "silence",
-            "dashboard",
-        ] {
-            let (_, namespace_help) = post_mcp(
-                &endpoint,
-                request(
-                    "tools/call",
-                    "namespace-help",
-                    json!({
-                        "name":QUERY_TOOL_NAME,
-                        "arguments":{"action":format!("help.{namespace}"),"filter":".actions"}
-                    }),
-                ),
-            )
-            .await;
-            query_actions.extend(
-                namespace_help["result"]["structuredContent"]["result"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .cloned(),
-            );
-        }
+        let query_actions = action_schemas(query_tool);
         assert_eq!(
             query_actions
                 .iter()
@@ -3424,18 +3277,7 @@ mod tests {
             }
         }
 
-        let (_, exec_help) = post_mcp(
-            &endpoint,
-            request(
-                "tools/call",
-                "exec-help",
-                json!({"name":EXEC_TOOL_NAME,"arguments":{"action":"help.silence","filter":".actions"}}),
-            ),
-        )
-        .await;
-        let exec_actions = exec_help["result"]["structuredContent"]["result"]
-            .as_array()
-            .unwrap();
+        let exec_actions = action_schemas(exec_tool);
         assert_eq!(exec_actions.len(), 1);
         assert_eq!(exec_actions[0]["action"], "silence.create");
         let silence_schema = &exec_actions[0]["input_schema"];
@@ -3668,6 +3510,7 @@ mod tests {
                 inventory: Arc::new(crate::services::InertInventory),
                 deploys: Arc::new(crate::services::InertDeploys),
             }),
+            catalog: Arc::new(skills::catalog().unwrap()),
             progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         });
         let (mcp_origin, mcp_task) = serve(streamable_http_router(handler)).await;
@@ -3805,8 +3648,14 @@ mod tests {
                 CEPH_QUERY_TOOL_NAME,
                 json!({"action":"cluster.list","input":{"extra":true}}),
             ),
-            (QUERY_TOOL_NAME, json!({"action":"help","extra":true})),
-            (QUERY_TOOL_NAME, json!({"action":"help","filter":".["})),
+            (
+                QUERY_TOOL_NAME,
+                json!({"action":"alert-rule.list","input":{},"extra":true}),
+            ),
+            (
+                QUERY_TOOL_NAME,
+                json!({"action":"alert-rule.list","input":{},"filter":".["}),
+            ),
         ] {
             let (_, response) = post_mcp(
                 &endpoint,
@@ -3825,7 +3674,7 @@ mod tests {
             request(
                 "tools/call",
                 "semantic",
-                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"logql.query","input":{"query":" "}}}),
+                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"logql.query","input":{"query":" "},"filter":".error"}}),
             ),
         )
         .await;
@@ -3835,6 +3684,10 @@ mod tests {
             json!({"code":"invalid_arguments","message":"The LogQL arguments are invalid.","retryable":false})
         );
         assert!(!semantic.to_string().contains("grafana-secret"));
+        assert_eq!(
+            semantic["result"]["content"][0]["text"],
+            "The LogQL arguments are invalid."
+        );
 
         let (_, recording_semantic) = post_mcp(
             &endpoint,
@@ -3935,7 +3788,7 @@ mod tests {
             request(
                 "tools/call",
                 "unknown-tool",
-                json!({"name":"other","arguments":{"action":"help"}}),
+                json!({"name":"other","arguments":{"action":"list","input":{}}}),
             ),
         )
         .await;
@@ -3964,6 +3817,7 @@ mod tests {
                 url::Url::parse(&format!("{grafana_origin}/")).unwrap(),
                 std::time::Duration::from_secs(1),
             ))),
+            catalog: Arc::new(skills::catalog().unwrap()),
             progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         });
         let (origin, mcp_task) = serve(streamable_http_router(handler)).await;
@@ -4024,6 +3878,7 @@ mod tests {
                 url::Url::parse(&format!("{grafana_origin}/")).unwrap(),
                 std::time::Duration::from_secs(1),
             ))),
+            catalog: Arc::new(skills::catalog().unwrap()),
             progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         });
         let cancellation = Arc::new(Notify::new());
@@ -4289,6 +4144,7 @@ mod tests {
         services.deploys = Arc::new(CancellingDeploys(cancelled.clone()));
         let handler = HomelabMcp {
             services: Arc::new(services),
+            catalog: Arc::new(skills::catalog().unwrap()),
             progress_heartbeat_interval: PROGRESS_HEARTBEAT_INTERVAL,
         };
         let now = chrono::Utc::now();

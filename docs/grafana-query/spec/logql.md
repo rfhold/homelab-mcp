@@ -8,16 +8,7 @@ This specification defines the implemented worktree behavior for the `logql.quer
 
 `#[mcp::progressive_server]` generates the read-only MCP tool `grafana_query`. The [feature index](../README.md) lists its ten actions and the separately advertised `grafana_render` and `grafana_exec` tools.
 
-The macro also generates action `help`, the filter behavior, and the tool schema. A help call takes this shape:
-
-```json
-{
-  "action": "help",
-  "filter": ".actions"
-}
-```
-
-Help takes no `input`. Its structured output lists all ten `grafana_query` actions with their descriptions, guidance, and generated input schemas.
+The macro generates the domain action schema and filter behavior. MCP Skills provide task guidance through `skills/list`, `skills/get`, and catalog-backed `resources/read`; generated help actions have been removed.
 
 The [shared contract](common.md) defines generated tool behavior, shared transport limits, and common error mapping.
 
@@ -39,7 +30,7 @@ A LogQL call takes this nested shape:
 }
 ```
 
-The tool schema must reject unknown top-level and `input` fields. `input` is required for `logql.query` and forbidden for `help`.
+The tool schema must reject unknown top-level and `input` fields. `input` is required for `logql.query`.
 
 Without `filter`, successful `logql.query` output uses the stable envelope below as both complete JSON text and object-shaped `structuredContent`. With `filter`, the generated progressive framework applies the expression only to successful `structuredContent`.
 

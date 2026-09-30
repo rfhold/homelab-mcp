@@ -13,7 +13,7 @@ The authenticated MCP server exposes two typed progressive tools:
 | `ceph_query` | `cluster.list`, `status.get`, `metrics.summary`, `osd.list`, `osd.get`, `osd.safe-to-destroy`, `device.list`, `device.get`, `flags.get`, `task.list` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
 | `ceph_exec` | `osd.mark`, `osd.reweight`, `osd.scrub`, `osd.destroy`, `osd.purge` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` |
 
-Each tool provides progressive `help` actions, action-dependent typed `input`, and an optional jq-compatible `filter`. Read actions exist only on `ceph_query`; mutations exist only on `ceph_exec`.
+Each tool provides action-dependent typed `input` and an optional jq-compatible `filter`. Read actions exist only on `ceph_query`; mutations exist only on `ceph_exec`. The [MCP Skills contract](../../architecture/mcp-skills.md) supplies authored task guidance instead of generated help actions.
 
 The service constructs requests to fixed Ceph Dashboard API operations. A caller cannot provide an origin, route, path, query string, HTTP method, headers, credential, request body, Ceph command, or CLI argument.
 

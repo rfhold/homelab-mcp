@@ -5,6 +5,7 @@ This index routes readers to the implemented preview runtime, deployment status,
 | Document | Covers |
 | --- | --- |
 | [Architecture](architecture/README.md) | Service boundaries, components, data flows, and authentication. |
+| [MCP Skills](architecture/mcp-skills.md) | Embedded task guidance, domain-only action cutover, catalog integrity, and unchanged global authorization. |
 | [Grafana query tools](grafana-query/README.md) | Canonical contracts for ten read actions and bounded silence creation. |
 | [Grafana render tool](grafana-render/README.md) | Canonical contracts for bounded dashboard and panel PNG rendering. |
 | [Tekton tools](tekton/README.md) | Implemented contracts for repository, workflow, run, task, log, and mutation actions. |

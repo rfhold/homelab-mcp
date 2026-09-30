@@ -1,6 +1,6 @@
 # Grafana Render
 
-`grafana_render` is the fifth progressive MCP tool. It is read-only, idempotent, open-world, and non-destructive. It exposes exactly `help`, `dashboard`, and `panel`; the action names are flat and have no namespace help actions.
+`grafana_render` is a read-only, idempotent, open-world, non-destructive MCP tool. It exposes exactly `dashboard` and `panel`; the action names are flat. [MCP Skills](../architecture/mcp-skills.md) replace generated help actions.
 
 | Document | Covers |
 | --- | --- |
