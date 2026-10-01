@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This specification governs the progressive `machines` MCP tool and `homelab.machines` persistence.
+This specification governs the `homelab://machines` resource and `machine.*` actions on `create`, `execute`, and `destroy` and `homelab.machines` persistence.
 
 ## Requirements
 
@@ -36,6 +36,6 @@ If an MCP request cancels during an inventory mutation, the tool MUST return `mu
 ## References
 
 - [`src/inventory.rs`](../../../src/inventory.rs), especially `MachineRepository` and `validate_host_public_key`
-- [`src/mcp.rs`](../../../src/mcp.rs), progressive `machines` actions
+- [`src/mcp.rs`](../../../src/mcp.rs), uniform `machine.*` actions
 - [`migrations/20260813000000_create_machines.sql`](../../../migrations/20260813000000_create_machines.sql)
 - [Machine inventory](../machine-inventory.md)

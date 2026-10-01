@@ -6,22 +6,17 @@ This document defines locally implemented behavior. Rust runtime code, MCP regis
 
 ## Tool Surfaces
 
-The authenticated MCP server exposes two typed progressive tools:
+Configured clusters are resources; live reads use `query`, mark/reweight/scrub use `execute`, and OSD destruction/purge use `destroy`. The [uniform MCP interface](../../architecture/mcp-interface.md) owns exact public domain-prefixed names, schemas, resources, annotations, and routing. Focused specifications retain unqualified backend operation labels. No help actions or compatibility aliases exist.
 
-| Tool | Actions | MCP annotations |
-| --- | --- | --- |
-| `ceph_query` | `cluster.list`, `status.get`, `metrics.summary`, `osd.list`, `osd.get`, `osd.safe-to-destroy`, `device.list`, `device.get`, `flags.get`, `task.list` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
-| `ceph_exec` | `osd.mark`, `osd.reweight`, `osd.scrub`, `osd.destroy`, `osd.purge` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` |
+Typed tool inputs and jq projections retain their existing semantics, synchronized text, image content, and unchanged semantic tool errors. Resource failures use JSON-RPC errors with safe semantic details. The same global authorization, fixed upstream operations, cancellation, and bounds apply.
 
-Each tool provides action-dependent typed `input` and an optional jq-compatible `filter`. Read actions exist only on `ceph_query`; mutations exist only on `ceph_exec`. The [MCP Skills contract](../../architecture/mcp-skills.md) supplies authored task guidance instead of generated help actions.
-
-The service constructs requests to fixed Ceph Dashboard API operations. A caller cannot provide an origin, route, path, query string, HTTP method, headers, credential, request body, Ceph command, or CLI argument.
+The service constructs only fixed Ceph Dashboard API operations. Callers cannot provide origins, routes, paths, query strings, HTTP methods, headers, credentials, arbitrary bodies, Ceph commands, or CLI arguments.
 
 ## Authorization Risk
 
 The [global OAuth contract](../../architecture/access-authentication.md#protocol-boundary) requires `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` for the complete `/mcp` resource. It has no per-tool or per-action enforcement. No Ceph-specific OAuth scope separates reads from mutations.
 
-Every principal that passes the global `/mcp` authorization boundary can call both `ceph_query` and `ceph_exec`. This grants every authenticated MCP principal authority to mark, reweight, scrub, destroy, and purge OSDs in either configured cluster. Preview uses each cluster's Rook-generated shared Dashboard administrator account, so the upstream credential has broader authority than the fixed MCP action catalog. This user-approved exception and the global authorization model are production blockers. Dedicated least-privilege Dashboard accounts remain required before production approval.
+Every principal that passes the global `/mcp` authorization boundary can call Ceph resources, `query`, `execute`, and `destroy`. This grants every authenticated MCP principal authority to mark, reweight, scrub, destroy, and purge OSDs in either configured cluster. Preview uses each cluster's Rook-generated shared Dashboard administrator account, so the upstream credential has broader authority than the fixed MCP action catalog. This user-approved exception and the global authorization model are production blockers. Dedicated least-privilege Dashboard accounts remain required before production approval.
 
 Every exec call requires an explicit user decision. Authentication alone does not authorize an operator or automated validation process to perform a particular live mutation.
 
@@ -29,7 +24,7 @@ Every exec call requires an explicit user decision. Authentication alone does no
 
 Preview configuration defines exactly two cluster selectors, `pantheon` and `romulus`. Each selector binds one fixed Ceph 19 Squid Dashboard HTTPS origin to one dedicated per-cluster Dashboard credential. Cluster names are case-sensitive stable MCP identities.
 
-The catalog, not caller input, owns Dashboard origins, TLS destinations, credentials, and cluster membership. `cluster.list` exposes only safe cluster identities. It does not expose origins or credentials.
+The catalog, not caller input, owns Dashboard origins, TLS destinations, credentials, and cluster membership. `homelab://ceph/clusters` exposes only safe cluster identities. It does not expose origins or credentials.
 
 ## Shared Request and Result Boundary
 

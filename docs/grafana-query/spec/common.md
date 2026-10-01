@@ -2,27 +2,19 @@
 
 ## Status
 
-This document defines the canonical Grafana tool behavior. Local tests cover all three generated Grafana tool surfaces and mock Grafana integration. Preview commit `798dd92` exposed both rule-list actions: `alert-rule.list` succeeded with at least 100 entries, while `recording-rule.list` returned `invalid_response` with `limit: 1`. The approved rule-normalization fixes have not been deployed or verified live.
+This document defines the canonical Grafana tool behavior. Local tests cover uniform Grafana tool/resource routing and mock Grafana integration. Preview commit `798dd92` exposed both rule-list actions: `alert-rule.list` succeeded with at least 100 entries, while `recording-rule.list` returned `invalid_response` with `limit: 1`. The approved rule-normalization fixes have not been deployed or verified live.
 
 ## Tool Surfaces
 
-One authenticated MCP server exposes three Grafana progressive tools:
+Grafana definition catalogs are resources; live queries and rendering use `query`, and silence creation uses `create`. The [uniform MCP interface](../../architecture/mcp-interface.md) owns exact public domain-prefixed names, schemas, resources, annotations, and routing. Focused specifications retain unqualified backend operation labels. No help actions or compatibility aliases exist.
 
-| Tool | Actions | MCP annotations |
-| --- | --- | --- |
-| `grafana_query` | `logql.query`, `promql.query`, `traceql.search`, `profile.merge`, `alert-rule.list`, `recording-rule.list`, `alert-instance.list`, `silence.list`, `dashboard.list`, `dashboard.get` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
-| `grafana_render` | `dashboard`, `panel` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
-| `grafana_exec` | `silence.create` | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false`, `openWorldHint: true` |
+Typed tool inputs and jq projections retain their existing semantics, synchronized text, image content, and unchanged semantic tool errors. Resource failures use JSON-RPC errors with safe semantic details. The same global authorization, fixed upstream operations, cancellation, and bounds apply.
 
-`grafana_exec` is separately advertised as operationally consequential. `silence.create` is not available through `grafana_query`, and `silence.list` and the other read actions are not available through `grafana_exec`.
-
-Generated top-level schemas accept only domain `action`, action-dependent `input`, and an optional jq-compatible `filter`. Tool listing supplies input schemas; embedded MCP Skills supply task guidance. No `help` or `help.<namespace>` actions exist. Unknown fields, tools, actions, invalid schemas, and invalid filters produce JSON-RPC errors.
-
-For a schema-valid action that returns a successful semantic `McpToolResult`, `filter` applies to `structuredContent`. The exact filtered JSON value becomes `structuredContent` directly, including arrays, scalars, and null, without a `{ "result": ... }` wrapper. Text content is rewritten to the compact serialized filtered JSON so visible text and structured output agree; non-text content blocks, `_meta`, and extensions remain unchanged. Without a filter, every `grafana_query` success uses the complete normalized JSON as text and the same object as `structuredContent`. `grafana_render` retains its specialized text-plus-image response, and `silence.create` retains its concise acknowledgment containing the created silence ID. `isError: true` results preserve their complete original envelope without applying the filter.
+For a successful semantic tool result, `filter` projects structured content directly, including arrays, scalars, and null without a wrapper. Text is synchronized to compact JSON, while images, `_meta`, and extensions remain intact. Without a filter, rendering retains its specialized text-plus-image result and silence creation retains its concise acknowledgment. Semantic `isError` results bypass filters. Resource projection uses the JSON-content rules in the uniform interface.
 
 ## Authorization and Destination
 
-The global set `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` gates every action on all three tools. There is no narrower Grafana enforcement, so every authorized principal can query, render images, and request silence creation.
+The global set `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` gates every action on all resources and tools. There is no narrower Grafana enforcement, so every authorized principal can query, render images, and request silence creation.
 
 All actions share one `GrafanaClient`, one configured Grafana origin, and one server-held Editor service-account token. The same credential reads dashboards, requests rendering, reads alerting state, and creates silences. The caller cannot choose the origin, token, API path, datasource, headers, or HTTP method.
 
@@ -32,7 +24,7 @@ The token is sent only as an upstream Bearer `Authorization` header. Redirects r
 
 | Limit | Contract |
 | --- | --- |
-| Concurrent Grafana operations | Four across all three Grafana tools and actions. Permits are acquired immediately without waiting. |
+| Concurrent Grafana operations | Four across all Grafana resources and tool actions. Permits are acquired immediately without waiting. |
 | Operation timeout | 30 seconds after permit acquisition, covering dispatch and the complete response read. |
 | Encoded URL | At most 8192 bytes after path join and query encoding. |
 | Decoded response body | At most 4 MiB, with or without `Content-Length`. |
@@ -43,7 +35,7 @@ The client releases its permit after success, failure, timeout, or cancellation.
 
 ## Read Results and Errors
 
-Every unfiltered `grafana_query` success returns one text item containing the complete normalized JSON and the same object-shaped value in `structuredContent`. Each focused action specification owns its normalized result contract. Reads never expose Grafana headers, credentials, datasource configuration, raw response wrappers, or unapproved upstream models.
+Every unfiltered non-render Grafana `query` success returns one text item containing the complete normalized JSON and the same object-shaped value in `structuredContent`. Each focused action specification owns its normalized result contract. Reads never expose Grafana headers, credentials, datasource configuration, raw response wrappers, or unapproved upstream models.
 
 Alert-rule and recording-rule summaries share `rule_group` normalization. A real group remains a bounded string. An internal ungrouped identifier that begins with the exact case-sensitive prefix `no_group_for_rule_` becomes null. This includes Grafana's fixed-width internal values padded with `*`. Other group names remain unchanged.
 

@@ -7,6 +7,7 @@ Preview runs commit `798dd92`. Basic runtime and discovery boundaries are verifi
 | Document | Covers |
 | --- | --- |
 | [Overview](overview.md) | Components, dependencies, trust boundaries, and request flow. |
+| [MCP interface](mcp-interface.md) | Resource catalogs, uniform tool/action routing, and preserved safety boundaries. |
 | [MCP Skills](mcp-skills.md) | Embedded task guidance, catalog integrity, domain-only actions, and authority boundaries. |
 | [Access and authentication](access-authentication.md) | Hosted MCP OAuth roles, token boundaries, scopes, and durable state. |
 | [Observability](observability.md) | Signal paths, bounded telemetry attributes, lifecycle, and data safety. |

@@ -6,22 +6,17 @@ This document defines locally implemented behavior. Runtime code, deployment dec
 
 ## Tool Surfaces
 
-The authenticated MCP server exposes two typed progressive tools:
+Cluster and capability discovery are resources; live state and logs use `query`, restart/scale/suspend use `execute`, CronJob triggering uses `create`, and Pod deletion uses `destroy`. The [uniform MCP interface](../../architecture/mcp-interface.md) owns exact public domain-prefixed names, schemas, resources, annotations, and routing. Focused specifications retain unqualified backend operation labels. No help actions or compatibility aliases exist.
 
-| Tool | Actions | MCP annotations |
-| --- | --- | --- |
-| `kubernetes_query` | `cluster_list`, `capability_list`, `resource_list`, `resource_get`, `pod_logs` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
-| `kubernetes_exec` | `workload_restart`, `workload_scale`, `cronjob_suspend`, `cronjob_trigger`, `pod_delete` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` |
+Typed tool inputs and jq projections retain their existing semantics, synchronized text, image content, and unchanged semantic tool errors. Resource failures use JSON-RPC errors with safe semantic details. The same global authorization, fixed upstream operations, cancellation, and bounds apply.
 
-Each tool provides action-dependent typed `input` and an optional jq-compatible `filter`. Read actions exist only on `kubernetes_query`. Mutation actions exist only on `kubernetes_exec`. The [MCP Skills contract](../../architecture/mcp-skills.md) supplies authored task guidance instead of generated help actions.
-
-The implementation uses fixed `kubectl` command construction behind these typed actions. No tool exposes arbitrary `kubectl`, arguments, verbs, resources, API paths, selectors, or output templates.
+The implementation uses fixed `kubectl` command construction. No interface exposes arbitrary arguments, verbs, API paths, selectors, output templates, or manifests.
 
 ## Authorization
 
 The `/mcp` protected resource requires the exact global OAuth set: `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. Kuri requests all eight scopes automatically during authorization.
 
-The entire set gates the complete `/mcp` resource. It does not enforce permissions per tool or action. Every authorized MCP principal can use both Kubernetes tools and all other MCP tools.
+The entire set gates the complete `/mcp` resource. It does not enforce permissions per tool or action. Every authorized MCP principal can use Kubernetes resources and tools and all other MCP tools.
 
 Historical preview grants lack the seven expanded scopes. Each client and user from that revision must complete browser authorization again before the client can call the updated `/mcp`.
 

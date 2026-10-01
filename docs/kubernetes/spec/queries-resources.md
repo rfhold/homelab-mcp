@@ -2,12 +2,12 @@
 
 ## Query Actions
 
-`kubernetes_query` exposes five actions:
+`query` exposes three live actions with the `kubernetes.` prefix. Configuration discovery uses resources:
 
 | Action | Contract |
 | --- | --- |
-| `cluster_list` | Return the configured catalog in stable cluster-name order. It performs no cluster request. |
-| `capability_list` | Report support for all approved kinds, or a unique nonempty requested subset, on one exact cluster. |
+| `homelab://kubernetes/clusters` | Return the configured catalog in stable cluster-name order. It performs no cluster request. |
+| `homelab://kubernetes/capabilities/{cluster}` | Report support for all approved kinds, or a unique nonempty requested subset, on one exact cluster. |
 | `resource_list` | List one approved kind on one exact cluster, with required namespace for namespaced kinds, exact labels, and a 1-through-100 result limit. |
 | `resource_get` | Read one exact approved object by cluster, kind, namespace when required, and name. |
 | `pod_logs` | Read bounded current or previous logs for one exact container on one exact Pod identity. |

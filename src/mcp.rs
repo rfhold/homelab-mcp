@@ -8,7 +8,7 @@ use mcp::{
     McpProtectedResourceMetadata, McpToolResult, OAuthAuthorizationServer, SkillCatalog,
     server::{
         ServerContext, ServerError, ServerResult, StreamableHttpAuthorization,
-        StreamableHttpOptions, streamable_http_router_with_options,
+        StreamableHttpOptions,
     },
 };
 use schemars::JsonSchema;
@@ -16,7 +16,24 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+mod resources;
 mod skills;
+mod tools;
+
+fn streamable_http_router_with_options(
+    handler: Arc<HomelabMcp>,
+    options: StreamableHttpOptions,
+) -> mcp::server::StreamableHttpRouter {
+    mcp::server::streamable_http_router_with_options(
+        Arc::new(resources::ResourceHandler(handler)),
+        options,
+    )
+}
+
+#[cfg(test)]
+fn streamable_http_router(handler: Arc<HomelabMcp>) -> mcp::server::StreamableHttpRouter {
+    streamable_http_router_with_options(handler, StreamableHttpOptions::default())
+}
 
 use crate::{
     config::OAuthConfig,
@@ -72,27 +89,11 @@ const PROGRESS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const PROGRESS_HEARTBEAT_MESSAGE: &str = "Request is still running";
 
 #[cfg(test)]
-const QUERY_TOOL_NAME: &str = "grafana_query";
+const QUERY_TOOL_NAME: &str = "query";
 #[cfg(test)]
-const EXEC_TOOL_NAME: &str = "grafana_exec";
+const CREATE_TOOL_NAME: &str = "create";
 #[cfg(test)]
-const RENDER_TOOL_NAME: &str = "grafana_render";
-#[cfg(test)]
-const TEKTON_QUERY_TOOL_NAME: &str = "tekton_query";
-#[cfg(test)]
-const TEKTON_EXEC_TOOL_NAME: &str = "tekton_exec";
-#[cfg(test)]
-const KUBERNETES_QUERY_TOOL_NAME: &str = "kubernetes_query";
-#[cfg(test)]
-const KUBERNETES_EXEC_TOOL_NAME: &str = "kubernetes_exec";
-#[cfg(test)]
-const CEPH_QUERY_TOOL_NAME: &str = "ceph_query";
-#[cfg(test)]
-const CEPH_EXEC_TOOL_NAME: &str = "ceph_exec";
-#[cfg(test)]
-const MACHINES_TOOL_NAME: &str = "machines";
-#[cfg(test)]
-const DEPLOYS_TOOL_NAME: &str = "deploys";
+const EXECUTE_TOOL_NAME: &str = "execute";
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -247,147 +248,6 @@ pub fn router(
     Ok(streamable_http_router_with_options(handler, options))
 }
 
-#[mcp::progressive_server(
-    skills = self.catalog,
-    name = "homelab-mcp",
-    version = "0.1.0",
-    description = "Authenticated homelab observability tools.",
-    tool(
-        name = "grafana_query",
-        description = "Execute bounded, read-only Grafana queries.",
-        annotations = json!({
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": true
-        }),
-        namespace(name = "logql", description = "Query Loki logs with LogQL."),
-        namespace(name = "promql", description = "Query Mimir metrics with PromQL."),
-        namespace(name = "traceql", description = "Search Tempo traces with TraceQL."),
-        namespace(name = "profile", description = "Inspect Pyroscope profiles."),
-        namespace(name = "alert-rule", description = "Inspect Grafana alert rules."),
-        namespace(name = "recording-rule", description = "Inspect Grafana recording rules."),
-        namespace(name = "alert-instance", description = "Inspect current Grafana alert instances."),
-        namespace(name = "silence", description = "Inspect Grafana alert silences."),
-        namespace(name = "dashboard", description = "Inspect Grafana dashboard inventory.")
-    ),
-    tool(
-        name = "grafana_render",
-        description = "Render bounded Grafana dashboard and panel images.",
-        annotations = json!({
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": true
-        })
-    ),
-    tool(
-        name = "grafana_exec",
-        description = "Perform operationally consequential Grafana writes.",
-        annotations = json!({
-            "readOnlyHint": false,
-            "destructiveHint": false,
-            "idempotentHint": false,
-            "openWorldHint": true
-        }),
-        namespace(name = "silence", description = "Manage Grafana alert silences.")
-    ),
-    tool(
-        name = "tekton_query",
-        description = "Inspect configured Tekton pipelines, runs, tasks, and bounded logs.",
-        annotations = json!({
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": true
-        }),
-        namespace(name = "repository", description = "Inspect PAC-configured repositories."),
-        namespace(name = "workflow", description = "Inspect Pipeline-as-Code workflow definitions."),
-        namespace(name = "run", description = "Inspect Tekton PipelineRuns."),
-        namespace(name = "task", description = "Inspect Tekton TaskRuns and bounded logs.")
-    ),
-    tool(
-        name = "tekton_exec",
-        description = "Dispatch, rerun, or cancel operationally consequential Tekton workflows.",
-        annotations = json!({
-            "readOnlyHint": false,
-            "destructiveHint": true,
-            "idempotentHint": false,
-            "openWorldHint": true
-        }),
-        namespace(name = "workflow", description = "Dispatch incoming-enabled workflows."),
-        namespace(name = "run", description = "Rerun or cancel Tekton PipelineRuns.")
-    ),
-    tool(
-        name = "kubernetes_query",
-        description = "Execute bounded, read-only queries against configured Kubernetes clusters.",
-        annotations = json!({
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": true
-        })
-    ),
-    tool(
-        name = "kubernetes_exec",
-        description = "Perform curated exact-object Kubernetes mutations.",
-        annotations = json!({
-            "readOnlyHint": false,
-            "destructiveHint": true,
-            "idempotentHint": false,
-            "openWorldHint": true
-        })
-    ),
-    tool(
-        name = "ceph_query",
-        description = "Execute bounded, read-only queries against configured Ceph clusters.",
-        annotations = json!({
-            "readOnlyHint": true,
-            "destructiveHint": false,
-            "idempotentHint": true,
-            "openWorldHint": true
-        }),
-        namespace(name = "cluster", description = "Inspect the configured Ceph cluster catalog."),
-        namespace(name = "status", description = "Inspect native Ceph cluster health."),
-        namespace(name = "metrics", description = "Inspect current Ceph Dashboard metrics."),
-        namespace(name = "osd", description = "Inspect Ceph OSD state and safety."),
-        namespace(name = "device", description = "Inspect devices attached to Ceph OSDs."),
-        namespace(name = "flags", description = "Inspect curated Ceph cluster flags."),
-        namespace(name = "task", description = "Inspect bounded Ceph Dashboard tasks.")
-    ),
-    tool(
-        name = "ceph_exec",
-        description = "Perform curated operationally consequential Ceph mutations.",
-        annotations = json!({
-            "readOnlyHint": false,
-            "destructiveHint": true,
-            "idempotentHint": false,
-            "openWorldHint": true
-        }),
-        namespace(name = "osd", description = "Mutate exact Ceph OSD state.")
-    ),
-    tool(
-        name = "machines",
-        description = "List and manage exact machine inventory records and explicit SSH host trust.",
-        annotations = json!({
-            "readOnlyHint": false,
-            "destructiveHint": true,
-            "idempotentHint": false,
-            "openWorldHint": false
-        }),
-        namespace(name = "host-key", description = "Explicitly clear or replace SSH host trust.")
-    ),
-    tool(
-        name = "deploys",
-        description = "List approved deploys or run one deploy on one exact machine UUID.",
-        annotations = json!({
-            "readOnlyHint": false,
-            "destructiveHint": true,
-            "idempotentHint": false,
-            "openWorldHint": true
-        })
-    )
-)]
 impl HomelabMcp {
     fn progress_heartbeat(&self, context: &ServerContext) -> ProgressHeartbeat {
         ProgressHeartbeat::start(context, self.progress_heartbeat_interval)
@@ -397,7 +257,6 @@ impl HomelabMcp {
     ///
     /// Use instant mode without start/end, or range mode with both endpoints.
     /// Log streams are normalized and limited to the requested number of lines.
-    #[action(tool = "grafana_query", name = "logql.query")]
     async fn logql(
         &self,
         input: LogqlInput,
@@ -422,7 +281,6 @@ impl HomelabMcp {
     ///
     /// Range mode requires start, end, and a positive Prometheus duration step.
     /// Ranges are limited to 24 hours and 11,000 points.
-    #[action(tool = "grafana_query", name = "promql.query")]
     async fn promql(
         &self,
         input: PromqlInput,
@@ -447,7 +305,6 @@ impl HomelabMcp {
     ///
     /// Optional start and end timestamps must appear together. Searches are
     /// limited to 24 hours and at most 100 returned traces.
-    #[action(tool = "grafana_query", name = "traceql.search")]
     async fn traceql(
         &self,
         input: TraceqlInput,
@@ -472,7 +329,6 @@ impl HomelabMcp {
     ///
     /// Start and end are required RFC3339 timestamps. Profile ranges are
     /// limited to one hour and at most 1,000 flame graph nodes.
-    #[action(tool = "grafana_query", name = "profile.merge")]
     async fn profiles(
         &self,
         input: ProfilesInput,
@@ -494,7 +350,6 @@ impl HomelabMcp {
     }
 
     /// List bounded Grafana alert-rule summaries.
-    #[action(tool = "grafana_query", name = "alert-rule.list")]
     async fn alert_rules(
         &self,
         input: AlertRulesInput,
@@ -516,7 +371,6 @@ impl HomelabMcp {
     }
 
     /// List bounded Grafana recording-rule summaries.
-    #[action(tool = "grafana_query", name = "recording-rule.list")]
     async fn recording_rules(
         &self,
         input: RecordingRulesInput,
@@ -538,7 +392,6 @@ impl HomelabMcp {
     }
 
     /// List bounded current Grafana alert instances, optionally filtered by labels.
-    #[action(tool = "grafana_query", name = "alert-instance.list")]
     async fn alert_instances(
         &self,
         input: AlertInstancesInput,
@@ -562,7 +415,6 @@ impl HomelabMcp {
     }
 
     /// List bounded Grafana silences, optionally filtered by state.
-    #[action(tool = "grafana_query", name = "silence.list")]
     async fn list_silences(
         &self,
         input: ListSilencesInput,
@@ -584,7 +436,6 @@ impl HomelabMcp {
     }
 
     /// List bounded Grafana dashboard inventory.
-    #[action(tool = "grafana_query", name = "dashboard.list")]
     async fn list_dashboards(
         &self,
         input: ListDashboardsInput,
@@ -606,7 +457,6 @@ impl HomelabMcp {
     }
 
     /// Get bounded inventory for one Grafana dashboard.
-    #[action(tool = "grafana_query", name = "dashboard.get")]
     async fn get_dashboard(
         &self,
         input: GetDashboardInput,
@@ -628,7 +478,6 @@ impl HomelabMcp {
     }
 
     /// Render one bounded dashboard PNG.
-    #[action(tool = "grafana_render", name = "dashboard")]
     async fn render_dashboard(
         &self,
         input: RenderDashboardInput,
@@ -650,7 +499,6 @@ impl HomelabMcp {
     }
 
     /// Render one bounded panel PNG.
-    #[action(tool = "grafana_render", name = "panel")]
     async fn render_panel(
         &self,
         input: RenderPanelInput,
@@ -678,7 +526,6 @@ impl HomelabMcp {
     }
 
     /// Create a bounded Grafana silence that suppresses matching alert notifications.
-    #[action(tool = "grafana_exec", name = "silence.create")]
     async fn create_silence(
         &self,
         input: CreateSilenceInput,
@@ -710,7 +557,6 @@ impl HomelabMcp {
     }
 
     /// List PAC Repository resources with valid configured Forgejo URLs.
-    #[action(tool = "tekton_query", name = "repository.list")]
     async fn tekton_repositories(
         &self,
         input: RepositoryListInput,
@@ -737,7 +583,6 @@ impl HomelabMcp {
     }
 
     /// List bounded Pipeline-as-Code definitions from configured repositories.
-    #[action(tool = "tekton_query", name = "workflow.list")]
     async fn tekton_workflows(
         &self,
         input: WorkflowListInput,
@@ -759,7 +604,6 @@ impl HomelabMcp {
     }
 
     /// List bounded PipelineRuns for an exact configured repository.
-    #[action(tool = "tekton_query", name = "run.list")]
     async fn tekton_runs(
         &self,
         input: RunListInput,
@@ -781,7 +625,6 @@ impl HomelabMcp {
     }
 
     /// Get one owned PipelineRun by exact namespace-qualified identity.
-    #[action(tool = "tekton_query", name = "run.get")]
     async fn tekton_run(
         &self,
         input: RunGetInput,
@@ -803,7 +646,6 @@ impl HomelabMcp {
     }
 
     /// Diagnose one owned PipelineRun and its failed owned TaskRuns.
-    #[action(tool = "tekton_query", name = "run.status")]
     async fn tekton_run_status(
         &self,
         input: RunStatusInput,
@@ -825,7 +667,6 @@ impl HomelabMcp {
     }
 
     /// Wait up to a bounded deadline for one owned PipelineRun to become terminal.
-    #[action(tool = "tekton_query", name = "run.wait")]
     async fn tekton_run_wait(
         &self,
         input: RunWaitInput,
@@ -847,7 +688,6 @@ impl HomelabMcp {
     }
 
     /// List owned TaskRuns for an exact PipelineRun.
-    #[action(tool = "tekton_query", name = "task.list")]
     async fn tekton_tasks(
         &self,
         input: TaskListInput,
@@ -869,7 +709,6 @@ impl HomelabMcp {
     }
 
     /// Read bounded, redacted logs for an owned TaskRun and optional step.
-    #[action(tool = "tekton_query", name = "task.logs")]
     async fn tekton_task_logs(
         &self,
         input: TaskLogsInput,
@@ -891,7 +730,6 @@ impl HomelabMcp {
     }
 
     /// Dispatch one exact incoming-enabled Pipeline-as-Code workflow.
-    #[action(tool = "tekton_exec", name = "workflow.dispatch")]
     async fn tekton_dispatch(
         &self,
         input: WorkflowDispatchInput,
@@ -908,7 +746,6 @@ impl HomelabMcp {
     }
 
     /// Rerun one owned PipelineRun through the fixed PAC incoming route.
-    #[action(tool = "tekton_exec", name = "run.rerun")]
     async fn tekton_rerun(
         &self,
         input: RunRerunInput,
@@ -925,7 +762,6 @@ impl HomelabMcp {
     }
 
     /// Request cancellation of one active owned PipelineRun.
-    #[action(tool = "tekton_exec", name = "run.cancel")]
     async fn tekton_cancel(
         &self,
         input: RunCancelInput,
@@ -987,7 +823,6 @@ impl HomelabMcp {
     }
 
     /// List the configured Kubernetes cluster catalog without contacting a cluster.
-    #[action(tool = "kubernetes_query", name = "cluster_list")]
     async fn kubernetes_clusters(
         &self,
         input: ClusterListInput,
@@ -999,7 +834,6 @@ impl HomelabMcp {
     }
 
     /// Report support for approved resource kinds on one configured cluster.
-    #[action(tool = "kubernetes_query", name = "capability_list")]
     async fn kubernetes_capabilities(
         &self,
         input: CapabilityListInput,
@@ -1011,7 +845,6 @@ impl HomelabMcp {
     }
 
     /// List a bounded set of normalized resources of one approved kind.
-    #[action(tool = "kubernetes_query", name = "resource_list")]
     async fn kubernetes_resources(
         &self,
         input: ResourceListInput,
@@ -1023,7 +856,6 @@ impl HomelabMcp {
     }
 
     /// Get one exact normalized resource of an approved kind.
-    #[action(tool = "kubernetes_query", name = "resource_get")]
     async fn kubernetes_resource(
         &self,
         input: ResourceGetInput,
@@ -1035,7 +867,6 @@ impl HomelabMcp {
     }
 
     /// Read bounded current or previous logs for one exact Pod container and Pod UID.
-    #[action(tool = "kubernetes_query", name = "pod_logs")]
     async fn kubernetes_pod_logs(
         &self,
         input: PodLogsInput,
@@ -1047,7 +878,6 @@ impl HomelabMcp {
     }
 
     /// Restart one exact Deployment, StatefulSet, or DaemonSet.
-    #[action(tool = "kubernetes_exec", name = "workload_restart")]
     async fn kubernetes_workload_restart(
         &self,
         input: WorkloadRestartInput,
@@ -1060,7 +890,6 @@ impl HomelabMcp {
     }
 
     /// Scale one exact Deployment or StatefulSet to a bounded replica count.
-    #[action(tool = "kubernetes_exec", name = "workload_scale")]
     async fn kubernetes_workload_scale(
         &self,
         input: WorkloadScaleInput,
@@ -1073,7 +902,6 @@ impl HomelabMcp {
     }
 
     /// Suspend or resume one exact CronJob.
-    #[action(tool = "kubernetes_exec", name = "cronjob_suspend")]
     async fn kubernetes_cronjob_suspend(
         &self,
         input: CronjobSuspendInput,
@@ -1086,7 +914,6 @@ impl HomelabMcp {
     }
 
     /// Create one Job from one exact CronJob using a server-generated name.
-    #[action(tool = "kubernetes_exec", name = "cronjob_trigger")]
     async fn kubernetes_cronjob_trigger(
         &self,
         input: CronjobTriggerInput,
@@ -1099,7 +926,6 @@ impl HomelabMcp {
     }
 
     /// Request ordinary deletion of one exact Pod.
-    #[action(tool = "kubernetes_exec", name = "pod_delete")]
     async fn kubernetes_pod_delete(
         &self,
         input: PodDeleteInput,
@@ -1166,7 +992,6 @@ impl HomelabMcp {
     }
 
     /// List the configured Ceph cluster catalog without contacting a Dashboard.
-    #[action(tool = "ceph_query", name = "cluster.list")]
     async fn ceph_clusters(
         &self,
         input: CephClusterListInput,
@@ -1178,7 +1003,6 @@ impl HomelabMcp {
     }
 
     /// Get bounded normalized native health for one configured Ceph cluster.
-    #[action(tool = "ceph_query", name = "status.get")]
     async fn ceph_status(
         &self,
         input: CephStatusGetInput,
@@ -1190,7 +1014,6 @@ impl HomelabMcp {
     }
 
     /// Get a bounded current metrics snapshot for one configured Ceph cluster.
-    #[action(tool = "ceph_query", name = "metrics.summary")]
     async fn ceph_metrics(
         &self,
         input: CephMetricsSummaryInput,
@@ -1202,7 +1025,6 @@ impl HomelabMcp {
     }
 
     /// List bounded normalized OSD summaries for one configured Ceph cluster.
-    #[action(tool = "ceph_query", name = "osd.list")]
     async fn ceph_osds(
         &self,
         input: CephOsdListInput,
@@ -1214,7 +1036,6 @@ impl HomelabMcp {
     }
 
     /// Get one exact normalized Ceph OSD.
-    #[action(tool = "ceph_query", name = "osd.get")]
     async fn ceph_osd(
         &self,
         input: CephOsdGetInput,
@@ -1226,7 +1047,6 @@ impl HomelabMcp {
     }
 
     /// Ask Ceph whether one exact OSD is currently safe to destroy.
-    #[action(tool = "ceph_query", name = "osd.safe-to-destroy")]
     async fn ceph_osd_safe_to_destroy(
         &self,
         input: CephOsdSafeToDestroyInput,
@@ -1238,7 +1058,6 @@ impl HomelabMcp {
     }
 
     /// List bounded normalized devices attached to one exact Ceph OSD.
-    #[action(tool = "ceph_query", name = "device.list")]
     async fn ceph_devices(
         &self,
         input: CephDeviceListInput,
@@ -1250,7 +1069,6 @@ impl HomelabMcp {
     }
 
     /// Get one exact normalized device attached to one exact Ceph OSD.
-    #[action(tool = "ceph_query", name = "device.get")]
     async fn ceph_device(
         &self,
         input: CephDeviceGetInput,
@@ -1262,7 +1080,6 @@ impl HomelabMcp {
     }
 
     /// Get the current state of curated Ceph cluster flags.
-    #[action(tool = "ceph_query", name = "flags.get")]
     async fn ceph_flags(
         &self,
         input: CephFlagsGetInput,
@@ -1274,7 +1091,6 @@ impl HomelabMcp {
     }
 
     /// List bounded current and recent Ceph Dashboard tasks.
-    #[action(tool = "ceph_query", name = "task.list")]
     async fn ceph_tasks(
         &self,
         input: CephTaskListInput,
@@ -1286,7 +1102,6 @@ impl HomelabMcp {
     }
 
     /// Mark one exact Ceph OSD in, out, or down.
-    #[action(tool = "ceph_exec", name = "osd.mark")]
     async fn ceph_mark_osd(
         &self,
         input: CephOsdMarkInput,
@@ -1299,7 +1114,6 @@ impl HomelabMcp {
     }
 
     /// Reweight one exact Ceph OSD to a finite value from zero through one.
-    #[action(tool = "ceph_exec", name = "osd.reweight")]
     async fn ceph_reweight_osd(
         &self,
         input: CephOsdReweightInput,
@@ -1312,7 +1126,6 @@ impl HomelabMcp {
     }
 
     /// Request a normal or deep scrub of one exact Ceph OSD.
-    #[action(tool = "ceph_exec", name = "osd.scrub")]
     async fn ceph_scrub_osd(
         &self,
         input: CephOsdScrubInput,
@@ -1325,7 +1138,6 @@ impl HomelabMcp {
     }
 
     /// Destroy one explicitly confirmed OSD only after a fresh safety check.
-    #[action(tool = "ceph_exec", name = "osd.destroy")]
     async fn ceph_destroy_osd(
         &self,
         input: CephOsdDestroyInput,
@@ -1338,7 +1150,6 @@ impl HomelabMcp {
     }
 
     /// Purge one explicitly confirmed OSD only after a fresh safety check.
-    #[action(tool = "ceph_exec", name = "osd.purge")]
     async fn ceph_purge_osd(
         &self,
         input: CephOsdPurgeInput,
@@ -1391,7 +1202,6 @@ impl HomelabMcp {
     }
 
     /// List bounded machine inventory including explicit public host pins.
-    #[action(tool = "machines", name = "list")]
     async fn machine_list(
         &self,
         input: MachineListInput,
@@ -1411,7 +1221,6 @@ impl HomelabMcp {
     }
 
     /// Create one exact machine inventory record.
-    #[action(tool = "machines", name = "create")]
     async fn machine_create(
         &self,
         input: MachineCreateInput,
@@ -1436,7 +1245,6 @@ impl HomelabMcp {
     }
 
     /// Update the connection fields of one exact machine UUID without changing host trust.
-    #[action(tool = "machines", name = "update")]
     async fn machine_update(
         &self,
         input: MachineUpdateInput,
@@ -1463,7 +1271,6 @@ impl HomelabMcp {
     }
 
     /// Delete one exact machine UUID.
-    #[action(tool = "machines", name = "delete")]
     async fn machine_delete(
         &self,
         input: MachineIdInput,
@@ -1484,7 +1291,6 @@ impl HomelabMcp {
     }
 
     /// Clear the public host pin for one exact machine, immediately making it untrusted.
-    #[action(tool = "machines", name = "host-key.clear")]
     async fn machine_host_key_clear(
         &self,
         input: MachineIdInput,
@@ -1505,7 +1311,6 @@ impl HomelabMcp {
     }
 
     /// Replace the public host pin for one exact machine with the supplied key.
-    #[action(tool = "machines", name = "host-key.replace")]
     async fn machine_host_key_replace(
         &self,
         input: MachineHostKeyInput,
@@ -1526,7 +1331,6 @@ impl HomelabMcp {
     }
 
     /// List configured deploy metadata without contacting a machine or OpenBao.
-    #[action(tool = "deploys", name = "list")]
     async fn deploy_list(
         &self,
         _: DeployListInput,
@@ -1539,7 +1343,6 @@ impl HomelabMcp {
     }
 
     /// Run one approved deploy on one exact machine UUID.
-    #[action(tool = "deploys", name = "run")]
     async fn deploy_run(
         &self,
         input: DeployRunInput,
@@ -1745,7 +1548,7 @@ mod tests {
         protocol::MCP_PROTOCOL_VERSION,
         server::{
             McpHostedTokenValidation, McpTokenAuthorization, StreamableHttpAuthorization,
-            StreamableHttpOptions, streamable_http_router,
+            StreamableHttpOptions,
         },
     };
     use opentelemetry::trace::{SpanId, SpanKind, Status, TracerProvider as _};
@@ -2050,9 +1853,9 @@ mod tests {
             "tools/call",
             "progress-call",
             json!({
-                "name":QUERY_TOOL_NAME,
+                "name": "query",
                 "arguments":{
-                    "action":"logql.query",
+                    "action":"grafana.logql.query",
                     "input":{"query":"{job=\"progress-test\"}"}
                 }
             }),
@@ -2256,9 +2059,9 @@ mod tests {
                     "tools/call",
                     "telemetry-call",
                     json!({
-                        "name": QUERY_TOOL_NAME,
+                        "name": "query",
                         "arguments": {
-                            "action": "logql.query",
+                            "action":"grafana.logql.query",
                             "input": {"query": "{job=\"telemetry-test\"}"}
                         }
                     }),
@@ -2284,9 +2087,9 @@ mod tests {
                     "tools/call",
                     "telemetry-post",
                     json!({
-                        "name": EXEC_TOOL_NAME,
+                        "name": "create",
                         "arguments": {
-                            "action": "silence.create",
+                            "action":"grafana.silence.create",
                             "input": {
                                 "matchers": [{"name":"alertname","operator":"=","value":"SensitiveMatcher"}],
                                 "duration_seconds": 3600,
@@ -2302,7 +2105,7 @@ mod tests {
                     .header("authorization", "Bearer test-token")
                     .header("mcp-protocol-version", MCP_PROTOCOL_VERSION)
                     .header("mcp-method", "tools/call")
-                    .header("mcp-name", EXEC_TOOL_NAME)
+                    .header("mcp-name", CREATE_TOOL_NAME)
                     .json(&body)
                     .send()
                     .await
@@ -2731,626 +2534,193 @@ mod tests {
 
         let (_, listed) = post_mcp(&endpoint, request("tools/list", "list", json!({}))).await;
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 11);
-        let query_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == QUERY_TOOL_NAME)
-            .unwrap();
-        let exec_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == EXEC_TOOL_NAME)
-            .unwrap();
-        let render_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == RENDER_TOOL_NAME)
-            .unwrap();
-        let tekton_query_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == TEKTON_QUERY_TOOL_NAME)
-            .unwrap();
-        let tekton_exec_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == TEKTON_EXEC_TOOL_NAME)
-            .unwrap();
-        let kubernetes_query_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == KUBERNETES_QUERY_TOOL_NAME)
-            .unwrap();
-        let kubernetes_exec_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == KUBERNETES_EXEC_TOOL_NAME)
-            .unwrap();
-        let ceph_query_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == CEPH_QUERY_TOOL_NAME)
-            .unwrap();
-        let ceph_exec_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == CEPH_EXEC_TOOL_NAME)
-            .unwrap();
-        let machines_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == MACHINES_TOOL_NAME)
-            .unwrap();
-        let deploys_tool = tools
-            .iter()
-            .find(|tool| tool["name"] == DEPLOYS_TOOL_NAME)
-            .unwrap();
-        assert_eq!(machines_tool["inputSchema"]["additionalProperties"], false);
-        assert_eq!(deploys_tool["inputSchema"]["additionalProperties"], false);
-        assert_eq!(
-            machines_tool["inputSchema"]["properties"]["action"]["enum"],
-            json!([
-                "list",
-                "create",
-                "update",
-                "delete",
-                "host-key.clear",
-                "host-key.replace"
-            ])
-        );
-        assert_eq!(
-            deploys_tool["inputSchema"]["properties"]["action"]["enum"],
-            json!(["list", "run"])
-        );
-        assert_eq!(machines_tool["annotations"]["destructiveHint"], true);
-        assert_eq!(deploys_tool["annotations"]["idempotentHint"], false);
-
-        for (name, action, expected_field) in [
-            (MACHINES_TOOL_NAME, "list", "machines"),
-            (DEPLOYS_TOOL_NAME, "list", "deploys"),
-        ] {
-            let (_, response) = post_mcp(
-                &endpoint,
-                request(
-                    "tools/call",
-                    name,
-                    json!({"name":name,"arguments":{"action":action,"input":{}}}),
-                ),
-            )
-            .await;
-            assert_eq!(response["result"]["isError"], Value::Null, "{response}");
-            assert!(response["result"]["structuredContent"][expected_field].is_array());
-        }
-        assert_eq!(ceph_query_tool["annotations"], query_tool["annotations"]);
-        assert_eq!(
-            ceph_exec_tool["annotations"],
-            tekton_exec_tool["annotations"]
-        );
-        let ceph_query_actions = ceph_query_tool["inputSchema"]["properties"]["action"]["enum"]
-            .as_array()
-            .unwrap();
-        for action in [
-            "cluster.list",
-            "status.get",
-            "metrics.summary",
-            "osd.list",
-            "osd.get",
-            "osd.safe-to-destroy",
-            "device.list",
-            "device.get",
-            "flags.get",
-            "task.list",
-        ] {
-            assert!(
-                ceph_query_actions.contains(&json!(action)),
-                "missing {action}"
-            );
-        }
-        let ceph_exec_actions = ceph_exec_tool["inputSchema"]["properties"]["action"]["enum"]
-            .as_array()
-            .unwrap();
-        for action in [
-            "osd.mark",
-            "osd.reweight",
-            "osd.scrub",
-            "osd.destroy",
-            "osd.purge",
-        ] {
-            assert!(
-                ceph_exec_actions.contains(&json!(action)),
-                "missing {action}"
-            );
-        }
-        for removed in ["help.flags", "flags.set"] {
-            assert!(!ceph_exec_actions.contains(&json!(removed)));
-        }
-        for legacy in [
-            "cluster_list",
-            "status_get",
-            "osd_safe_to_destroy",
-            "flags_set",
-        ] {
-            assert!(!ceph_query_actions.contains(&json!(legacy)));
-            assert!(!ceph_exec_actions.contains(&json!(legacy)));
-        }
-        assert_eq!(
-            kubernetes_query_tool["annotations"],
-            query_tool["annotations"]
-        );
-        assert_eq!(
-            kubernetes_exec_tool["annotations"],
-            tekton_exec_tool["annotations"]
-        );
-        assert_eq!(
-            kubernetes_query_tool["inputSchema"]["properties"]["action"]["enum"],
-            json!([
-                "cluster_list",
-                "capability_list",
-                "resource_list",
-                "resource_get",
-                "pod_logs"
-            ])
-        );
-        assert_eq!(
-            kubernetes_exec_tool["inputSchema"]["properties"]["action"]["enum"],
-            json!([
-                "workload_restart",
-                "workload_scale",
-                "cronjob_suspend",
-                "cronjob_trigger",
-                "pod_delete"
-            ])
-        );
-        let kubernetes_actions = action_schemas(kubernetes_query_tool);
-        assert_eq!(kubernetes_actions.len(), 5);
-        for action in &kubernetes_actions {
-            if matches!(
-                action["action"].as_str(),
-                Some("resource_list" | "resource_get")
-            ) {
-                assert!(
-                    action["input_schema"]["anyOf"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .all(|branch| branch["additionalProperties"] == false)
-                );
-            } else {
-                assert_eq!(action["input_schema"]["additionalProperties"], false);
+        assert_eq!(tools.len(), 4);
+        for tool in tools {
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+            assert_eq!(tool["annotations"]["readOnlyHint"], tool["name"] == "query");
+            for action in action_schemas(tool) {
+                assert!(!action.to_string().contains("__"));
+                let schema = &action["input_schema"];
+                if let Some(branches) = schema["anyOf"].as_array() {
+                    assert!(
+                        branches
+                            .iter()
+                            .all(|branch| branch["additionalProperties"] == false)
+                    );
+                } else {
+                    assert_eq!(schema["additionalProperties"], false);
+                }
             }
         }
-        let resource_list_schema = &kubernetes_actions
-            .iter()
-            .find(|action| action["action"] == "resource_list")
-            .unwrap()["input_schema"];
-        let resource_list_branches = resource_list_schema["anyOf"].as_array().unwrap();
-        assert!(
-            resource_list_branches
-                .iter()
-                .all(|branch| branch["properties"].get("labels").is_some()
-                    && branch["properties"].get("name").is_none())
+        let find_schema = |tool_name: &str, action_name: &str| {
+            action_schemas(tools.iter().find(|tool| tool["name"] == tool_name).unwrap())
+                .into_iter()
+                .find(|action| action["action"] == action_name)
+                .unwrap()["input_schema"]
+                .clone()
+        };
+        let pod_logs = find_schema("query", "kubernetes.pod_logs");
+        assert_eq!(
+            pod_logs["properties"]["instance"]["enum"],
+            json!(["current", "previous"])
         );
-        assert!(
-            resource_list_branches[0]["required"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("namespace"))
+        assert_eq!(pod_logs["properties"]["tail_lines"]["maximum"], 1000);
+        assert_eq!(pod_logs["properties"]["max_bytes"]["maximum"], 262144);
+        assert_eq!(
+            pod_logs["required"],
+            json!([
+                "cluster",
+                "namespace",
+                "pod",
+                "pod_uid",
+                "container",
+                "instance"
+            ])
         );
+        let resources = find_schema("query", "kubernetes.resource_list");
+        assert_eq!(resources["anyOf"].as_array().unwrap().len(), 2);
+        assert!(resources["anyOf"][0]["properties"].get("labels").is_some());
         assert!(
-            resource_list_branches[1]["properties"]
+            resources["anyOf"][1]["properties"]
                 .get("namespace")
                 .is_none()
         );
-        let pod_logs_schema = &kubernetes_actions
-            .iter()
-            .find(|action| action["action"] == "pod_logs")
-            .unwrap()["input_schema"];
-        assert_eq!(pod_logs_schema["additionalProperties"], false);
-        assert_eq!(
-            pod_logs_schema["properties"]["instance"]["enum"],
-            json!(["current", "previous"])
-        );
-        assert_eq!(pod_logs_schema["properties"]["tail_lines"]["minimum"], 1);
-        assert_eq!(
-            pod_logs_schema["properties"]["tail_lines"]["maximum"],
-            1_000
-        );
-        assert_eq!(pod_logs_schema["properties"]["max_bytes"]["minimum"], 1);
-        assert_eq!(
-            pod_logs_schema["properties"]["max_bytes"]["maximum"],
-            262_144
-        );
-        for required in [
-            "cluster",
-            "namespace",
-            "pod",
-            "pod_uid",
-            "container",
-            "instance",
-        ] {
-            assert!(
-                pod_logs_schema["required"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!(required))
+        for action in ["ceph.osd.list", "ceph.device.list", "ceph.task.list"] {
+            let schema = find_schema("query", action);
+            assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+            assert_eq!(schema["properties"]["limit"]["maximum"], 100);
+        }
+        for action in ["ceph.osd.destroy", "ceph.osd.purge"] {
+            assert_eq!(
+                find_schema("destroy", action)["required"],
+                json!(["cluster", "osd_id", "confirmation"])
             );
         }
-        let (_, clusters) = post_mcp(
-            &endpoint,
-            request(
-                "tools/call",
-                "kubernetes-clusters",
-                json!({
-                    "name":KUBERNETES_QUERY_TOOL_NAME,
-                    "arguments":{"action":"cluster_list","input":{}}
-                }),
-            ),
-        )
-        .await;
-        assert_eq!(clusters["result"]["structuredContent"]["type"], "clusters");
-        assert_eq!(
-            clusters["result"]["structuredContent"]["result"]["clusters"][0]["name"],
-            "test"
-        );
-        let ceph_actions = action_schemas(ceph_query_tool);
-        assert_eq!(
-            ceph_actions
-                .iter()
-                .map(|action| action["action"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec![
-                "cluster.list",
-                "status.get",
-                "metrics.summary",
-                "osd.list",
-                "osd.get",
-                "osd.safe-to-destroy",
-                "device.list",
-                "device.get",
-                "flags.get",
-                "task.list"
-            ]
-        );
+        let weight = find_schema("execute", "ceph.osd.reweight");
+        assert_eq!(weight["properties"]["weight"]["minimum"], 0.0);
+        assert_eq!(weight["properties"]["weight"]["maximum"], 1.0);
+        for action in ["tekton.run.get", "tekton.run.status", "tekton.run.wait"] {
+            assert_eq!(find_schema("query", action)["required"], json!(["run_id"]));
+        }
         assert!(
-            ceph_actions
-                .iter()
-                .all(|action| action["input_schema"]["additionalProperties"] == false)
-        );
-        for action_name in ["osd.list", "device.list", "task.list"] {
-            let limit_schema = &ceph_actions
-                .iter()
-                .find(|action| action["action"] == action_name)
-                .unwrap()["input_schema"]["properties"]["limit"];
-            assert_eq!(limit_schema["minimum"], 1, "{action_name} minimum");
-            assert_eq!(limit_schema["maximum"], 100, "{action_name} maximum");
-        }
-        let ceph_osd_actions = action_schemas(ceph_exec_tool);
-        assert_eq!(ceph_osd_actions.len(), 5);
-        for action in &ceph_osd_actions {
-            assert_eq!(action["input_schema"]["additionalProperties"], false);
-        }
-        let reweight_schema = &ceph_osd_actions
-            .iter()
-            .find(|action| action["action"] == "osd.reweight")
-            .unwrap()["input_schema"]["properties"]["weight"];
-        assert_eq!(reweight_schema["minimum"], 0.0);
-        assert_eq!(reweight_schema["maximum"], 1.0);
-        let destroy_schema = &ceph_osd_actions
-            .iter()
-            .find(|action| action["action"] == "osd.destroy")
-            .unwrap()["input_schema"];
-        assert_eq!(
-            destroy_schema["required"],
-            json!(["cluster", "osd_id", "confirmation"])
-        );
-        let (_, ceph_clusters) = post_mcp(
-            &endpoint,
-            request(
-                "tools/call",
-                "ceph-clusters",
-                json!({
-                    "name":CEPH_QUERY_TOOL_NAME,
-                    "arguments":{"action":"cluster.list","input":{}}
-                }),
-            ),
-        )
-        .await;
-        assert_eq!(
-            ceph_clusters["result"]["structuredContent"],
-            json!({"result":[{"cluster":"test-cluster"}],"truncated":false})
-        );
-        let (_, filtered_ceph_clusters) = post_mcp(
-            &endpoint,
-            request(
-                "tools/call",
-                "filtered-ceph-clusters",
-                json!({
-                    "name":CEPH_QUERY_TOOL_NAME,
-                    "arguments":{"action":"cluster.list","input":{},"filter":".result"}
-                }),
-            ),
-        )
-        .await;
-        assert_eq!(
-            filtered_ceph_clusters["result"]["structuredContent"],
-            json!([{"cluster":"test-cluster"}])
-        );
-        assert_eq!(
-            tekton_query_tool["annotations"],
-            json!({
-                "readOnlyHint":true, "destructiveHint":false,
-                "idempotentHint":true, "openWorldHint":true
-            })
-        );
-        assert_eq!(
-            tekton_exec_tool["annotations"],
-            json!({
-                "readOnlyHint":false, "destructiveHint":true,
-                "idempotentHint":false, "openWorldHint":true
-            })
-        );
-        let tekton_query_actions = tekton_query_tool["inputSchema"]["properties"]["action"]["enum"]
-            .as_array()
-            .unwrap();
-        for action in [
-            "repository.list",
-            "workflow.list",
-            "run.list",
-            "run.get",
-            "run.status",
-            "run.wait",
-            "task.list",
-            "task.logs",
-        ] {
-            assert!(
-                tekton_query_actions.contains(&json!(action)),
-                "missing {action}"
-            );
-        }
-        let tekton_exec_actions = tekton_exec_tool["inputSchema"]["properties"]["action"]["enum"]
-            .as_array()
-            .unwrap();
-        for action in ["workflow.dispatch", "run.rerun", "run.cancel"] {
-            assert!(
-                tekton_exec_actions.contains(&json!(action)),
-                "missing {action}"
-            );
-        }
-        let tekton_run_actions = action_schemas(tekton_query_tool)
-            .into_iter()
-            .filter(|action| action["action"].as_str().unwrap().starts_with("run."))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            tekton_run_actions
-                .iter()
-                .map(|action| action["action"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec!["run.list", "run.get", "run.status", "run.wait"]
-        );
-        let run_list_schema = &tekton_run_actions
-            .iter()
-            .find(|action| action["action"] == "run.list")
-            .unwrap()["input_schema"];
-        assert_eq!(run_list_schema["additionalProperties"], false);
-        assert!(run_list_schema["properties"].get("revision").is_some());
-        let run_wait_schema = &tekton_run_actions
-            .iter()
-            .find(|action| action["action"] == "run.wait")
-            .unwrap()["input_schema"];
-        assert_eq!(run_wait_schema["additionalProperties"], false);
-        assert_eq!(run_wait_schema["required"], json!(["run_id"]));
-        assert!(
-            run_wait_schema["properties"]
-                .get("timeout_seconds")
+            find_schema("query", "tekton.run.list")["properties"]
+                .get("revision")
                 .is_some()
         );
-        let run_status_schema = &tekton_run_actions
-            .iter()
-            .find(|action| action["action"] == "run.status")
-            .unwrap()["input_schema"];
-        assert_eq!(run_status_schema["additionalProperties"], false);
-        assert_eq!(run_status_schema["required"], json!(["run_id"]));
         assert_eq!(
-            query_tool["annotations"],
-            json!({
-                "readOnlyHint":true, "destructiveHint":false,
-                "idempotentHint":true, "openWorldHint":true
-            })
-        );
-        assert_eq!(
-            exec_tool["annotations"],
-            json!({
-                "readOnlyHint":false, "destructiveHint":false,
-                "idempotentHint":false, "openWorldHint":true
-            })
-        );
-        assert!(
-            exec_tool["description"]
-                .as_str()
-                .unwrap()
-                .contains("operationally consequential")
-        );
-        assert_eq!(query_tool["inputSchema"]["additionalProperties"], false);
-        assert_eq!(exec_tool["inputSchema"]["additionalProperties"], false);
-        assert_eq!(render_tool["inputSchema"]["additionalProperties"], false);
-        assert_eq!(render_tool["annotations"], query_tool["annotations"]);
-        let render_actions = render_tool["inputSchema"]["properties"]["action"]["enum"]
-            .as_array()
-            .unwrap();
-        assert_eq!(
-            render_actions,
-            json!(["dashboard", "panel"]).as_array().unwrap()
-        );
-        let query_action_enum = query_tool["inputSchema"]["properties"]["action"]["enum"]
-            .as_array()
-            .unwrap();
-        for action in [
-            "logql.query",
-            "promql.query",
-            "traceql.search",
-            "profile.merge",
-            "alert-rule.list",
-            "recording-rule.list",
-            "alert-instance.list",
-            "silence.list",
-            "dashboard.list",
-            "dashboard.get",
-        ] {
-            assert!(
-                query_action_enum.contains(&json!(action)),
-                "missing {action}"
-            );
-        }
-        for legacy in [
-            "logql",
-            "promql",
-            "traceql",
-            "profiles",
-            "alert_rules",
-            "alert_instances",
-            "list_silences",
-        ] {
-            assert!(
-                !query_action_enum.contains(&json!(legacy)),
-                "found {legacy}"
-            );
-        }
-        let exec_action_enum = exec_tool["inputSchema"]["properties"]["action"]["enum"]
-            .as_array()
-            .unwrap();
-        assert_eq!(
-            exec_action_enum,
-            json!(["silence.create"]).as_array().unwrap()
-        );
-        assert!(!exec_action_enum.contains(&json!("create_silence")));
-
-        let query_actions = action_schemas(query_tool);
-        assert_eq!(
-            query_actions
-                .iter()
-                .map(|action| action["action"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            vec![
-                "logql.query",
-                "promql.query",
-                "traceql.search",
-                "profile.merge",
-                "alert-rule.list",
-                "recording-rule.list",
-                "alert-instance.list",
-                "silence.list",
-                "dashboard.list",
-                "dashboard.get"
-            ]
-        );
-        for (action, required, optional) in [
-            (
-                "promql.query",
-                vec!["query"],
-                vec!["start", "end", "step", "time"],
-            ),
-            (
-                "traceql.search",
-                vec!["query"],
-                vec!["start", "end", "limit"],
-            ),
-            (
-                "profile.merge",
-                vec!["selector", "start", "end"],
-                vec!["profile_type", "max_nodes"],
-            ),
-            ("alert-rule.list", vec![], vec!["limit"]),
-            ("recording-rule.list", vec![], vec!["limit"]),
-            ("alert-instance.list", vec![], vec!["matchers", "limit"]),
-            ("silence.list", vec![], vec!["state", "limit"]),
-            (
-                "dashboard.list",
-                vec![],
-                vec!["query", "tags", "page", "limit"],
-            ),
-            ("dashboard.get", vec!["uid"], vec![]),
-        ] {
-            let schema = &query_actions
-                .iter()
-                .find(|candidate| candidate["action"] == action)
-                .unwrap()["input_schema"];
-            assert_eq!(schema["additionalProperties"], false);
-            let properties = schema["properties"].as_object().unwrap();
-            for field in required.iter().chain(optional.iter()) {
-                assert!(properties.contains_key(*field), "{action} missing {field}");
-            }
-            if required.is_empty() {
-                assert_eq!(schema["required"], Value::Null);
-            } else {
-                assert_eq!(schema["required"], json!(required));
-            }
-        }
-
-        let exec_actions = action_schemas(exec_tool);
-        assert_eq!(exec_actions.len(), 1);
-        assert_eq!(exec_actions[0]["action"], "silence.create");
-        let silence_schema = &exec_actions[0]["input_schema"];
-        assert_eq!(silence_schema["additionalProperties"], false);
-        assert_eq!(
-            silence_schema["required"],
+            find_schema("create", "grafana.silence.create")["required"],
             json!(["matchers", "duration_seconds", "comment"])
         );
 
-        for (action, result_type, expected_field) in [
-            ("alert-rule.list", "alert_rules", ("title", "API errors")),
-            (
-                "recording-rule.list",
-                "recording_rules",
-                ("metric", "api_request_rate"),
-            ),
-            (
-                "alert-instance.list",
-                "alert_instances",
-                ("fingerprint", "abc123"),
-            ),
-            ("silence.list", "silences", ("silence_id", "silence-active")),
-            ("dashboard.list", "dashboards", ("title", "Overview")),
+        let (_, listed) =
+            post_mcp(&endpoint, request("resources/list", "resources", json!({}))).await;
+        let catalogs = listed["result"]["resources"].as_array().unwrap();
+        assert_eq!(catalogs.len(), 9);
+        for uri in [
+            "homelab://kubernetes/clusters",
+            "homelab://ceph/clusters",
+            "homelab://machines",
+            "homelab://deploys",
         ] {
-            let (_, call) = post_mcp(
+            assert!(catalogs.iter().any(|resource| resource["uri"] == uri));
+            let (_, read) = post_mcp(
                 &endpoint,
-                request(
-                    "tools/call",
-                    action,
-                    json!({"name":QUERY_TOOL_NAME,"arguments":{"action":action,"input":{}}}),
-                ),
+                request("resources/read", "catalog", json!({"uri":uri})),
             )
             .await;
-            assert_eq!(call["result"]["isError"], Value::Null, "{call}");
-            assert_eq!(call["result"]["structuredContent"]["mode"], "list");
-            assert_eq!(
-                call["result"]["structuredContent"]["result_type"],
-                result_type
-            );
-            assert_eq!(
-                call["result"]["structuredContent"]["result"][0][expected_field.0],
-                expected_field.1
-            );
+            assert!(read["result"]["contents"][0]["text"].is_string(), "{read}");
         }
-
+        let (_, templates) = post_mcp(
+            &endpoint,
+            request("resources/templates/list", "templates", json!({})),
+        )
+        .await;
+        let templates = templates["result"]["resourceTemplates"].as_array().unwrap();
+        assert_eq!(templates.len(), 11);
+        assert!(templates.iter().all(|template| {
+            template["description"]
+                .as_str()
+                .unwrap()
+                .contains("Input schema:")
+        }));
+        for (uri, result_type, field, expected) in [
+            (
+                "homelab://grafana/alert-rules",
+                "alert_rules",
+                "title",
+                "API errors",
+            ),
+            (
+                "homelab://grafana/recording-rules",
+                "recording_rules",
+                "metric",
+                "api_request_rate",
+            ),
+            (
+                "homelab://grafana/dashboards",
+                "dashboards",
+                "title",
+                "Overview",
+            ),
+        ] {
+            let (_, read) = post_mcp(
+                &endpoint,
+                request("resources/read", "grafana-catalog", json!({"uri":uri})),
+            )
+            .await;
+            let value: Value =
+                serde_json::from_str(read["result"]["contents"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(value["result_type"], result_type);
+            assert_eq!(value["result"][0][field], expected);
+        }
         let (_, dashboard) = post_mcp(
             &endpoint,
             request(
-                "tools/call",
-                "dashboard-get",
-                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"dashboard.get","input":{"uid":"dash-1"}}}),
+                "resources/read",
+                "dashboard",
+                json!({"uri":"homelab://grafana/dashboards/dash-1"}),
             ),
         )
         .await;
-        let dashboard_result = &dashboard["result"]["structuredContent"]["result"];
+        let dashboard: Value =
+            serde_json::from_str(dashboard["result"]["contents"][0]["text"].as_str().unwrap())
+                .unwrap();
         assert_eq!(
-            dashboard_result["panels"][0],
+            dashboard["result"]["panels"][0],
             json!({"id":"13","title":"CPU","type":"timeseries"})
         );
         assert_eq!(
-            dashboard_result["variables"][0],
+            dashboard["result"]["variables"][0],
             json!({"name":"cluster","label":"Cluster","type":"query"})
         );
         for omitted in ["targets", "expr", "secret", "url", "\"id\":1"] {
-            assert!(!dashboard_result.to_string().contains(omitted));
+            assert!(!dashboard.to_string().contains(omitted));
         }
+        let uri = format!(
+            "homelab://grafana/dashboards?{}",
+            url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("input", "{\"limit\":1,\"tags\":[\"prod\"]}")
+                .append_pair("filter", ".result[0].title")
+                .finish()
+        );
+        let (_, projected) = post_mcp(
+            &endpoint,
+            request("resources/read", "projected", json!({"uri":uri})),
+        )
+        .await;
+        assert_eq!(projected["result"]["contents"][0]["uri"], uri);
+        let value: Value =
+            serde_json::from_str(projected["result"]["contents"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(value, json!({"result":"Overview"}));
 
         let (_, rendered) = post_mcp(
             &endpoint,
             request(
                 "tools/call",
                 "render-dashboard",
-                json!({"name":RENDER_TOOL_NAME,"arguments":{"action":"dashboard","input":{"uid":"dash-1"}}}),
+                json!({"name": "query","arguments":{"action":"grafana.render.dashboard","input":{"uid":"dash-1"}}}),
             ),
         )
         .await;
@@ -3379,7 +2749,7 @@ mod tests {
             request(
                 "tools/call",
                 "filtered-render",
-                json!({"name":RENDER_TOOL_NAME,"arguments":{"action":"dashboard","input":{"uid":"dash-1"},"filter":".sha256"}}),
+                json!({"name": "query","arguments":{"action":"grafana.render.dashboard","input":{"uid":"dash-1"},"filter":".sha256"}}),
             ),
         )
         .await;
@@ -3400,9 +2770,9 @@ mod tests {
                 "tools/call",
                 "create-silence",
                 json!({
-                    "name":EXEC_TOOL_NAME,
+                    "name": "create",
                     "arguments":{
-                        "action":"silence.create",
+                        "action":"grafana.silence.create",
                         "input":{
                             "matchers":[{"name":"alertname","operator":"=","value":"APIError"}],
                             "duration_seconds":3600,
@@ -3430,8 +2800,8 @@ mod tests {
                 "tools/call",
                 "filtered-alerts",
                 json!({
-                    "name":QUERY_TOOL_NAME,
-                    "arguments":{"action":"alert-instance.list","input":{},"filter":".result[]"}
+                    "name": "query",
+                    "arguments":{"action":"grafana.alert-instance.list","input":{},"filter":".result[]"}
                 }),
             ),
         )
@@ -3520,9 +2890,9 @@ mod tests {
                 "tools/call",
                 "run-wait",
                 json!({
-                    "name":TEKTON_QUERY_TOOL_NAME,
+                    "name": "query",
                     "arguments":{
-                        "action":"run.wait",
+                        "action":"tekton.run.wait",
                         "input":{"run_id":"pipelines-as-code/run","timeout_seconds":1}
                     }
                 }),
@@ -3542,9 +2912,9 @@ mod tests {
                 "tools/call",
                 "run-status",
                 json!({
-                    "name":TEKTON_QUERY_TOOL_NAME,
+                    "name": "query",
                     "arguments":{
-                        "action":"run.status",
+                        "action":"tekton.run.status",
                         "input":{"run_id":"pipelines-as-code/run"}
                     }
                 }),
@@ -3576,7 +2946,7 @@ mod tests {
             (QUERY_TOOL_NAME, "alert_rules"),
             (QUERY_TOOL_NAME, "alert_instances"),
             (QUERY_TOOL_NAME, "list_silences"),
-            (EXEC_TOOL_NAME, "create_silence"),
+            (CREATE_TOOL_NAME, "create_silence"),
         ] {
             let (_, response) = post_mcp(
                 &endpoint,
@@ -3593,9 +2963,9 @@ mod tests {
         for (tool, arguments) in [
             (QUERY_TOOL_NAME, json!({"action":"unknown"})),
             (QUERY_TOOL_NAME, json!({"action":"silence.create"})),
-            (EXEC_TOOL_NAME, json!({"action":"alert-rule.list"})),
-            (EXEC_TOOL_NAME, json!({"action":"recording-rule.list"})),
-            (EXEC_TOOL_NAME, json!({"action":"silence.list"})),
+            (CREATE_TOOL_NAME, json!({"action":"alert-rule.list"})),
+            (CREATE_TOOL_NAME, json!({"action":"recording-rule.list"})),
+            (CREATE_TOOL_NAME, json!({"action":"silence.list"})),
             (
                 QUERY_TOOL_NAME,
                 json!({"action":"alert-rule.list","input":{"limit":1,"extra":true}}),
@@ -3605,14 +2975,14 @@ mod tests {
                 json!({"action":"recording-rule.list","input":{"limit":1,"extra":true}}),
             ),
             (
-                TEKTON_QUERY_TOOL_NAME,
+                QUERY_TOOL_NAME,
                 json!({
-                    "action":"run.status",
+                    "action":"tekton.run.status",
                     "input":{"run_id":"pipelines-as-code/run","extra":true}
                 }),
             ),
             (
-                EXEC_TOOL_NAME,
+                CREATE_TOOL_NAME,
                 json!({
                     "action":"silence.create",
                     "input":{
@@ -3621,31 +2991,31 @@ mod tests {
                 }),
             ),
             (
-                KUBERNETES_QUERY_TOOL_NAME,
-                json!({"action":"pod_delete","input":{"cluster":"test","namespace":"ns","name":"pod"}}),
+                QUERY_TOOL_NAME,
+                json!({"action":"kubernetes.pod_delete","input":{"cluster":"test","namespace":"ns","name":"pod"}}),
             ),
             (
-                KUBERNETES_EXEC_TOOL_NAME,
-                json!({"action":"resource_get","input":{"cluster":"test","kind":"pod","namespace":"ns","name":"pod"}}),
+                EXECUTE_TOOL_NAME,
+                json!({"action":"kubernetes.resource_get","input":{"cluster":"test","kind":"pod","namespace":"ns","name":"pod"}}),
             ),
             (
-                KUBERNETES_QUERY_TOOL_NAME,
+                QUERY_TOOL_NAME,
                 json!({"action":"cluster_list","input":{"extra":true}}),
             ),
             (
-                CEPH_QUERY_TOOL_NAME,
-                json!({"action":"osd.mark","input":{"cluster":"test-cluster","osd_id":1,"state":"out"}}),
+                QUERY_TOOL_NAME,
+                json!({"action":"ceph.osd.mark","input":{"cluster":"test-cluster","osd_id":1,"state":"out"}}),
             ),
             (
-                CEPH_EXEC_TOOL_NAME,
-                json!({"action":"status.get","input":{"cluster":"test-cluster"}}),
+                EXECUTE_TOOL_NAME,
+                json!({"action":"ceph.status.get","input":{"cluster":"test-cluster"}}),
             ),
             (
-                CEPH_EXEC_TOOL_NAME,
+                EXECUTE_TOOL_NAME,
                 json!({"action":"flags.set","input":{"cluster":"test-cluster","flag":"noout","state":"set"}}),
             ),
             (
-                CEPH_QUERY_TOOL_NAME,
+                QUERY_TOOL_NAME,
                 json!({"action":"cluster.list","input":{"extra":true}}),
             ),
             (
@@ -3674,7 +3044,7 @@ mod tests {
             request(
                 "tools/call",
                 "semantic",
-                json!({"name":QUERY_TOOL_NAME,"arguments":{"action":"logql.query","input":{"query":" "},"filter":".error"}}),
+                json!({"name": "query","arguments":{"action":"grafana.logql.query","input":{"query":" "},"filter":".error"}}),
             ),
         )
         .await;
@@ -3692,23 +3062,18 @@ mod tests {
         let (_, recording_semantic) = post_mcp(
             &endpoint,
             request(
-                "tools/call",
+                "resources/read",
                 "recording-semantic",
-                json!({
-                    "name":QUERY_TOOL_NAME,
-                    "arguments":{"action":"recording-rule.list","input":{"limit":0}}
-                }),
+                json!({"uri":"homelab://grafana/recording-rules?input=%7B%22limit%22%3A0%7D"}),
             ),
         )
         .await;
-        assert_eq!(recording_semantic["result"]["isError"], true);
-        assert_eq!(
-            recording_semantic["result"]["structuredContent"]["error"],
-            json!({
-                "code":"invalid_arguments",
-                "message":"The recording rule arguments are invalid.",
-                "retryable":false
-            })
+        assert_eq!(recording_semantic["error"]["code"], -32602);
+        assert!(
+            recording_semantic["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("invalid_arguments")
         );
 
         let (_, mutation_semantic) = post_mcp(
@@ -3717,9 +3082,9 @@ mod tests {
                 "tools/call",
                 "mutation-semantic",
                 json!({
-                    "name":EXEC_TOOL_NAME,
+                    "name": "create",
                     "arguments":{
-                        "action":"silence.create",
+                        "action":"grafana.silence.create",
                         "input":{"matchers":[],"duration_seconds":0,"comment":" "}
                     }
                 }),
@@ -3738,9 +3103,9 @@ mod tests {
                 "tools/call",
                 "kubernetes-semantic",
                 json!({
-                    "name":KUBERNETES_EXEC_TOOL_NAME,
+                    "name": "execute",
                     "arguments":{
-                        "action":"workload_scale",
+                        "action":"kubernetes.workload_scale",
                         "input":{
                             "cluster":"test", "kind":"deployment", "namespace":"ns",
                             "name":"app", "replicas":1001
@@ -3766,8 +3131,8 @@ mod tests {
                 "tools/call",
                 "ceph-semantic",
                 json!({
-                    "name":CEPH_QUERY_TOOL_NAME,
-                    "arguments":{"action":"status.get","input":{"cluster":"Bad.Name"}}
+                    "name": "query",
+                    "arguments":{"action":"ceph.status.get","input":{"cluster":"Bad.Name"}}
                 }),
             ),
         )
@@ -3827,9 +3192,9 @@ mod tests {
                 "tools/call",
                 "uncertain-mutation",
                 json!({
-                    "name":EXEC_TOOL_NAME,
+                    "name": "create",
                     "arguments":{
-                        "action":"silence.create",
+                        "action":"grafana.silence.create",
                         "input":{
                             "matchers":[{"name":"alertname","operator":"=","value":"APIError"}],
                             "duration_seconds":3600,

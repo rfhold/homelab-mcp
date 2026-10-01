@@ -74,7 +74,7 @@ Logout succeeds when no cache exists. When a token exists, it best-effort runs s
 
 ## MCP Run
 
-The progressive `deploys` tool exposes `list` and `run`. A run accepts only `deploy_id` and one exact `machine_id` UUID. The catalog supplies every entrypoint, inventory, timeout, and availability decision.
+The `homelab://deploys` resource lists approved definitions; `execute` action `deploy.run` runs one approved deploy. A run accepts only `deploy_id` and one exact `machine_id` UUID. The catalog supplies every entrypoint, inventory, timeout, and availability decision.
 
 MCP currently resolves only `system-info`. Callers cannot supply shell commands, pyinfra arguments, inventory fields, SSH options, paths, environment variables, or additional targets.
 

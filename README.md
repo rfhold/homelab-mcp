@@ -2,7 +2,7 @@
 
 `homelab-mcp` is a Rust MCP server for authenticated, bounded homelab integrations.
 
-The repository implements hosted OAuth with Authentik browser authentication, stateless MCP, the read-only `grafana_query` and `grafana_render` tools, and the operationally consequential `grafana_exec` tool. Grafana actions cover datasource queries, alerting, dashboard inventory, bounded PNG rendering, and bounded silence creation. The application uses a concrete services composition root and integration-owned clients, actions, errors, and telemetry so additional integrations can be added without coupling MCP dispatch to their SDKs.
+The repository implements hosted OAuth with Authentik browser authentication and stateless MCP. The [uniform MCP interface](docs/architecture/mcp-interface.md) serves configuration catalogs as resources and live reads or approved mutations through `query`, `create`, `execute`, and `destroy`. Integration-owned clients preserve their typed inputs, normalization, cancellation, and safety boundaries.
 
 Implementation entry points are [the library](src/lib.rs), [the Axum process](src/main.rs), [the container build](Dockerfile), [Pulumi](infra/pulumi/), and [the preview pipeline](.tekton/homelab-mcp-preview.yaml).
 

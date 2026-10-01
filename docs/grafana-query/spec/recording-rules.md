@@ -2,7 +2,7 @@
 
 ## Status
 
-This specification defines the canonical behavior for the read-only `grafana_query` action `recording-rule.list`. Repository-local validation and mock Grafana tests cover the action. An authenticated call against preview commit `798dd92` returned `invalid_response` with `limit: 1`. Grafana's authoritative response DTO omits empty labels, while the strict current normalizer rejects missing labels. This is the evidence-backed likely mismatch; the raw preview response was not captured. The approved label and synthetic-group normalization fixes have not been deployed or verified live.
+This specification defines the canonical behavior for the resource `homelab://grafana/recording-rules`. Repository-local validation and mock Grafana tests cover the action. An authenticated call against preview commit `798dd92` returned `invalid_response` with `limit: 1`. Grafana's authoritative response DTO omits empty labels, while the strict current normalizer rejects missing labels. This is the evidence-backed likely mismatch; the raw preview response was not captured. The approved label and synthetic-group normalization fixes have not been deployed or verified live.
 
 The [shared contract](common.md) owns authorization, tool annotations, fixed-destination transport, limits, errors, filtering, and telemetry.
 

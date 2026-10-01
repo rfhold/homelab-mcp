@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This specification governs the progressive `deploys` MCP tool, catalog resolution, and runtime execution.
+This specification governs the `homelab://deploys` resource and `execute` action `deploy.run`, catalog resolution, and runtime execution.
 
 ## Requirements
 

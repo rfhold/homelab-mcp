@@ -6,20 +6,15 @@ This document defines the locally implemented behavior. Rust and Pulumi tests pr
 
 ## Tool Surfaces
 
-The authenticated MCP server exposes two progressive tools:
+Repository and workflow definitions are resources; run/task/log/status/wait reads use `query`, and dispatch/rerun/cancel use `execute`. The [uniform MCP interface](../../architecture/mcp-interface.md) owns exact public domain-prefixed names, schemas, resources, annotations, and routing. Focused specifications retain unqualified backend operation labels. No help actions or compatibility aliases exist.
 
-| Tool | Actions | MCP annotations |
-| --- | --- | --- |
-| `tekton_query` | `repository.list`, `workflow.list`, `run.list`, `run.get`, `run.status`, `run.wait`, `task.list`, `task.logs` | `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` |
-| `tekton_exec` | `workflow.dispatch`, `run.rerun`, `run.cancel` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` |
+Typed tool inputs and jq projections retain their existing semantics, synchronized text, image content, and unchanged semantic tool errors. Resource failures use JSON-RPC errors with safe semantic details. The same global authorization, fixed upstream operations, cancellation, and bounds apply.
 
-Each tool provides action-dependent `input` and an optional jq-compatible `filter`. Every successful unfiltered read or mutation returns its complete normalized JSON in ordinary text content and the same value in `structuredContent`, so repository, workflow, run, and task identities and mutation acceptance details remain available for follow-up actions. A filter keeps text and successful structured content synchronized. The [MCP Skills contract](../../architecture/mcp-skills.md) supplies authored task guidance instead of generated help actions.
-
-Read actions exist only on `tekton_query`. Mutation actions exist only on `tekton_exec`.
+Successful unfiltered tool results retain complete normalized JSON in text and structured content, including repository, workflow, run/task identities and mutation acceptance details. Resource results preserve the same normalized relationships as JSON content.
 
 ## Authorization
 
-The global set `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` gates every action on both tools. No narrower Tekton read or mutation enforcement exists.
+The global set `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` gates every action on resources and tools. No narrower Tekton read or mutation enforcement exists.
 
 This choice lets every current MCP principal dispatch workflows, rerun runs, and cancel active runs. Each caller must make an explicit user decision before an exec call.
 

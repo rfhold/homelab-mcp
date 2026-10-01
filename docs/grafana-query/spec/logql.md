@@ -6,9 +6,9 @@ This specification defines the implemented worktree behavior for the `logql.quer
 
 ## Tool Surface
 
-`#[mcp::progressive_server]` generates the read-only MCP tool `grafana_query`. The [feature index](../README.md) lists its ten actions and the separately advertised `grafana_render` and `grafana_exec` tools.
+The [uniform MCP interface](../../architecture/mcp-interface.md) routes this operation to `query` action `grafana.logql.query`; definition catalogs use resources, rendering uses query actions, and silence creation uses `create`.
 
-The macro generates the domain action schema and filter behavior. MCP Skills provide task guidance through `skills/list`, `skills/get`, and catalog-backed `resources/read`; generated help actions have been removed.
+Pinned public MCP primitives supply the action schema and filter behavior. MCP Skills provide task guidance through `skills/list`, `skills/get`, and catalog-backed `resources/read`; generated help actions have been removed.
 
 The [shared contract](common.md) defines generated tool behavior, shared transport limits, and common error mapping.
 
@@ -69,7 +69,7 @@ Equal range endpoints are valid. Validation must finish before concurrency acqui
 | Maximum query limit | 5000 |
 | Maximum range | 24 hours |
 | Grafana request timeout | 30 seconds |
-| Service-wide concurrency across all three Grafana tools and actions | 4 |
+| Service-wide concurrency across all Grafana resources and tool actions | 4 |
 | Maximum encoded request URL | 8192 bytes |
 | Maximum decoded response body | 4 MiB |
 

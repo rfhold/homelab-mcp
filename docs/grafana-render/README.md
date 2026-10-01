@@ -1,6 +1,6 @@
 # Grafana Render
 
-`grafana_render` is a read-only, idempotent, open-world, non-destructive MCP tool. It exposes exactly `dashboard` and `panel`; the action names are flat. [MCP Skills](../architecture/mcp-skills.md) replace generated help actions.
+The [uniform MCP interface](../architecture/mcp-interface.md) owns public routing. Grafana definitions use resources, live queries and rendering use `query` with domain-prefixed actions, and silence creation uses `create`.
 
 | Document | Covers |
 | --- | --- |

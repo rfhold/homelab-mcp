@@ -1,10 +1,10 @@
 # MCP Skills
 
-The authenticated server retains eleven tools and 57 domain actions. Its reviewed Kuri MCP dependency removes generated `help` and `help.<namespace>` actions as a hard cutover; there is no compatibility shim. `tools/list` remains the authority for exact input schemas and annotations. Domain action inputs, semantic outputs, jq-compatible filters, images, authorization, cancellation context, and progress heartbeats remain unchanged.
+The authenticated server exposes four uniform tools and 46 actions, with configuration catalogs served as resources. The [MCP interface](mcp-interface.md) owns the exact routing. There are no generated `help` or `help.<namespace>` actions or compatibility aliases. `tools/list` remains the authority for exact tool input schemas and annotations. Domain inputs, semantic tool outputs, filters, images, authorization, cancellation context, and progress heartbeats remain unchanged.
 
 ## Catalog
 
-[`src/mcp/skills.rs`](../../src/mcp/skills.rs) constructs an immutable `SkillCatalog` from explicitly enumerated `include_bytes!` assets under [`src/skills/`](../../src/skills/). Construction is fallible and router initialization propagates validation errors rather than advertising a partial catalog. `HomelabMcp` owns `Arc<SkillCatalog>` and registers `skills = self.catalog` with the server macro. There are no directory scans, runtime filesystem reads, generated help wrappers, or new tools.
+[`src/mcp/skills.rs`](../../src/mcp/skills.rs) constructs an immutable `SkillCatalog` from explicitly enumerated `include_bytes!` assets under [`src/skills/`](../../src/skills/). Construction is fallible and router initialization propagates validation errors rather than advertising a partial catalog. `HomelabMcp` owns `Arc<SkillCatalog>` and shares it through the resource/tool `ServerHandler`. There are no directory scans, runtime filesystem reads, generated help wrappers, or new tools.
 
 | Skill | Tool domains |
 | --- | --- |
@@ -20,7 +20,7 @@ Assets are under `src`, which the Docker build copies and `.dockerignore` does n
 
 ## Authority
 
-Skill discovery and content are guidance, not operational approval. The user's initial investigation intent permits bounded reads and discovery only. Consequential changes require an explicit decision naming exact objects and requested parameters. Skills distinguish read-only tools from exec tools and distinguish listing from mutations within the mixed `machines` and `deploys` tools. They forbid automatic mutation retries and require inspection when an outcome is unknown. They omit live service URLs, credentials, public host keys, inventories, and local bootstrap commands.
+Skill discovery and content are guidance, not operational approval. The user's initial investigation intent permits bounded reads and discovery only. Consequential changes require an explicit decision naming exact objects and requested parameters. Skills distinguish resource discovery and live query tools from create, execute, and destroy actions. They forbid automatic mutation retries and require inspection when an outcome is unknown. They omit live service URLs, credentials, public host keys, inventories, and local bootstrap commands.
 
 The existing global required scope set remains `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. The same transport authorization and Origin checks protect tools, skill discovery, and catalog resource reads. Kuri requires the entire set globally; this application does not enforce scopes per tool or action. Skill instructions do not repair or replace that limitation. Existing tool annotations, backend retry/error policies, hosted authorization, and deployed environments are unchanged.
 

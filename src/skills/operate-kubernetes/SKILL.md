@@ -4,7 +4,7 @@ description: Inspect configured Kubernetes clusters, supported resources, and bo
 ---
 # Operate Kubernetes
 
-1. Read the [action reference](references/actions.md) and tool schemas.
+1. Read the [action reference](references/actions.md) and resource templates/tool schemas.
 2. Discover configured clusters and kind capabilities, then inspect bounded resources and exact Pod logs under the user's investigation intent.
 3. Identify the exact cluster, kind, namespace, name, and relevant current state. Read access or a diagnosis does not authorize a restart, scale, trigger, suspend, or deletion.
 4. Require explicit authorization for one exact object and requested change. A dry run does not authorize real execution.

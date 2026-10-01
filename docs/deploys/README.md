@@ -7,8 +7,8 @@ These documents define the machine inventory, approved deploy catalog, SSH trust
 | [Machine inventory](machine-inventory.md) | PostgreSQL records, lifecycle, host pin reset, and data boundaries. |
 | [Deploy workflow](deploy-workflow.md) | The uv and pyinfra project, catalog, bootstrap, MCP execution, and recovery. |
 | [SSH trust and OpenBao identity](ssh-trust-openbao.md) | User certificates, workload identity, host authentication, credential lifecycle, and deployment declarations. |
-| [Machine inventory specification](spec/machines.md) | Normative `machines` actions, validation, persistence, and host trust behavior. |
-| [Deploy execution specification](spec/deploys.md) | Normative `deploys` actions, fixed invocation, bounds, and failure behavior. |
+| [Machine inventory specification](spec/machines.md) | Normative machine resources and actions, validation, persistence, and host trust behavior. |
+| [Deploy execution specification](spec/deploys.md) | Normative deploy resources and actions, fixed invocation, bounds, and failure behavior. |
 | [Service deployment](../operations/deployment.md#machine-deploy-access) | Preview declarations, CI credential boundaries, and apply gates. |
 | [Testing](../quality/testing.md#machine-deploy-contract-coverage) | Local evidence and unverified runtime layers. |
 

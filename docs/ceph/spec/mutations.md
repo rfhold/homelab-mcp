@@ -2,7 +2,7 @@
 
 ## Shared Mutation Contract
 
-`ceph_exec` exposes only the five typed OSD actions in this document. Every call requires an exact configured cluster and action-specific typed fields. The service makes one Dashboard attempt and never retries automatically.
+`execute` exposes mark/reweight/scrub; `destroy` exposes destroy/purge. These are the five typed OSD operations in this document. Every call requires an exact configured cluster and action-specific typed fields. The service makes one Dashboard attempt and never retries automatically.
 
 A caller cannot supply a Ceph command, Dashboard route, HTTP method, arbitrary request body, force option, or additional action parameter. Dashboard acceptance does not prove that the cluster reached the requested state.
 
@@ -32,7 +32,7 @@ If a Dashboard returns HTTP 202, the service accepts the response only when it c
 
 ## Deferred Cluster Flag Mutation
 
-`ceph_exec` does not advertise `flags.set`. Ceph 19 Squid Dashboard exposes cluster flag mutation only as full-list replacement. A read-modify-write wrapper could overwrite concurrent operator changes, so global cluster flag mutation remains deferred.
+`execute` does not advertise `flags.set`. Ceph 19 Squid Dashboard exposes cluster flag mutation only as full-list replacement. A read-modify-write wrapper could overwrite concurrent operator changes, so global cluster flag mutation remains deferred.
 
 ## Outcome Semantics
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-This specification defines implemented worktree behavior for the read-only `grafana_query` action `silence.list`. Local validation and mock Grafana tests exist; authenticated preview calls and live silence-list API behavior remain unverified.
+The local interface exposes read-only `query` action `grafana.silence.list`. Local validation and mock Grafana tests cover this invocation. Authenticated preview calls and live silence-list API behavior remain unverified; historical preview uses the former domain-specific interface.
 
 The [shared contract](common.md) owns authorization, tool annotations, fixed-destination transport, limits, errors, filtering, and telemetry.
 

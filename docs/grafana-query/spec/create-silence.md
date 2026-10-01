@@ -2,9 +2,9 @@
 
 ## Status
 
-This specification defines implemented behavior for `grafana_exec` action `silence.create`. Local validation and mock Grafana tests exist, and commit `798dd92` exposes the action in preview. Authenticated preview evidence covers rule-list calls only. Silence creation, live silence API behavior, and operation of the promoted Editor permission remain unverified.
+The local interface exposes `create` action `grafana.silence.create`. Local validation and mock Grafana tests cover this invocation. Historical preview commit `798dd92` exposes the operation through `grafana_exec` action `silence.create`, not the local uniform interface. Authenticated preview evidence covers rule-list calls only. Silence creation, live silence API behavior, and operation of the promoted Editor permission remain unverified.
 
-`grafana_exec` advertises this action as non-read-only, non-destructive, non-idempotent, open-world, and operationally consequential. The [shared contract](common.md) owns the eight-scope global authorization boundary, fixed destination, resource limits, filtering, errors, and telemetry.
+`create` advertises this action as non-read-only, non-destructive, non-idempotent, open-world, and operationally consequential. The [shared contract](common.md) owns the eight-scope global authorization boundary, fixed destination, resource limits, filtering, errors, and telemetry.
 
 ## Effect
 

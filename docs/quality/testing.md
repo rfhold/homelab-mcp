@@ -56,7 +56,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 | Generic Kuri `mcp` | 111 standard all-feature tests pass; both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly. |
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
-| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, eleven-tool listing and annotations, MCP Skills, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
+| OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, four-tool and resource-catalog listing and annotations, MCP Skills, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
 | MCP progress heartbeat | Incremental SSE correlation, payload safety, lifecycle, ordering, and opt-in behavior through `progress_heartbeat_streams_increasing_correlated_events_before_completion` and `progress_heartbeat_omits_events_without_token_and_for_short_calls`. |
 | Grafana actions | Datasource queries, dashboard inventory and PNG rendering, alerting and recording-rule reads, silence creation, bounds, normalization, fixed routes, redirects, semantic errors, timeout, capacity, and permit release against mock HTTP servers. |
 | Kubernetes actions | Exact typed action schemas, all 36 resource kinds, namespace scope, fixed API paths and mutations, normalization, limits, safe errors, process supervision, and uncertain mutation outcomes. |
@@ -80,7 +80,7 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 
 The Rust suite supplies local and mock evidence. Deployed commit `798dd92` adds authenticated rule-list evidence: alert listing succeeded with at least 100 entries, while recording listing returned `invalid_response` with `limit: 1`. The approved normalization fixes remain undeployed and lack live verification. Browser OAuth, the rest of the authenticated MCP and Grafana paths, and silence creation remain open.
 
-The Tekton feature has worktree implementation, Rust unit and MCP discovery tests, and passing Pulumi declaration tests. It has no deployment or live evidence. Existing preview evidence does not cover `tekton_query`, `tekton_exec`, Forgejo, PAC, effective Kubernetes RBAC, or task logs.
+The Tekton feature has worktree implementation, Rust unit and MCP discovery tests, and passing Pulumi declaration tests. It has no deployment or live evidence. Existing preview evidence does not cover `query`, `execute`, Forgejo, PAC, effective Kubernetes RBAC, or task logs.
 
 The Kubernetes feature has worktree implementation, Rust unit and MCP schema tests, and passing Pulumi policy and topology tests. Existing preview evidence does not cover its OAuth scope set, runtime kubeconfigs, cluster API reachability, effective RBAC, reads, dry-runs, or mutations.
 
@@ -110,7 +110,7 @@ Focused incremental SSE tests cover string and integer progress-token correlatio
 
 ## MCP Skills Contract Coverage
 
-The [MCP Skills contract](../architecture/mcp-skills.md) requires local HTTP coverage for the extension capability, five packages, all ten raw-byte manifest files, exact frontmatter/root agreement, digest and size integrity, unknown entry/file/cursor errors, and unchanged global authorization and Origin protection. `tools/list` must retain exactly eleven tools and 57 domain actions, reject all removed help actions, and preserve annotations, semantic filters, errors, images, and progress behavior. Assets must remain included by the Docker build's `src` copy.
+The [MCP Skills contract](../architecture/mcp-skills.md) requires local HTTP coverage for the extension capability, five packages, all ten raw-byte manifest files, exact frontmatter/root agreement, digest and size integrity, unknown entry/file/cursor errors, and unchanged global authorization and Origin protection. `tools/list` must retain exactly four tools and 46 actions plus nine collection resources and eleven templates, reject all removed help actions, and preserve annotations, semantic filters, errors, images, and progress behavior. Assets must remain included by the Docker build's `src` copy.
 
 ## Grafana Contract Coverage
 
@@ -134,14 +134,14 @@ Tests must cover the [Grafana tool specifications](../grafana-query/README.md), 
 Dashboard and render tests additionally cover:
 
 - `dashboard.list` and `dashboard.get` schemas, exact routes, deterministic query order, bounded normalization, recursive panel flattening, numeric and string panel IDs, strict variable/panel/output caps, and omission of raw dashboard internals;
-- exactly flat `grafana_render` actions `dashboard` and `panel`, slugless routes, server-owned parameters, render-only capacity, complete timeout, and permit release;
+- `query` actions `grafana.render.dashboard` and `grafana.render.panel`, slugless routes, server-owned parameters, render-only capacity, complete timeout, and permit release;
 - exact status mapping, PNG MIME parameters, streaming size and signature validation, body-read safety, lowercase SHA-256, redacted image `Debug`, and standard-padded Base64;
 - text plus typed MCP image parsing through the pinned Kuri revision, structured metadata omissions, and filters that preserve image content; and
 - fixed render telemetry labels excluding UIDs, panel IDs, ranges, dimensions, timezones, variables, digests, URLs, bodies, images, and credentials.
 
 Alerting tests must additionally cover:
 
-- all three Grafana tool annotations, ten query actions, two render actions, and the single exec action;
+- uniform tool annotations, Grafana query/render/create routing, and definition-resource discovery;
 - the eight-scope global authorization boundary, lack of Grafana-specific enforcement, and rejection of actions sent to the wrong tool;
 - separate alert-rule and recording-rule schemas, limits, and action-specific safe messages;
 - classification by the shared provisioning response's `record` field, category filtering before limits, and opposite-category exclusion;
@@ -230,7 +230,7 @@ RBAC declaration tests verify fixed cluster-wide reads, exact core `pods/log` `g
 
 Preview evidence requires exact target-specific approval. It must verify identity, effective RBAC, API reachability, catalog behavior, representative reads, denied exclusions, server dry-run, controlled accepted mutations, and uncertain-outcome recovery.
 
-Current preview evidence does not cover `kubernetes_query`, `kubernetes_exec`, the expanded OAuth scope set, runtime kubeconfigs, effective Kubernetes RBAC, or any Kubernetes action. Production remains unapplied and outside current verification.
+Current preview evidence does not cover `query`, `execute`, the expanded OAuth scope set, runtime kubeconfigs, effective Kubernetes RBAC, or any Kubernetes action. Production remains unapplied and outside current verification.
 
 ## Ceph Dashboard Contract Coverage
 

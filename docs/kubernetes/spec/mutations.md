@@ -2,7 +2,7 @@
 
 ## Shared Mutation Contract
 
-`kubernetes_exec` will expose only exact-object actions. Every action will require a configured cluster, exact namespace, exact name, and typed action-specific fields.
+`execute` exposes exact-object restart, scale, and suspend actions; `create` exposes CronJob triggering; `destroy` exposes Pod deletion. Every action will require a configured cluster, exact namespace, exact name, and typed action-specific fields.
 
 Each call requires an explicit user decision. The service will launch one fixed `kubectl` process and will not retry automatically.
 
@@ -40,6 +40,6 @@ A validation failure or process spawn failure before dispatch returns `mutation_
 
 Every non-success process outcome after spawn, including a numeric exit, signal, timeout, cancellation, wait failure, or output/pipe failure, returns non-retryable `mutation_outcome_unknown`. The service does not parse stderr to infer a definite API rejection, and the mutation can already exist in cluster state.
 
-After `mutation_outcome_unknown`, the caller must use `kubernetes_query` to inspect the exact object before another mutation. CronJob trigger recovery must inspect Jobs and the source CronJob.
+After `mutation_outcome_unknown`, the caller must use `query` to inspect the exact object before another mutation. CronJob trigger recovery must inspect Jobs and the source CronJob.
 
 No mutation will expose stdout, stderr, raw objects, command lines, credentials, or API origins.

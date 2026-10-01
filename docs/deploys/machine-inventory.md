@@ -24,7 +24,7 @@ The inventory has no group model. It stores no passwords, private keys, OpenBao 
 
 ## Lifecycle
 
-The progressive `machines` tool exposes `list`, `create`, `update`, `delete`, `host-key.clear`, and `host-key.replace`. Updates change connection fields and preserve host trust. Host trust changes use dedicated actions.
+The `homelab://machines` resource lists inventory. Uniform tools expose `machine.create` on `create`, `machine.update`/`machine.host-key.clear`/`machine.host-key.replace` on `execute`, and `machine.delete` on `destroy`. Updates change connection fields and preserve host trust. Host trust changes use dedicated actions.
 
 Use this reset sequence after a legitimate host key change:
 

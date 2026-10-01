@@ -2,7 +2,7 @@
 
 ## Status
 
-This specification defines the canonical behavior for the read-only `grafana_query` action `alert-rule.list`. Local validation and mock Grafana tests exist. An authenticated call against preview commit `798dd92` succeeded with at least 100 entries. The approved synthetic-group normalization fix has not been deployed or verified live.
+This specification defines the canonical behavior for the resource `homelab://grafana/alert-rules`. Local validation and mock Grafana tests exist. An authenticated call against preview commit `798dd92` succeeded with at least 100 entries. The approved synthetic-group normalization fix has not been deployed or verified live.
 
 The [shared contract](common.md) owns authorization, tool annotations, fixed-destination transport, limits, errors, filtering, and telemetry.
 

@@ -2,11 +2,11 @@
 
 ## Query Actions
 
-`ceph_query` exposes ten actions:
+`query` exposes nine live actions with the `ceph.` prefix. Configured discovery is a resource:
 
 | Action | Contract |
 | --- | --- |
-| `cluster.list` | Return the configured `pantheon` and `romulus` catalog entries without contacting either Dashboard. |
+| `homelab://ceph/clusters` | Return the configured `pantheon` and `romulus` catalog entries without contacting either Dashboard. |
 | `status.get` | Return a bounded normalized summary of native cluster health and current service state from one exact cluster. |
 | `metrics.summary` | Return a bounded normalized snapshot of current metrics exposed by one cluster's Dashboard API. |
 | `osd.list` | Return bounded normalized OSD summaries. |
