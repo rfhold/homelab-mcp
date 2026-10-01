@@ -248,7 +248,14 @@ const appServiceAccount = new k8s.core.v1.ServiceAccount(
   { dependsOn: [namespace], provider: pantheonProvider },
 );
 
-const tektonRole = new k8s.rbac.v1.Role(
+// Preview owns the shared policy; production reads it without taking ownership.
+const tektonRole = deploymentEnvironment === "prod"
+  ? k8s.rbac.v1.Role.get(
+      "homelab-mcp-tekton",
+      `${tektonNamespace}/homelab-mcp`,
+      { provider: pantheonProvider },
+    )
+  : new k8s.rbac.v1.Role(
   "homelab-mcp-tekton",
   {
     metadata: {
@@ -291,7 +298,9 @@ new k8s.rbac.v1.RoleBinding(
   "homelab-mcp-tekton",
   {
     metadata: {
-      name: "homelab-mcp",
+      name: deploymentEnvironment === "prod"
+        ? `${namespaceName}-tekton`
+        : "homelab-mcp",
       namespace: tektonNamespace,
       labels,
       annotations: { "pulumi.com/skipAwait": "true" },
@@ -525,7 +534,10 @@ const runtimeIdentities = kubernetesClusters.map((cluster) => {
   );
   const issuedToken = k8s.core.v1.Secret.get(
     `homelab-mcp-kubernetes-runtime-token-read-${cluster.name}`,
-    pulumi.interpolate`${targetNamespace.metadata.name}/${tokenSecret.metadata.name}`,
+    // Metadata can be known in preview before the controller-backed Secret exists.
+    tokenSecret.id.apply(() =>
+      pulumi.interpolate`${tokenSecret.metadata.namespace}/${tokenSecret.metadata.name}`,
+    ),
     { dependsOn: [tokenSecret], provider },
   );
   const credentials = pulumi.secret(

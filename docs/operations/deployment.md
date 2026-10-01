@@ -85,6 +85,8 @@ The Deployment declares a dedicated ServiceAccount and an explicit one-hour proj
 
 A namespace Role in `pipelines-as-code` grants only the resource reads required for repositories, runs, tasks, pod ownership, and logs. It grants `PipelineRun` patch only for cancellation. The runtime receives no Secret read, Secret create, Secret delete, cluster role, or unrelated write permission.
 
+Preview retains ownership of the shared `pipelines-as-code/homelab-mcp` Role and its original `homelab-mcp` RoleBinding, whose subject is `homelab-mcp-preview/homelab-mcp`. Production reads that current Role and does not adopt or modify it. Production creates its own `${namespaceName}-tekton` RoleBinding (`homelab-mcp-tekton` with the production configuration), whose only subject is `homelab-mcp/homelab-mcp`. Both bindings use the same unchanged policy. Production requires the preview-owned Role to exist before preview or apply and to remain present afterward. If preview deletes the shared Role, production loses Tekton access too. Keep preview as the sole owner of the shared Role. Preserve preview's original binding and subject.
+
 The CI deployment runs `pulumi up --skip-preview`. A separate authorized local preview must be reviewed before pushing an infrastructure revision because Kubernetes cannot reliably admit a new RoleBinding against a Role that exists only in server-side dry-run. Pulumi mock tests remain the executable declaration evidence for the binding's exact role and subject.
 
 Run, task, pod, and PAC Repository access is fixed to `pipelines-as-code`. The Role remains namespace-scoped, and every tool action enforces the canonical ownership checks.
@@ -106,6 +108,8 @@ The Tekton deployment kubeconfig serves only as provider bootstrap authority. Th
 Each declared runtime ServiceAccount receives cluster-wide fixed reads, exact get-only discovery routes, core `pods/log` `get`, and only the approved curated writes. It receives no authority for application wildcards, Secrets, ConfigMaps, arbitrary CRDs, any other Pod subresource, extra pod-log verbs, exec, attach, proxy, port-forward, node writes, force deletion, or general mutations. Kubernetes may separately grant broader authenticated discovery through `system:discovery`; the application grant does not remove inherited defaults.
 
 The deployment mounts runtime kubeconfigs separately from provider credentials, application secrets, and OAuth key material. NetworkPolicy derives each cluster egress port from the same validated server URL, using its explicit port or HTTPS default 443, and pairs it with only that cluster's configured endpoint CIDRs.
+
+Each runtime token Secret retains `pulumi.com/waitFor: jsonpath={.data.token}`. Its follow-up read depends on that Secret. After the resource ID resolves, the read derives its namespace/name ID from the created Secret's metadata. A fresh production preview leaves the resource ID unknown and defers the read of the absent Secret. Current-resource previews and applies read the populated token and CA for the runtime kubeconfig. They do not substitute placeholder credentials.
 
 The reviewed runtime image includes `kubectl`, and server code pins all command behavior. Callers never control an executable, kubeconfig, context, API server, verb, resource path, or output template.
 
@@ -145,7 +149,7 @@ Before any apply, verify the exact `openbaoEndpointCidrs` against current routin
 
 ## Preview Pipeline
 
-`.tekton/homelab-mcp-preview.yaml` targets `main` push and incoming events. It defines one preview path and no release path.
+`.tekton/homelab-mcp-preview.yaml` targets `main` push and incoming events. It owns image builds and preview deployment. The separate stable-tag pipeline owns production promotion.
 
 The pipeline clones the requested revision and scans Cargo, container, Tekton, and Pulumi inputs for private key patterns. The amd64 and arm64 image builds then run in parallel.
 
@@ -155,7 +159,33 @@ The main preview workflow completed successfully for commit `798dd92` and applie
 
 That run proves image delivery, runtime startup, PostgreSQL-backed readiness, public health/readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge. It does not prove browser login, token issuance or refresh, authenticated MCP calls, or live LogQL behavior.
 
-No release pipeline exists.
+## Stable Release Promotion
+
+`.tekton/homelab-mcp-release.yaml` accepts only push events for stable `vX.Y.Z` tags with no prerelease, build suffix, or leading-zero component. This is a source-declared release path, not evidence that production has been deployed.
+
+Before release tag publication, an authorized operator must review a bounded local `prod` preview with the exact immutable image and production credentials. The production Tekton binding references the current preview-owned Role, not a new Role that exists only in server-side dry-run. Verify that the shared Role exists with the approved policy. Review declarations and mock evidence for the exact binding and production subject. If the Role is absent, stop. Do not adopt preview's resources or overwrite its subject. Do not add an inline CI preview. A failed local preview requires a separately authorized, bounded resolution before release. The pipeline follows the current separately reviewed `pulumi up --skip-preview` contract.
+
+Release order and stop conditions:
+
+1. Finish and approve the main-branch preview for the release commit. Its combined `cr.holdenitdown.net/rfhold/homelab-mcp:preview-<40-character-SHA>` index must already exist. Production never rebuilds and has no fallback to an architecture tag, `latest`, another commit, or a missing preview image.
+2. Create an annotated OpenPGP-signed stable tag whose version equals the root `Cargo.toml` `[package]` version. Tag creation and publication require separate authority. CI verifies the signature against only `homelab-mcp-release-trusted-signers/signing-key.asc`, the tag-to-event SHA and checked-out HEAD, ancestry from `origin/main`, and the package version. It also scans tracked deployment and runtime inputs for private credential material.
+3. Resolve the preview index once to a SHA-256 digest. Read the index and both `linux/amd64` and `linux/arm64` configurations through that immutable reference. Each must declare its expected architecture, Linux OS, runtime user `65532:65532`, and the exact OCI revision. A failed check stops promotion.
+4. Accept the version alias only if absent with an explicit registry `MANIFEST_UNKNOWN` response or already equal to the resolved digest. Authentication failures, network errors, ambiguous HTTP errors, and conflicting aliases stop the run. Copy only the digest reference to `vX.Y.Z`, then verify that the alias still resolves to the identical index digest. No floating stable alias is published.
+5. Apply `prod` with `image=cr.holdenitdown.net/rfhold/homelab-mcp@sha256:<digest>`, not the version tag. The deployment task retains the existing Pulumi, Authentik, Grafana, and Kubernetes credential boundary. Production keeps Ceph disabled, OpenBao disabled, and machine SSH egress empty. It needs no OpenBao login, token mount, SSH CA/role creation, or privileged OpenBao CI ServiceAccount.
+
+Required delivery inputs in `pipelines-as-code` are the PAC-provided Git authentication Secret, registry pull/push authentication available to the normal pipeline ServiceAccount, `homelab-mcp-release-trusted-signers` containing public key `signing-key.asc`, `tekton-cluster-kubeconfig`, `pulumi-credentials`, `authentik-credentials`, and `grafana-credentials` with `GRAFANA_URL` and `GRAFANA_TOKEN`. The kubeconfig must retain the approved Pantheon/Romulus provider contexts and exact production provisioning authority. The release pipeline does not create or expand these credentials or RBAC.
+
+The `prod` stack must have its own initialized `homelab-mcp-forgejo-token` and `homelab-mcp-pac-incoming-secret` Stashes, or receive `FORGEJO_HOLDENITDOWN_TOKEN` and `PAC_INCOMING_SECRET` through the existing authorized environment credential channel on first creation. Preview Stashes are not production credentials. Credential preparation, signer provisioning, local preview, release execution, and runtime verification are separate operator gates.
+
+Run local pipeline checks without registry or cluster access:
+
+```bash
+bun test ./.tekton/release.test.ts
+```
+
+These checks parse the pipeline and exercise its promotion shell with a mocked registry, including absent previews, invalid runtime metadata, conflicting aliases, idempotent retries, copy failures, and strict authentication/network failure handling. They do not establish live signer trust, registry permissions or retention, effective Kubernetes RBAC, production runtime readiness, or browser OAuth behavior.
+
+If promotion succeeds but deployment fails, retain the version alias and inspect the failed apply before any authorized retry. The same digest can be retried idempotently; do not replace an existing version with another digest. Application rollback requires separate authority and a previously verified immutable image. Image promotion does not roll back database migrations, wrapping keys, credentials, or other Pulumi-managed state.
 
 ## Preview Runtime and Remaining Gate
 
@@ -193,4 +223,4 @@ Stack initialization, Pulumi preview, deployment, credential creation, cluster m
 
 Each external action requires explicit target-specific approval. Repository pipeline declarations do not grant that approval.
 
-Production preview, apply, credential creation, pipeline execution, and release remain excluded. Committing, pushing, and updating preview also remain explicit gates.
+The stable release pipeline is implemented locally; production preview, apply, credential creation, pipeline execution, tag publication, and release still require their own explicit gates. Committing, pushing, and updating preview also remain explicit gates.

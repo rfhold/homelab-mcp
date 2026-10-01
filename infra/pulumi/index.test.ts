@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import * as pulumi from "@pulumi/pulumi";
+import { unknownValue } from "@pulumi/pulumi/runtime/rpc";
 import {
   allConfig,
   setAllConfig,
@@ -25,6 +26,7 @@ interface ResourceRecord {
   name: string;
   inputs: Record<string, unknown>;
   provider?: string;
+  id?: string;
 }
 
 const resources: ResourceRecord[] = [];
@@ -43,6 +45,7 @@ const pacIncomingSecretFixture = "test-pac-incoming-secret";
 const cephUsernameFixture = "test-ceph-user";
 const cephPasswordFixture = "test-ceph-password";
 let program: typeof import("./index");
+let mocks: pulumi.runtime.Mocks;
 
 before(async () => {
   process.env.PULUMI_CONFIG = JSON.stringify({
@@ -116,15 +119,19 @@ before(async () => {
   process.env.CEPH_DASHBOARD_PANTHEON_PASSWORD = cephPasswordFixture;
 
   pulumi.runtime.setMocks(
-    {
+    mocks = {
       newResource: (args) => {
         resources.push({
           type: args.type,
           name: args.name,
           inputs: args.inputs,
           provider: args.provider,
+          id: args.id || undefined,
         });
         const outputs: Record<string, unknown> = { ...args.inputs };
+        if (args.type === "kubernetes:rbac.authorization.k8s.io/v1:Role" && args.id) {
+          outputs.metadata = { name: "homelab-mcp", namespace: "pipelines-as-code" };
+        }
         if (args.type === "random:index/randomBytes:RandomBytes") {
           outputs.base64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         }
@@ -1402,6 +1409,152 @@ describe("standalone resource topology", () => {
         /deployMachineSshEgressCidrs must contain valid IPv4 CIDRs/,
       );
     } finally {
+      setAllConfig(baseConfig);
+    }
+  });
+
+  test("preserves preview Tekton ownership and isolates the production binding", async () => {
+    const baseConfig = allConfig();
+    const roleType = "kubernetes:rbac.authorization.k8s.io/v1:Role";
+    const bindingType = "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding";
+    try {
+      for (const stack of ["preview", "prod"] as const) {
+        const namespace = stack === "preview" ? "homelab-mcp-preview" : "homelab-mcp";
+        await pulumi.runtime.setMocks(mocks, "homelab-mcp", stack, true);
+        setAllConfig({
+          ...baseConfig,
+          "homelab-mcp:namespace": namespace,
+          "homelab-mcp:slug": namespace,
+          "homelab-mcp:openbaoEnabled": String(stack === "preview"),
+          "homelab-mcp:openbaoCreateSshMount": String(stack === "preview"),
+        });
+        const start = resources.length;
+        await import(`./index.ts?tekton-stack=${stack}-${Date.now()}`);
+        await pulumi.runtime.disconnect();
+        const declared = resources.slice(start);
+        const roles = declared.filter((entry) => entry.type === roleType);
+        assert.equal(roles.length, 1);
+        assert.equal(roles[0].name, "homelab-mcp-tekton");
+        assert.match(roles[0].provider ?? "", /homelab-mcp-pantheon/);
+        if (stack === "preview") {
+          assert.equal(roles[0].id, undefined);
+          assert.equal((roles[0].inputs.metadata as any).name, "homelab-mcp");
+          assert.equal((roles[0].inputs.metadata as any).namespace, "pipelines-as-code");
+          assert.deepEqual(roles[0].inputs.rules, resources.find(
+            (entry) => entry.type === roleType && !entry.id,
+          )!.inputs.rules);
+        } else {
+          assert.equal(roles[0].id, "pipelines-as-code/homelab-mcp");
+          assert.equal(roles[0].inputs.rules, undefined);
+          assert.equal(declared.some((entry) => entry.type === roleType && !entry.id), false);
+        }
+        const bindings = declared.filter((entry) => entry.type === bindingType);
+        assert.equal(bindings.length, 1);
+        const binding = bindings[0];
+        assert.equal(binding.name, "homelab-mcp-tekton");
+        assert.equal(binding.id, undefined);
+        assert.equal((binding.inputs.metadata as any).name,
+          stack === "preview" ? "homelab-mcp" : `${namespace}-tekton`);
+        assert.equal((binding.inputs.metadata as any).namespace, "pipelines-as-code");
+        assert.deepEqual((binding.inputs.metadata as any).annotations, {
+          "pulumi.com/skipAwait": "true",
+        });
+        assert.deepEqual(binding.inputs.roleRef, {
+          apiGroup: "rbac.authorization.k8s.io", kind: "Role", name: "homelab-mcp",
+        });
+        assert.deepEqual(binding.inputs.subjects, [{
+          kind: "ServiceAccount", name: "homelab-mcp", namespace,
+        }]);
+        assert.match(binding.provider ?? "", /homelab-mcp-pantheon/);
+      }
+    } finally {
+      await pulumi.runtime.setMocks(mocks, "homelab-mcp", "test", false);
+      setAllConfig(baseConfig);
+    }
+  });
+
+  test("defers fresh production token reads and uses resolved Secret metadata after creation", async () => {
+    const baseConfig = allConfig();
+    const secretType = "kubernetes:core/v1:Secret";
+    const createPrefix = "homelab-mcp-kubernetes-runtime-token-";
+    const readPrefix = `${createPrefix}read-`;
+    try {
+      for (const mode of ["fresh-preview", "resolved-preview", "apply"] as const) {
+        const fresh = mode === "fresh-preview";
+        const tokenMocks: pulumi.runtime.Mocks = {
+          ...mocks,
+          newResource: async (args) => {
+            const result = await mocks.newResource(args);
+            if (args.type !== secretType) return result;
+            if (args.name.startsWith(readPrefix)) {
+              if (fresh) {
+                assert.equal(args.id, unknownValue, `premature token read: ${args.id}`);
+                return { ...result, state: { ...result.state, data: pulumi.unknown } };
+              }
+              const cluster = args.name.slice(readPrefix.length);
+              assert.equal(args.id, `resolved-${cluster}-namespace/resolved-${cluster}-token`);
+            } else if (args.name.startsWith(createPrefix)) {
+              const cluster = args.name.slice(createPrefix.length);
+              return {
+                id: fresh ? undefined : result.id,
+                state: {
+                  ...result.state,
+                  metadata: {
+                    ...(result.state.metadata as Record<string, unknown>),
+                    namespace: `resolved-${cluster}-namespace`,
+                    name: `resolved-${cluster}-token`,
+                  },
+                },
+              };
+            }
+            return result;
+          },
+        };
+        await pulumi.runtime.setMocks(tokenMocks, "homelab-mcp", "prod", mode !== "apply");
+        setAllConfig({
+          ...baseConfig,
+          "homelab-mcp:namespace": "homelab-mcp",
+          "homelab-mcp:slug": "homelab-mcp",
+          "homelab-mcp:openbaoEnabled": "false",
+          "homelab-mcp:openbaoCreateSshMount": "false",
+        });
+        const start = resources.length;
+        await import(`./index.ts?runtime-token=${mode}-${Date.now()}`);
+        await pulumi.runtime.disconnect();
+        const declared = resources.slice(start);
+        for (const cluster of ["pantheon", "romulus"]) {
+          const created = declared.find((entry) => entry.type === secretType &&
+            entry.name === `${createPrefix}${cluster}`);
+          assert.ok(created);
+          assert.equal((created.inputs.metadata as any).annotations["pulumi.com/waitFor"],
+            "jsonpath={.data.token}");
+          const read = declared.find((entry) => entry.type === secretType &&
+            entry.name === `${readPrefix}${cluster}`);
+          assert.ok(read);
+          assert.equal(read.id, fresh ? unknownValue :
+            `resolved-${cluster}-namespace/resolved-${cluster}-token`);
+          assert.equal(declared.indexOf(created) < declared.indexOf(read), true);
+          assert.equal(read.provider, created.provider);
+        }
+        const kubeconfigSecret = declared.find((entry) => entry.type === secretType &&
+          entry.name === "homelab-mcp-kubernetes-runtime-kubeconfig");
+        assert.ok(kubeconfigSecret);
+        if (fresh) {
+          const data = unwrapSecrets(kubeconfigSecret.inputs.stringData) as Record<string, unknown>;
+          assert.notEqual(typeof data?.kubeconfig, "string");
+          assert.doesNotMatch(JSON.stringify(kubeconfigSecret.inputs.stringData), /synthetic-runtime-token/);
+        } else {
+          const data = unwrapSecrets(kubeconfigSecret.inputs.stringData) as Record<string, string>;
+          const kubeconfig = JSON.parse(data.kubeconfig);
+          assert.deepEqual(kubeconfig.users.map((user: any) => user.user.token),
+            ["synthetic-runtime-token", "synthetic-runtime-token"]);
+          assert.deepEqual(kubeconfig.clusters.map((cluster: any) => cluster.cluster["certificate-authority-data"]),
+            [Buffer.from("synthetic-cluster-ca").toString("base64"),
+              Buffer.from("synthetic-cluster-ca").toString("base64")]);
+        }
+      }
+    } finally {
+      await pulumi.runtime.setMocks(mocks, "homelab-mcp", "test", false);
       setAllConfig(baseConfig);
     }
   });

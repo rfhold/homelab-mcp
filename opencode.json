@@ -3,8 +3,18 @@
   "mcp": {
     "homelab": {
       "type": "remote",
-      "url": "https://preview-homelab-mcp.holdenitdown.net/mcp",
+      "url": "https://homelab-mcp.holdenitdown.net/mcp",
       "enabled": true
+    },
+    "homelab-local": {
+      "type": "remote",
+      "url": "http://127.0.0.1:14333/mcp",
+      "enabled": false
+    },
+    "homelab-preview": {
+      "type": "remote",
+      "url": "https://preview-homelab-mcp.holdenitdown.net/mcp",
+      "enabled": false
     }
   }
 }

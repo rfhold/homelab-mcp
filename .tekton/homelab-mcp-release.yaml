@@ -1,0 +1,321 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: homelab-mcp-release
+  annotations:
+    pipelinesascode.tekton.dev/on-cel-expression: 'event == "push" && target_branch.matches("^refs/tags/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")'
+    pipelinesascode.tekton.dev/max-keep-runs: "10"
+spec:
+  taskRunSpecs:
+    - pipelineTaskName: promote-release
+      podTemplate:
+        nodeSelector:
+          kubernetes.io/arch: amd64
+    - pipelineTaskName: deploy-production
+      timeout: 25m0s
+      podTemplate:
+        nodeSelector:
+          kubernetes.io/arch: amd64
+  timeouts:
+    pipeline: 2h0m0s
+  params:
+    - name: revision
+      value: "{{ revision }}"
+    - name: source-branch
+      value: "{{ source_branch }}"
+  pipelineSpec:
+    params:
+      - name: revision
+        type: string
+      - name: source-branch
+        type: string
+    workspaces:
+      - name: source
+    tasks:
+      - name: fetch-repository
+        retries: 1
+        taskSpec:
+          params:
+            - name: revision
+              type: string
+            - name: source-branch
+              type: string
+          workspaces:
+            - name: output
+          volumes:
+            - name: git-auth
+              secret:
+                secretName: "{{ git_auth_secret }}"
+          steps:
+            - name: clone-and-check-revision
+              image: docker.io/alpine/git:2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+              workingDir: $(workspaces.output.path)
+              env:
+                - name: REVISION
+                  value: $(params.revision)
+                - name: SOURCE_BRANCH
+                  value: $(params.source-branch)
+              volumeMounts:
+                - name: git-auth
+                  mountPath: /etc/git-auth
+                  readOnly: true
+              script: |
+                #!/bin/sh
+                set -eu
+                test "${#REVISION}" -eq 40
+                case "$REVISION" in *[!0-9a-f]*|'') exit 1 ;; esac
+                case "$SOURCE_BRANCH" in refs/tags/v*) tag="${SOURCE_BRANCH#refs/tags/}" ;; *) exit 1 ;; esac
+                case "$tag" in *[!v0-9.]*|'') exit 1 ;; esac
+                printf '%s\n' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+                cp /etc/git-auth/.gitconfig /root/.gitconfig
+                cp /etc/git-auth/.git-credentials /root/.git-credentials
+                git clone --no-checkout https://git.holdenitdown.net/rfhold/homelab-mcp.git .
+                git fetch origin refs/heads/main:refs/remotes/origin/main
+                git fetch origin "refs/tags/$tag:refs/tags/$tag"
+                test "$(git rev-parse "refs/tags/$tag^{commit}")" = "$REVISION"
+                git checkout --detach "$REVISION"
+                test "$(git rev-parse HEAD)" = "$REVISION"
+        params:
+          - name: revision
+            value: $(params.revision)
+          - name: source-branch
+            value: $(params.source-branch)
+        workspaces:
+          - name: output
+            workspace: source
+
+      - name: validate-release
+        runAfter: [fetch-repository]
+        taskSpec:
+          params:
+            - name: revision
+              type: string
+            - name: source-branch
+              type: string
+          results:
+            - name: tag
+              type: string
+          workspaces:
+            - name: source
+          volumes:
+            - name: trusted-signers
+              secret:
+                secretName: homelab-mcp-release-trusted-signers
+          steps:
+            - name: policy
+              image: docker.io/alpine/git:2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+              workingDir: $(workspaces.source.path)
+              env:
+                - name: REVISION
+                  value: $(params.revision)
+                - name: SOURCE_BRANCH
+                  value: $(params.source-branch)
+              volumeMounts:
+                - name: trusted-signers
+                  mountPath: /etc/release-signers
+                  readOnly: true
+              script: |
+                #!/bin/sh
+                set -eu
+                test "${#REVISION}" -eq 40
+                case "$REVISION" in *[!0-9a-f]*|'') exit 1 ;; esac
+                case "$SOURCE_BRANCH" in refs/tags/v*) tag="${SOURCE_BRANCH#refs/tags/}" ;; *) exit 1 ;; esac
+                case "$tag" in *[!v0-9.]*|'') exit 1 ;; esac
+                printf '%s\n' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+                test "$(git cat-file -t "refs/tags/$tag")" = tag
+                export GNUPGHOME=/tmp/release-gnupg
+                install -d -m 700 "$GNUPGHOME"
+                gpg --batch --no-autostart --import /etc/release-signers/signing-key.asc
+                git -c gpg.format=openpgp -c gpg.program=gpg verify-tag "$tag"
+                test "$(git rev-parse "refs/tags/$tag^{commit}")" = "$REVISION"
+                test "$(git rev-parse HEAD)" = "$REVISION"
+                git merge-base --is-ancestor "$REVISION" refs/remotes/origin/main
+                version="${tag#v}"
+                awk -v expected="$version" '
+                  /^\[/ { in_package = ($0 == "[package]"); next }
+                  in_package && /^version[[:space:]]*=/ {
+                    count++
+                    if ($0 != "version = \"" expected "\"") exit 1
+                  }
+                  END { if (count != 1) exit 1 }
+                ' Cargo.toml
+                printf '%s' "$tag" > "$(results.tag.path)"
+        params:
+          - name: revision
+            value: $(params.revision)
+          - name: source-branch
+            value: $(params.source-branch)
+        workspaces:
+          - name: source
+            workspace: source
+
+      - name: scan-private-material
+        runAfter: [fetch-repository]
+        taskSpec:
+          workspaces:
+            - name: source
+          steps:
+            - name: scan
+              image: docker.io/alpine/git:2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+              workingDir: $(workspaces.source.path)
+              script: |
+                #!/bin/sh
+                set -eu
+                if git grep -q -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}' -- infra/pulumi Dockerfile .dockerignore .tekton Cargo.toml Cargo.lock src migrations pyproject.toml uv.lock deploys '*.py'; then
+                  echo "private credential material is tracked in deployment inputs" >&2
+                  exit 1
+                else
+                  status=$?
+                  test "$status" -eq 1
+                fi
+        workspaces:
+          - name: source
+            workspace: source
+
+      - name: promote-release
+        runAfter: [validate-release, scan-private-material]
+        taskSpec:
+          params:
+            - name: revision
+              type: string
+            - name: release-tag
+              type: string
+          results:
+            - name: image
+              type: string
+          volumes:
+            - name: crane-tool
+              emptyDir: {}
+          steps:
+            - name: stage-crane
+              image: gcr.io/go-containerregistry/crane:debug@sha256:54b27703e6c602fbd6f95712910e9c8d45d4361a59274bde38aeec943734e424
+              volumeMounts:
+                - { name: crane-tool, mountPath: /tools }
+              script: |
+                #!/busybox/sh
+                set -eu
+                cp /ko-app/crane /tools/crane
+            - name: verify-and-promote
+              image: cr.holdenitdown.net/rfhold/general-ci@sha256:6943f91d774980357b24730a14ac4b026325d50962df4b2e15e24c3f43190e5b
+              volumeMounts:
+                - { name: crane-tool, mountPath: /tools, readOnly: true }
+              env:
+                - name: REVISION
+                  value: $(params.revision)
+                - name: RELEASE_TAG
+                  value: $(params.release-tag)
+              script: |
+                #!/bin/sh
+                set -eu
+                export PATH="/tools:$PATH"
+                test "${#REVISION}" -eq 40
+                case "$REVISION" in *[!0-9a-f]*|'') exit 1 ;; esac
+                case "$RELEASE_TAG" in *[!v0-9.]*|'') exit 1 ;; esac
+                printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+                crane version
+                app=cr.holdenitdown.net/rfhold/homelab-mcp
+                digest="$(crane digest "$app:preview-$REVISION")"
+                printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+                image="$app@$digest"
+                manifest="$(crane manifest "$image")"
+                for arch in amd64 arm64; do
+                  printf '%s' "$manifest" | jq -e -s --arg arch "$arch" '
+                    length == 1 and (.[0] |
+                      (.mediaType == "application/vnd.oci.image.index.v1+json" or
+                       .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json") and
+                      (.manifests | type == "array") and
+                      any(.manifests[]; .platform.os == "linux" and .platform.architecture == $arch))
+                  ' > /dev/null
+                  config="$(crane config --platform "linux/$arch" "$image")"
+                  printf '%s' "$config" | jq -e -s --arg arch "$arch" --arg revision "$REVISION" '
+                    length == 1 and (.[0] |
+                      .os == "linux" and .architecture == $arch and
+                      .config.User == "65532:65532" and
+                      .config.Labels["org.opencontainers.image.revision"] == $revision)
+                  ' > /dev/null
+                done
+                release="$app:$RELEASE_TAG"
+                if existing="$(crane digest "$release" 2>&1)"; then
+                  test "$existing" = "$digest"
+                else
+                  # Only a registry's explicit missing-manifest response permits creation.
+                  case "$existing" in
+                    *MANIFEST_UNKNOWN*) ;;
+                    *) printf '%s\n' "$existing" >&2; exit 1 ;;
+                  esac
+                  crane copy "$image" "$release"
+                fi
+                test "$(crane digest "$release")" = "$digest"
+                printf '%s' "$image" > "$(results.image.path)"
+        params:
+          - name: revision
+            value: $(params.revision)
+          - name: release-tag
+            value: $(tasks.validate-release.results.tag)
+
+      - name: deploy-production
+        runAfter: [promote-release]
+        taskSpec:
+          params:
+            - name: image
+              type: string
+          workspaces:
+            - name: source
+          volumes:
+            - name: kubeconfig
+              secret:
+                secretName: tekton-cluster-kubeconfig
+          steps:
+            - name: apply-production
+              image: cr.holdenitdown.net/rfhold/general-ci@sha256:6943f91d774980357b24730a14ac4b026325d50962df4b2e15e24c3f43190e5b
+              imagePullPolicy: Always
+              workingDir: $(workspaces.source.path)/infra/pulumi
+              env:
+                - name: KUBECONFIG
+                  value: /etc/kubeconfig/kubeconfig
+                - name: PULUMI_HOME
+                  value: /tmp/pulumi-home
+                - name: APP_IMAGE
+                  value: $(params.image)
+                - name: GRAFANA_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: grafana-credentials
+                      key: GRAFANA_URL
+                - name: GRAFANA_AUTH
+                  valueFrom:
+                    secretKeyRef:
+                      name: grafana-credentials
+                      key: GRAFANA_TOKEN
+              envFrom:
+                - secretRef:
+                    name: pulumi-credentials
+                - secretRef:
+                    name: authentik-credentials
+              volumeMounts:
+                - name: kubeconfig
+                  mountPath: /etc/kubeconfig
+                  readOnly: true
+              script: |
+                #!/bin/sh
+                set -eu
+                printf '%s\n' "$APP_IMAGE" | grep -Eq '^cr\.holdenitdown\.net/rfhold/homelab-mcp@sha256:[0-9a-f]{64}$'
+                test "$(bun --version)" = "1.3.5"
+                test "$(pulumi version)" = "v3.253.0"
+                bun install --frozen-lockfile
+                pulumi up --stack prod --yes --skip-preview --config "image=$APP_IMAGE"
+        params:
+          - name: image
+            value: $(tasks.promote-release.results.image)
+        workspaces:
+          - name: source
+            workspace: source
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteMany]
+          storageClassName: shared-fs
+          resources:
+            requests:
+              storage: 20Gi
