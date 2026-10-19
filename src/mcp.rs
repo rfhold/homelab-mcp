@@ -1772,14 +1772,31 @@ mod tests {
     }
 
     fn action_schemas(tool: &Value) -> Vec<Value> {
-        let schema = &tool["inputSchema"]["properties"];
-        let actions = schema["action"]["enum"].as_array().unwrap();
-        let inputs = schema["input"]["oneOf"].as_array().unwrap();
-        assert_eq!(actions.len(), inputs.len());
+        let schema = &tool["inputSchema"];
+        let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
+        let inputs = schema["properties"]["input"]["anyOf"].as_array().unwrap();
+        let branches = schema["oneOf"].as_array().unwrap();
+        assert_eq!(actions.len(), branches.len());
+        assert_eq!(inputs.len(), branches.len());
+        assert!(schema["properties"]["input"].get("oneOf").is_none());
         actions
             .iter()
-            .zip(inputs)
-            .map(|(action, input)| json!({"action":action,"input_schema":input}))
+            .map(|action| {
+                let matches = branches
+                    .iter()
+                    .filter(|branch| branch["properties"]["action"]["const"] == *action)
+                    .collect::<Vec<_>>();
+                assert_eq!(matches.len(), 1, "unique branch for {action}");
+                let branch = matches[0];
+                assert_eq!(branch["type"], "object");
+                assert_eq!(branch["required"], json!(["action", "input"]));
+                let constraints = branch["properties"]["input"]["allOf"].as_array().unwrap();
+                assert_eq!(constraints.len(), 2);
+                assert_eq!(constraints[1], json!({"not":{"type":"null"}}));
+                let input = &constraints[0];
+                assert!(inputs.contains(input), "discovery input for {action}");
+                json!({"action":action,"input_schema":input})
+            })
             .collect()
     }
 

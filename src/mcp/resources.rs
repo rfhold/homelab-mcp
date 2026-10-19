@@ -78,7 +78,7 @@ impl ServerHandler for ResourceHandler {
         Some(Arc::clone(&self.0.catalog))
     }
     fn server_info(&self) -> ServerInfo {
-        ServerInfo::new("homelab-mcp", "0.2.0")
+        ServerInfo::new("homelab-mcp", "0.2.1")
             .with_description("Authenticated homelab resources and operations.")
     }
     fn capabilities(&self) -> ServerCapabilities {
