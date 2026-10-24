@@ -22,7 +22,7 @@ Assets are under `src`, which the Docker build copies and `.dockerignore` does n
 
 Skill discovery and content are guidance, not operational approval. The user's initial investigation intent permits bounded reads and discovery only. Consequential changes require an explicit decision naming exact objects and requested parameters. Skills distinguish resource discovery and live query tools from create, execute, and destroy actions. They forbid automatic mutation retries and require inspection when an outcome is unknown. They omit live service URLs, credentials, public host keys, inventories, and local bootstrap commands.
 
-The existing global required scope set remains `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. The same transport authorization and Origin checks protect tools, skill discovery, and catalog resource reads. Kuri requires the entire set globally; this application does not enforce scopes per tool or action. Skill instructions do not repair or replace that limitation. Existing tool annotations, backend retry/error policies, hosted authorization, and deployed environments are unchanged.
+The existing global required scope set remains `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. The same transport authorization and Origin checks protect tools, skill discovery, and catalog resource reads. Waltr requires the entire set globally; this application does not enforce scopes per tool or action. Skill instructions do not repair or replace that limitation. Existing tool annotations, backend retry/error policies, hosted authorization, and deployed environments are unchanged.
 
 ## Coverage
 

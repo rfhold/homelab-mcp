@@ -14,7 +14,7 @@
 
 - Read [docs/README.md](docs/README.md) before work in this repository.
 - Preview runs the OAuth/MCP runtime; distinguish verified basic endpoints from the unverified full browser OAuth and Grafana flow.
-- Keep the Kuri `mcp` dependency pinned to a reviewed immutable Git revision before delivery.
+- Keep Waltr `mcp` on stable tag `v0.3.1`; verify lockfile SHA `8dd2a558be902d976d1d6ed34b389afd37fc2a08` before delivery.
 - Preview resources exist; production declarations remain unapplied.
 - Use Rust 1.96 or the documented container fallback for Rust commands.
 - Use `agentic-documentation` for documentation or `AGENTS.md` changes.

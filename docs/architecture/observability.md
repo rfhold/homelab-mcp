@@ -2,7 +2,7 @@
 
 ## Scope
 
-The runtime emits correlated traces, metrics, JSON logs, and CPU profiles. The host instruments non-probe HTTP traffic and Grafana-upstream operations. Kuri generic MCP owns standard MCP request instrumentation. Tekton actions currently receive host and generic MCP instrumentation; integration-specific upstream telemetry remains pending.
+The runtime emits correlated traces, metrics, JSON logs, and CPU profiles. The host instruments non-probe HTTP traffic and Grafana-upstream operations. Waltr generic MCP owns standard MCP request instrumentation. Tekton actions currently receive host and generic MCP instrumentation; integration-specific upstream telemetry remains pending.
 
 ## Signal Paths
 
@@ -50,14 +50,14 @@ OpenTelemetry trace admission is fixed. It accepts `ERROR`, `WARN`, and `INFO` s
 | `http.server.request.count` | count | `http.request.method`, `http.route`, `http.outcome`, plus `http.response.status_code` when a response exists |
 | `http.server.active_requests` | count | `http.request.method`, `http.route` |
 | `http.server.request.duration` | seconds | Same attributes as `http.server.request.count` |
-| `mcp.server.request.count` | count | Protocol request identity and bounded outcome attributes owned by Kuri generic MCP |
+| `mcp.server.request.count` | count | Protocol request identity and bounded outcome attributes owned by Waltr generic MCP |
 | `mcp.server.request.duration` | seconds | Same protocol and outcome attributes as the generic MCP request count |
-| `mcp.server.request.in_flight` | count | Protocol request identity attributes owned by Kuri generic MCP |
+| `mcp.server.request.in_flight` | count | Protocol request identity attributes owned by Waltr generic MCP |
 | `homelab_mcp.grafana.upstream.requests` | count | `action`, `mode`, `datasource_uid`, `outcome` |
 | `homelab_mcp.grafana.upstream.duration` | seconds | Same attributes as upstream requests |
 | `homelab_mcp.grafana.upstream.in_flight` | count | `action`, `mode`, `datasource_uid` |
 
-The pinned Kuri generic MCP revision provides the MCP metrics. Homelab does not provide substitute MCP action spans or metrics.
+The pinned Waltr generic MCP revision provides the MCP metrics. Homelab does not provide substitute MCP action spans or metrics.
 
 HTTP route values use matched templates or bounded fallback classes. Action, mode, datasource, and outcome values pass through fixed allowlists. Dashboard inventory uses actions `dashboard.list` and `dashboard.get`, destination `grafana_dashboards`, and modes `list` and `get`. Rendering uses actions `dashboard` and `panel`, mode `render`, destination `grafana_rendering`, and outcomes `render_rejected` and `render_invalid_response`. Alerting uses actions `alert-rule.list`, `recording-rule.list`, `alert-instance.list`, `silence.list`, and `silence.create`; list and create modes; and destination `grafana_alerting`. Probe routes are intentionally absent from all HTTP request telemetry.
 

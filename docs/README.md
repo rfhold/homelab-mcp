@@ -17,7 +17,7 @@ This index routes readers to the implemented preview runtime, deployment status,
 
 The repository implements hosted OAuth, authenticated `/mcp`, integration tools, machine inventory, and fixed deploy execution. Deploy and OpenBao behavior has local and declaration evidence only; no live machine deploy occurred.
 
-The current global `/mcp` scope set is `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. Kuri requires the entire set for every tool and does not enforce scopes per tool or action. This wiring is locally tested but not deployed or verified through a browser flow.
+The current global `/mcp` scope set is `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. Waltr requires the entire set for every tool and does not enforce scopes per tool or action. This wiring is locally tested but not deployed or verified through a browser flow.
 
 The worktree implements the Ceph Dashboard runtime, MCP tools and tests, and preview-only Pulumi declarations. It adds no per-tool OAuth enforcement: every principal authorized for `/mcp` receives both Ceph query and exec authority. Local Rust and Pulumi checks pass. An authorized targeted preview apply seeded four Stashes from shared Dashboard administrator credentials without updating the application Secret or Deployment. No Dashboard account creation, authenticated Ceph call, live mutation, or preview rollout has occurred.
 

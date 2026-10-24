@@ -1,6 +1,6 @@
 [package]
 name = "homelab-mcp"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.96"
 
@@ -12,7 +12,7 @@ chrono-tz = "0.10.4"
 getrandom = "0.4.3"
 http = "1.4.0"
 libc = "0.2.183"
-mcp = { git = "https://git.holdenitdown.net/rfhold/kuri.git", rev = "18128ee24cfa00f1fb5bf10d6aa1859253a9a708", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }
+mcp = { git = "https://git.holdenitdown.net/rfhold/waltr.git", tag = "v0.3.1", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }

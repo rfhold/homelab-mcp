@@ -28,6 +28,8 @@ For example, read `homelab://grafana/dashboards?input=%7B%22limit%22%3A1%7D&filt
 
 `tools/list` advertises exactly four tools and 46 actions. Every tool accepts `action`, typed action-specific `input`, and optional jq-compatible `filter`. Public action names include a domain prefix. No editable source text is exposed, so there is no `edit` tool; structured machine fields and operational commands are not document edits.
 
+Waltr v0.3.1 advertises the input alternatives under `properties.input.anyOf`. Request-level `oneOf` branches correlate each action constant with its input schema and require input for typed actions.
+
 | Tool | Annotations |
 | --- | --- |
 | `query` | Read-only, non-destructive, idempotent, open-world. |

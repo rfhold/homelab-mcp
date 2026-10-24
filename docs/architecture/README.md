@@ -1,6 +1,6 @@
 # Architecture
 
-These documents define the system boundary and access model. The implementation passes local tests against a reviewed immutable Kuri Git revision.
+These documents define the system boundary and access model. The source uses Waltr stable tag `v0.3.1` at lockfile revision `8dd2a558be902d976d1d6ed34b389afd37fc2a08`.
 
 Preview runs commit `798dd92`. Basic runtime and discovery boundaries are verified. Authenticated rule-list evidence covers one successful alert-rule call and one failed recording-rule call. The approved Grafana normalization fixes, Tekton, and Kubernetes changes remain undeployed. Full browser OAuth, other authenticated MCP and Grafana behavior, effective Kubernetes RBAC, rendering, silence creation, and permission operation remain unverified. Production remains excluded.
 

@@ -2,13 +2,13 @@
 
 ## Status
 
-The repository runtime has 233 passing Rust tests under Rust 1.96: 231 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, integrations, inventory, deploys, and cleanup control.
+Historical runtime evidence records 233 passing Rust tests under Rust 1.96: 231 library tests and two binary tests. It covers local units and in-process/mock HTTP behavior for configuration, OIDC integration, MCP tool dispatch, integrations, inventory, deploys, and cleanup control.
 
-These checks use the exact reviewed Kuri Git pin. Preview runs the authenticated runtime.
+These checks target Waltr stable tag `v0.3.1`, locked to `8dd2a558be902d976d1d6ed34b389afd37fc2a08`. Preview evidence below predates this local dependency migration.
 
-Rust 1.95 cannot run the suite because the manifest and Kuri crates require Rust 1.96.
+Rust 1.95 cannot run the suite because the manifest and Waltr crates require Rust 1.96.
 
-Pulumi has 26 passing mock tests for the declared runtime and deployment contract. The current container built and deployed successfully to preview; later integration and deploy worktree revisions have not been deployed.
+Historical Pulumi evidence records 26 passing mock tests for the declared runtime and deployment contract. The earlier container built and deployed successfully to preview; later integration and deploy worktree revisions have not been deployed.
 
 The preview workflow completed successfully and applied commit `798dd92`.
 
@@ -23,9 +23,9 @@ cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
 cargo +1.96.0 test --locked --all-features
 ```
 
-Coordinator evidence records 111 passing standard tests for Kuri `mcp` with all features. Both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly.
+Historical coordinator evidence records 111 passing standard tests for Kuri `mcp` with all features at `8193f120e5581ae0c46eaf9e1ce69a10a7b0b875`. That evidence also records passes for both normally ignored Docker-backed PostgreSQL tests under explicit invocation.
 
-The Docker runtime build and Tekton image-build tasks can resolve the reviewed Git pin. Rust tests run directly through Cargo rather than through a Docker target or a dedicated Tekton test task.
+Historical Docker runtime and Tekton image-build evidence covers the earlier reviewed Kuri Git pin, not the Waltr source. Rust tests run directly through Cargo rather than through a Docker target or a dedicated Tekton test task.
 
 Run Pulumi checks from the repository root:
 
@@ -52,8 +52,8 @@ Do not use the old standalone `docker run` smoke sequence for the new binary. St
 
 | Layer | Implemented coverage |
 | --- | --- |
-| Rust local suite | The library and binary tests pass with `cargo +1.96.0 test --locked --all-features`; no tests are ignored. |
-| Generic Kuri `mcp` | 111 standard all-feature tests pass; both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly. |
+| Historical Rust local suite | The library and binary tests passed with `cargo +1.96.0 test --locked --all-features`; no tests were ignored. |
+| Historical generic Kuri `mcp` (`8193f120e5581ae0c46eaf9e1ce69a10a7b0b875`) | 111 standard all-feature tests pass; both normally ignored Docker-backed PostgreSQL tests also pass when run explicitly. |
 | Configuration and host | Keyring parsing, secure Grafana origin validation, and health/readiness state behavior. |
 | Generic OIDC integration | Strict callback use, hosted continuation, and stable issuer-plus-subject mapping through generic seams. |
 | OAuth/MCP | Exact consent, generic hosted-authorization challenge behavior, protocol discovery, four-tool and resource-catalog listing and annotations, MCP Skills, filters, image content parsing, calls, and safe JSON-RPC/tool-error boundaries. |
@@ -136,7 +136,7 @@ Dashboard and render tests additionally cover:
 - `dashboard.list` and `dashboard.get` schemas, exact routes, deterministic query order, bounded normalization, recursive panel flattening, numeric and string panel IDs, strict variable/panel/output caps, and omission of raw dashboard internals;
 - `query` actions `grafana.render.dashboard` and `grafana.render.panel`, slugless routes, server-owned parameters, render-only capacity, complete timeout, and permit release;
 - exact status mapping, PNG MIME parameters, streaming size and signature validation, body-read safety, lowercase SHA-256, redacted image `Debug`, and standard-padded Base64;
-- text plus typed MCP image parsing through the pinned Kuri revision, structured metadata omissions, and filters that preserve image content; and
+- text plus typed MCP image parsing through the pinned Waltr revision, structured metadata omissions, and filters that preserve image content; and
 - fixed render telemetry labels excluding UIDs, panel IDs, ranges, dimensions, timezones, variables, digests, URLs, bodies, images, and credentials.
 
 Alerting tests must additionally cover:
@@ -204,7 +204,7 @@ The [Kubernetes tool specifications](../kubernetes/README.md) define locally imp
 Tests must cover:
 
 - MCP Skills, typed action schemas, optional jq-compatible filters, action separation, and exact MCP annotations;
-- the global `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` requirement for `/mcp`, automatic Kuri requests, and historical-grant reauthorization;
+- the global `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` requirement for `/mcp`, automatic Waltr requests, and historical-grant reauthorization;
 - proof that the entire global scope set gates every tool and does not enforce per-action access;
 - a unique one-through-32 cluster catalog, exact cluster selection, and initial Pantheon and Romulus entries;
 - rejection of caller-controlled executables, kubeconfigs, contexts, API servers, arguments, verbs, resources, API paths, selectors, and output templates;

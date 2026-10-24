@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "homelab-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64",
@@ -1702,8 +1702,8 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp"
-version = "0.2.0"
-source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=18128ee24cfa00f1fb5bf10d6aa1859253a9a708#18128ee24cfa00f1fb5bf10d6aa1859253a9a708"
+version = "0.3.0"
+source = "git+https://git.holdenitdown.net/rfhold/waltr.git?tag=v0.3.1#8dd2a558be902d976d1d6ed34b389afd37fc2a08"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -1737,8 +1737,8 @@ dependencies = [
 
 [[package]]
 name = "mcp-macros"
-version = "0.2.0"
-source = "git+https://git.holdenitdown.net/rfhold/kuri.git?rev=18128ee24cfa00f1fb5bf10d6aa1859253a9a708#18128ee24cfa00f1fb5bf10d6aa1859253a9a708"
+version = "0.3.0"
+source = "git+https://git.holdenitdown.net/rfhold/waltr.git?tag=v0.3.1#8dd2a558be902d976d1d6ed34b389afd37fc2a08"
 dependencies = [
  "proc-macro2",
  "quote",

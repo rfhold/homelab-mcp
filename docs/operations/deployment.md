@@ -8,7 +8,7 @@ Pulumi has applied commit `798dd92` to preview. The approved recording-label and
 
 The deployed preview serves health, readiness, hosted OAuth/OIDC routes, authenticated `/mcp`, PostgreSQL-backed runtime state, and the Grafana adapter.
 
-The repository implements the OAuth and LogQL contracts at a reviewed immutable Kuri Git revision.
+The repository implements the OAuth and LogQL contracts with Waltr stable tag `v0.3.1`, locked to `8dd2a558be902d976d1d6ed34b389afd37fc2a08`.
 
 The preview workflow deployed commit `798dd92` successfully.
 
@@ -51,7 +51,7 @@ The runtime contains Python 3.13, uv, the locked pyinfra environment, OpenSSH cl
 
 The image includes OCI source and revision labels. It has no Docker `HEALTHCHECK`; Kubernetes owns health checks.
 
-Cargo uses CLI Git for the private Kuri dependency. The release build stages retain BuildKit secret mounts and architecture-specific caches.
+Cargo uses CLI Git for the private Waltr dependency. The release build stages retain BuildKit secret mounts and architecture-specific caches.
 
 ## Credential Boundaries
 
@@ -193,7 +193,7 @@ The preview runtime targets stateless MCP Streamable HTTP revision `2026-07-28` 
 
 It requires locally issued tokens with `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. It configures DCR, CIMD, and native loopback clients through PostgreSQL-backed OAuth state.
 
-Generic Kuri owns strict OIDC login, callback, one-shot transaction state, ID-token verification, the mapper seam, and hosted continuation. Homelab supplies Authentik configuration and stable issuer-plus-subject mapping.
+Generic Waltr owns strict OIDC login, callback, one-shot transaction state, ID-token verification, the mapper seam, and hosted continuation. Homelab supplies Authentik configuration and stable issuer-plus-subject mapping.
 
 The current local interface serves Grafana definitions as resources, live queries and rendering through `query`, and silence creation through `create`; see the [uniform MCP interface](../architecture/mcp-interface.md). The complete eight-scope global set gates all resources and tools; no Grafana-specific scope is enforced per action. Integration limits, results, and errors remain in the [Grafana query](../grafana-query/README.md) and [render](../grafana-render/README.md) specifications. Preview commit `798dd92` retains its historical interface and authorization state.
 
@@ -207,7 +207,7 @@ Tekton maps a Grafana bootstrap credential that can create the declared service 
 
 BuildKit receives private Git credentials through secure secret mounts. The build must not copy those credentials into image layers or logs.
 
-The Cargo project resolves the private Kuri dependency from its exact reviewed Git revision recorded in the lockfile.
+The Cargo project resolves the private Waltr dependency from its exact reviewed Git revision recorded in the lockfile.
 
 ## Availability and Data
 

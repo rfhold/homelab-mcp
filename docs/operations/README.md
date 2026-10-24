@@ -2,7 +2,7 @@
 
 These documents describe deployment declarations and pipeline behavior. Preview runs the authenticated OAuth/MCP runtime.
 
-The runtime uses the reviewed immutable Kuri Git revision, and the container and pipeline declarations can resolve it. A signed stable-tag pipeline declares digest-only production promotion from existing preview artifacts. Production remains unapplied with zero resources; release execution and credentials require separate authority.
+The source uses Waltr stable tag `v0.3.1` at lockfile revision `8dd2a558be902d976d1d6ed34b389afd37fc2a08`. Container and pipeline declarations retain private Git credential support. A signed stable-tag pipeline declares digest-only production promotion from existing preview artifacts. Production remains unapplied with zero resources; release execution and credentials require separate authority.
 
 | Document | Covers |
 | --- | --- |

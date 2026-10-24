@@ -14,7 +14,7 @@ The implementation uses fixed `kubectl` command construction. No interface expos
 
 ## Authorization
 
-The `/mcp` protected resource requires the exact global OAuth set: `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. Kuri requests all eight scopes automatically during authorization.
+The `/mcp` protected resource requires the exact global OAuth set: `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`. Waltr requests all eight scopes automatically during authorization.
 
 The entire set gates the complete `/mcp` resource. It does not enforce permissions per tool or action. Every authorized MCP principal can use Kubernetes resources and tools and all other MCP tools.
 

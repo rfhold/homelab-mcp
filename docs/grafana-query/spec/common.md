@@ -85,7 +85,7 @@ All semantic messages omit matchers, comments, alert data, credentials, URLs, re
 
 ## Observability
 
-Kuri generic MCP owns standard request spans and metrics. Homelab records only bounded Grafana-upstream attributes on `grafana.query` spans and request, duration, and in-flight metrics.
+Waltr generic MCP owns standard request spans and metrics. Homelab records only bounded Grafana-upstream attributes on `grafana.query` spans and request, duration, and in-flight metrics.
 
 Dashboard inventory adds fixed actions `dashboard.list` and `dashboard.get`, modes `list` and `get`, and destination `grafana_dashboards`. Rendering uses fixed actions `dashboard` and `panel`, mode `render`, destination `grafana_rendering`, and outcomes `render_rejected` and `render_invalid_response`. Alerting includes fixed action `recording-rule.list`, mode `list`, and destination `grafana_alerting`. Telemetry never emits UIDs, panel IDs, ranges, timezones, dimensions, variables, digests, images, matchers, comments, alert or recording-rule data, URLs, credentials, query data, or upstream bodies.
 

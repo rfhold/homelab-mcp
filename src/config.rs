@@ -683,14 +683,14 @@ mod tests {
 
     #[test]
     fn trusted_cimd_origins_require_exact_https_origins() {
-        for value in ["https://kuri.example/", "https://kuri.example:8443/"] {
+        for value in ["https://waltr.example/", "https://waltr.example:8443/"] {
             assert!(secure_origin("OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS", value).is_ok());
         }
         for value in [
-            "http://kuri.example/",
-            "https://user@kuri.example/",
-            "https://kuri.example/client",
-            "https://kuri.example/?tenant=private",
+            "http://waltr.example/",
+            "https://user@waltr.example/",
+            "https://waltr.example/client",
+            "https://waltr.example/?tenant=private",
         ] {
             assert_eq!(
                 secure_origin("OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS", value).unwrap_err(),

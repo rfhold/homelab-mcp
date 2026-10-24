@@ -94,7 +94,7 @@ before(async () => {
     "homelab-mcp:mcpOAuthRefreshFamilyTtl": "2592000",
     "homelab-mcp:mcpOAuthCodeTtl": "300",
     "homelab-mcp:mcpOAuthCimdTrustedPrivateOrigins":
-      '["https://kuri.internal.example"]',
+      '["https://waltr.internal.example"]',
     "homelab-mcp:mcpOAuthWrappingKeyVersions": '["v1"]',
     "homelab-mcp:mcpOAuthActiveWrappingKeyVersion": "v1",
     "homelab-mcp:openbaoEnabled": "true",
@@ -353,6 +353,19 @@ describe("configuration policy", () => {
     }
   });
 
+  test("trusts only the environment-specific Waltr private CIMD origin", () => {
+    for (const [stack, origin] of [
+      ["preview", "https://preview-waltr.holdenitdown.net"],
+      ["prod", "https://waltr.holdenitdown.net"],
+    ] as const) {
+      const declaration = stackFile(stack);
+      const keys = declaration.match(/^  homelab-mcp:mcpOAuthCimdTrustedPrivateOrigins:.*$/gm);
+      assert.deepEqual(keys, ["  homelab-mcp:mcpOAuthCimdTrustedPrivateOrigins:"]);
+      const origins = declaration.match(/^  homelab-mcp:mcpOAuthCimdTrustedPrivateOrigins:\n((?:    .+\n)*)/m);
+      assert.equal(origins?.[1], `    - ${origin}\n`);
+    }
+  });
+
   test("defines preview and production targets without images or secrets", () => {
     const preview = stackFile("preview");
     const production = stackFile("prod");
@@ -604,7 +617,7 @@ describe("standalone resource topology", () => {
     assert.equal(app.HOMELAB_MCP_OAUTH_ACCESS_TOKEN_TTL, "259200");
     assert.equal(
       app.HOMELAB_MCP_OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS,
-      "https://kuri.internal.example",
+      "https://waltr.internal.example",
     );
     assert.equal(app.HOMELAB_MCP_OAUTH_ALLOW_LOOPBACK_REDIRECTS, "true");
     assert.equal(

@@ -6,7 +6,7 @@ This document defines the implemented hosted OAuth contract. Local tests cover s
 
 The service uses generic MCP-owned OIDC resource-owner support and PostgreSQL state. Generic migration V4 adds one-shot OIDC attempts and replaces the removed browser-state migration.
 
-Preview runs the service at the reviewed immutable Kuri Git revision. Startup and readiness verify live PostgreSQL and signing-key access, and OIDC discovery succeeds at startup. Browser login, code/token exchange, refresh, and authenticated MCP calls remain unverified. Production remains excluded.
+Historical preview evidence uses the Kuri Git pin `8193f120e5581ae0c46eaf9e1ce69a10a7b0b875`, not the current local Waltr dependency. Startup and readiness verified live PostgreSQL and signing-key access; OIDC discovery succeeded at startup. Browser login, code/token exchange, refresh, and authenticated MCP calls remain unverified. Production remains excluded.
 
 ## Protocol Boundary
 
@@ -18,7 +18,7 @@ Each `/mcp` request stands alone after token validation. The service requires no
 
 Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain the exact global scope set: `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`.
 
-The global set gates every implemented tool, including Grafana, Tekton, Kubernetes, Ceph, machines, and deploys. Kuri requests all eight scopes automatically. It does not enforce access per tool or action.
+The global set gates every implemented tool, including Grafana, Tekton, Kubernetes, Ceph, machines, and deploys. Waltr requests all eight scopes automatically. It does not enforce access per tool or action.
 
 The lack of per-tool enforcement means every authenticated MCP principal receives Ceph OSD mark, reweight, scrub, destroy, and purge authority. Preview also uses each cluster's shared Dashboard administrator credential under an explicit exception. Dedicated least-privilege accounts and explicit authorization review remain production gates.
 
@@ -31,7 +31,7 @@ Authentik provides browser identity only. Authentik access tokens, ID tokens, an
 | Actor | Role |
 | --- | --- |
 | MCP client | Discover metadata, identify or register itself, complete authorization, and call `/mcp`. |
-| Generic Kuri `mcp` | Host OAuth metadata, OIDC resource-owner flow, token issuance, token validation, continuation, and durable OAuth state. |
+| Generic Waltr `mcp` | Host OAuth metadata, OIDC resource-owner flow, token issuance, token validation, continuation, and durable OAuth state. |
 | `homelab-mcp` | Configure Authentik and map stable issuer-plus-subject identities to local principals. |
 | Authentik | Authenticate the browser user during the hosted authorization flow. |
 | PostgreSQL | Persist generic OAuth and OIDC state plus protected signing material in the `mcp` schema. |
@@ -56,13 +56,15 @@ The hosted issuer supports public MCP clients through these identification paths
 
 CIMD retrieval and DCR must preserve the hardened validation rules from the generic `mcp` crate. Redirect matching must reject open redirects and unregistered destinations.
 
+Private CIMD origins remain denied unless explicitly allowlisted. The preview stack trusts only `https://preview-waltr.holdenitdown.net`; production trusts only `https://waltr.holdenitdown.net`. These environment-specific declarations do not relax HTTPS origin validation or permit wildcard trust.
+
 Native clients from each supported identification path can use loopback HTTP redirects. The redirect host and path must match the registered value, and the runtime port can vary.
 
 Authorization Code flows must require PKCE S256. The authorization request and issued code must remain bound to the client, redirect URI, exact resource, scope, and PKCE challenge.
 
 ## OIDC Resource Owner
 
-Generic Kuri `mcp` owns the strict login and callback flow. It creates an expiring, one-shot OIDC transaction before redirecting to Authentik.
+Generic Waltr `mcp` owns the strict login and callback flow. It creates an expiring, one-shot OIDC transaction before redirecting to Authentik.
 
 The generic flow owns state, nonce, upstream PKCE, ID-token verification, the identity-mapper seam, and hosted authorization continuation.
 
@@ -76,7 +78,7 @@ The callback verifies state, nonce, PKCE, signature, issuer, audience, expiratio
 
 After successful authentication, hosted continuation approves only the configured `/mcp` resource and `Config::REQUIRED_OAUTH_SCOPES`. It rejects any different resource or scope. The exact set is `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run`.
 
-Kuri currently requires the complete set for every `/mcp` request. It does not enforce scopes per tool or action. This wiring has local test coverage but no browser or deployed verification.
+Waltr currently requires the complete set for every `/mcp` request. It does not enforce scopes per tool or action. This wiring has local test coverage but no browser or deployed verification.
 
 Authentik session lifetime does not extend local authorization codes, access tokens, refresh generations, or OIDC transactions.
 
@@ -92,7 +94,7 @@ Authentik session lifetime does not extend local authorization codes, access tok
 
 The implementation must expire durable records and reject replay even before cleanup removes old rows.
 
-The signing verification overlap, and therefore retired verification-key retention, must cover the access-token lifetime plus Kuri's policy clock skew. The service derives this overlap from the configured access-token lifetime while preserving Kuri's longer 10-minute default when it applies; the current 3-day lifetime requires at least 259230 seconds.
+The signing verification overlap, and therefore retired verification-key retention, must cover the access-token lifetime plus Waltr's policy clock skew. The service derives this overlap from the configured access-token lifetime while preserving Waltr's longer 10-minute default when it applies; the current 3-day lifetime requires at least 259230 seconds.
 
 ## Token Contract
 
@@ -110,7 +112,7 @@ OAuth authorization requests must use the exact resource. Token exchange and ref
 
 ## Durable State and Key Protection
 
-Generic Kuri migrations V1 through V3 own the hosted OAuth schema, signing keys, and client registration state. Migration V4 adds one-shot OIDC attempts with parent transaction cascades.
+Generic Waltr migrations V1 through V3 own the hosted OAuth schema, signing keys, and client registration state. Migration V4 adds one-shot OIDC attempts with parent transaction cascades.
 
 The generic dependency embeds and applies all four migrations in the `mcp` schema. No separate browser-state migration exists.
 

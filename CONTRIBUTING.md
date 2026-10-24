@@ -1,8 +1,10 @@
 # Contributing
 
-The repository implements hosted OAuth, authenticated MCP, and the progressive Grafana runtime. The generic Kuri `mcp` dependency uses a reviewed immutable Git revision.
+The repository implements hosted OAuth, authenticated MCP, and the progressive Grafana runtime. The generic Waltr `mcp` dependency uses stable tag `v0.3.1`.
 
-Preview runs this runtime and has verified health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge. Full browser OAuth and live Grafana queries remain unverified. Production remains excluded.
+Cargo locks `mcp` and `mcp-macros` version `0.3.0` from `https://git.holdenitdown.net/rfhold/waltr.git` at `8dd2a558be902d976d1d6ed34b389afd37fc2a08`.
+
+Historical preview evidence verifies health, readiness, OAuth metadata, and the unauthenticated MCP Bearer challenge. It predates this local Waltr migration. Full browser OAuth and live Grafana queries remain unverified. Production remains excluded.
 
 Use [docs/README.md](docs/README.md) to locate canonical contracts and current validation boundaries.
 
@@ -21,7 +23,7 @@ cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
 cargo +1.96.0 test --locked --all-features
 ```
 
-These commands pass against the exact Kuri Git pin.
+Historical validation: these commands passed against the Kuri Git pin `8193f120e5581ae0c46eaf9e1ce69a10a7b0b875`. That evidence does not validate Waltr.
 
 If the installed Cargo does not resolve the toolchain shorthand, use the environment-compatible form:
 

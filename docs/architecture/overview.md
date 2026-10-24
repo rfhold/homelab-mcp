@@ -26,13 +26,13 @@ The worktree also implements PostgreSQL machine inventory and a fixed uv/pyinfra
 
 `GET /health` returns unconditional process health. `GET /ready` performs bounded live PostgreSQL and signing-key-readiness checks. It does not probe Authentik or Grafana.
 
-The router merges generic OAuth and OIDC endpoints with authenticated stateless `/mcp`. Startup applies the generic Kuri migration history in schema `mcp`, including the V4 OIDC attempt table, and initializes the protected signing key.
+The router merges generic OAuth and OIDC endpoints with authenticated stateless `/mcp`. Startup applies the generic Waltr migration history in schema `mcp`, including the V4 OIDC attempt table, and initializes the protected signing key.
 
 ### MCP Service
 
 The current worktree service:
 
-- uses Kuri's generic private `mcp` crate at a reviewed immutable Git revision;
+- uses Waltr's generic private `mcp` crate at stable tag `v0.3.1`, locked to `8dd2a558be902d976d1d6ed34b389afd37fc2a08`;
 - serves MCP through Streamable HTTP revision `2026-07-28` at `/mcp`;
 - uses pinned public MCP schema and dispatch primitives for the [uniform interface](mcp-interface.md), without unpublished macro APIs;
 - starts the request-scoped `ProgressHeartbeat` guard in each integration handler;
@@ -85,7 +85,7 @@ The heartbeat supplies periodic SSE traffic while work remains active. It does n
 
 - Authentik authenticates a browser user. It does not issue tokens accepted by `/mcp`.
 - The local OAuth issuer authorizes MCP access.
-- Kuri requires `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` for every `/mcp` action. It does not enforce scopes per tool or action.
+- Waltr requires `mcp:use kubernetes:read kubernetes:write inventory:read inventory:write inventory:host-trust deploy:read deploy:run` for every `/mcp` action. It does not enforce scopes per tool or action.
 - Machine SSH host identity comes only from an exact stored Ed25519 pin. OpenBao supplies short-lived user certificates, not host trust.
 - Dedicated reduced Kubernetes ServiceAccounts enforce upstream authority independently from OAuth.
 - Preview uses each cluster's Rook-generated shared Dashboard administrator credential under an explicit exception. Dedicated least-privilege accounts remain a production gate. OAuth grants every authenticated MCP principal both Ceph query and exec authority.
