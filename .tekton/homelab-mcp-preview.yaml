@@ -3,13 +3,14 @@ kind: PipelineRun
 metadata:
   name: homelab-mcp-preview
   annotations:
+    pipelinesascode.tekton.dev/task: "[https://git.holdenitdown.net/rfhold/homelab/raw/commit/db8891ad3b9467db8ff15d80bb931e01c2af2e0d/src/components/tekton-tasks/service-build-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/db8891ad3b9467db8ff15d80bb931e01c2af2e0d/src/components/tekton-tasks/service-manifest-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/db8891ad3b9467db8ff15d80bb931e01c2af2e0d/src/components/tekton-tasks/service-pulumi-up-v1.yaml]"
     pipelinesascode.tekton.dev/on-event: "[push, incoming]"
     pipelinesascode.tekton.dev/on-target-branch: "[main]"
     pipelinesascode.tekton.dev/max-keep-runs: "2"
 spec:
   taskRunSpecs:
     - pipelineTaskName: deploy-preview
-      taskServiceAccountName: openbao-pulumi-admin-v1
+      serviceAccountName: openbao-pulumi-admin-v1
       timeout: 25m0s
       podTemplate:
         nodeSelector:
