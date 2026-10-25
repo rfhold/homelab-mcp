@@ -20,9 +20,9 @@ spec:
     pipeline: 2h0m0s
   params:
     - name: revision
-      value: "{{ revision }}"
+      value: '{{ revision }}'
     - name: source-branch
-      value: "{{ source_branch }}"
+      value: '{{ source_branch }}'
   pipelineSpec:
     params:
       - name: revision
@@ -174,140 +174,34 @@ spec:
 
       - name: promote-release
         runAfter: [validate-release, scan-private-material]
-        taskSpec:
-          params:
-            - name: revision
-              type: string
-            - name: release-tag
-              type: string
-          results:
-            - name: image
-              type: string
-          volumes:
-            - name: crane-tool
-              emptyDir: {}
-          steps:
-            - name: stage-crane
-              image: gcr.io/go-containerregistry/crane:debug@sha256:54b27703e6c602fbd6f95712910e9c8d45d4361a59274bde38aeec943734e424
-              volumeMounts:
-                - { name: crane-tool, mountPath: /tools }
-              script: |
-                #!/busybox/sh
-                set -eu
-                cp /ko-app/crane /tools/crane
-            - name: verify-and-promote
-              image: cr.holdenitdown.net/rfhold/general-ci:latest
-              imagePullPolicy: Always
-              volumeMounts:
-                - { name: crane-tool, mountPath: /tools, readOnly: true }
-              env:
-                - name: REVISION
-                  value: $(params.revision)
-                - name: RELEASE_TAG
-                  value: $(params.release-tag)
-              script: |
-                #!/bin/sh
-                set -eu
-                export PATH="/tools:$PATH"
-                test "${#REVISION}" -eq 40
-                case "$REVISION" in *[!0-9a-f]*|'') exit 1 ;; esac
-                case "$RELEASE_TAG" in *[!v0-9.]*|'') exit 1 ;; esac
-                printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-                crane version
-                app=cr.holdenitdown.net/rfhold/homelab-mcp
-                digest="$(crane digest "$app:preview-$REVISION")"
-                printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
-                image="$app@$digest"
-                manifest="$(crane manifest "$image")"
-                for arch in amd64 arm64; do
-                  printf '%s' "$manifest" | jq -e -s --arg arch "$arch" '
-                    length == 1 and (.[0] |
-                      (.mediaType == "application/vnd.oci.image.index.v1+json" or
-                       .mediaType == "application/vnd.docker.distribution.manifest.list.v2+json") and
-                      (.manifests | type == "array") and
-                      any(.manifests[]; .platform.os == "linux" and .platform.architecture == $arch))
-                  ' > /dev/null
-                  config="$(crane config --platform "linux/$arch" "$image")"
-                  printf '%s' "$config" | jq -e -s --arg arch "$arch" --arg revision "$REVISION" '
-                    length == 1 and (.[0] |
-                      .os == "linux" and .architecture == $arch and
-                      .config.User == "65532:65532" and
-                      .config.Labels["org.opencontainers.image.revision"] == $revision)
-                  ' > /dev/null
-                done
-                release="$app:$RELEASE_TAG"
-                if existing="$(crane digest "$release" 2>&1)"; then
-                  test "$existing" = "$digest"
-                else
-                  # Only a registry's explicit missing-manifest response permits creation.
-                  case "$existing" in
-                    *MANIFEST_UNKNOWN*) ;;
-                    *) printf '%s\n' "$existing" >&2; exit 1 ;;
-                  esac
-                  crane copy "$image" "$release"
-                fi
-                test "$(crane digest "$release")" = "$digest"
-                printf '%s' "$image" > "$(results.image.path)"
+        taskRef:
+          name: service-promote-v1
         params:
           - name: revision
-            value: $(params.revision)
-          - name: release-tag
-            value: $(tasks.validate-release.results.tag)
+            value: "$(params.revision)"
+          - name: version
+            value: "$(tasks.validate-release.results.tag)"
+          - name: images
+            value: '[{"key":"image","repository":"cr.holdenitdown.net/rfhold/homelab-mcp","platforms":["amd64","arm64"],"user":"65532:65532"}]'
 
       - name: deploy-production
         runAfter: [promote-release]
-        taskSpec:
-          params:
-            - name: image
-              type: string
-          workspaces:
-            - name: source
-          volumes:
-            - name: kubeconfig
-              secret:
-                secretName: tekton-cluster-kubeconfig
-          steps:
-            - name: apply-production
-              image: cr.holdenitdown.net/rfhold/general-ci:latest
-              imagePullPolicy: Always
-              workingDir: $(workspaces.source.path)/infra/pulumi
-              env:
-                - name: KUBECONFIG
-                  value: /etc/kubeconfig/kubeconfig
-                - name: PULUMI_HOME
-                  value: /tmp/pulumi-home
-                - name: APP_IMAGE
-                  value: $(params.image)
-                - name: GRAFANA_URL
-                  valueFrom:
-                    secretKeyRef:
-                      name: grafana-credentials
-                      key: GRAFANA_URL
-                - name: GRAFANA_AUTH
-                  valueFrom:
-                    secretKeyRef:
-                      name: grafana-credentials
-                      key: GRAFANA_TOKEN
-              envFrom:
-                - secretRef:
-                    name: pulumi-credentials
-                - secretRef:
-                    name: authentik-credentials
-              volumeMounts:
-                - name: kubeconfig
-                  mountPath: /etc/kubeconfig
-                  readOnly: true
-              script: |
-                #!/bin/sh
-                set -eu
-                printf '%s\n' "$APP_IMAGE" | grep -Eq '^cr\.holdenitdown\.net/rfhold/homelab-mcp@sha256:[0-9a-f]{64}$'
-                test "$(bun --version)" = "1.3.5"
-                test "$(pulumi version)" = "v3.253.0"
-                bun install --frozen-lockfile
-                pulumi up --stack prod --yes --skip-preview --config "image=$APP_IMAGE"
+        retries: 1
+        taskRef:
+          name: service-pulumi-up-v1
         params:
-          - name: image
-            value: $(tasks.promote-release.results.image)
+          - name: source-subdir
+            value: "infra/pulumi"
+          - name: stack
+            value: "prod"
+          - name: image-config
+            value: "$(tasks.promote-release.results.images)"
+          - name: authentik-enabled
+            value: "true"
+          - name: grafana-enabled
+            value: "true"
+          - name: openbao-enabled
+            value: "false"
         workspaces:
           - name: source
             workspace: source
